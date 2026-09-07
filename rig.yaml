@@ -28,6 +28,11 @@ agent_hooks:
   enabled: true
   target: ~/.claude/hooks
   all: true
+  # Primary checkout stays on the default branch for merge/pull/read-only only; all authoring
+  # happens in a separate `git worktree add` tree. Gates worktree-only-writes (pre-write) +
+  # pin-primary-worktree (pre-bash). See rig-cli AGENTS.md "Harness workflow guards". Escape
+  # hatches: RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES / RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE.
+  worktree_only: true
 git_hooks:
   dispatcher:
     enabled: true
