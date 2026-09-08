@@ -16,3 +16,7 @@ dist/
 .codex/
 .haft/
 .serena/
+
+# Backup artifact written by `rig apply` when it overwrites a rig-managed file in place —
+# never meant to be committed.
+*.rig-bak-*
