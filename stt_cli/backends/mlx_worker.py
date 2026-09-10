@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 
@@ -126,4 +127,9 @@ def _slim(result: dict[str, Any]) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
+    # Python prepends this script's directory. Its sibling mlx.py then shadows the
+    # third-party mlx package inside mlx_whisper, failing before any model can load.
+    # The standalone worker needs no sibling imports; preserve the real package paths.
+    worker_directory = Path(__file__).resolve().parent
+    sys.path = [entry for entry in sys.path if Path(entry or ".").resolve() != worker_directory]
     raise SystemExit(main(sys.argv[1:]))
