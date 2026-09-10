@@ -4,8 +4,8 @@ on:
   pull_request:
     paths:
       - 'stt_cli/**'
-      - 'tests/test_voz.py'
-      - 'tests/test_benchmark.py'
+      - 'tests/test_voz*.py'
+      - 'tests/test_benchmark*.py'
       - 'tools/ane_probe.swift'
       - '.github/workflows/voz.yml'
   workflow_dispatch:
@@ -44,7 +44,7 @@ jobs:
       - name: Verify the native executable and run contract tests
         run: |
           uv run --extra test python -c 'from stt_cli.backends.voz import VozBackend; s=VozBackend().availability(); print(s); assert s.ok'
-          uv run --extra test pytest -q tests/test_voz.py tests/test_benchmark.py
+          uv run --extra test pytest -q tests/test_voz*.py tests/test_benchmark*.py
       - name: Real inference only when a Neural Engine is visible
         run: |
           if ! grep -q '"neural_engine":true' report/ane.json; then

@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import os
 import shutil
+import signal
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,7 @@ async def run(
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if cwd else None,
             env=merged_env,
+            start_new_session=os.name == "posix",
         )
     except FileNotFoundError as exc:
         raise MissingDependencyError(
@@ -91,7 +93,7 @@ async def run(
     try:
         out, err = await asyncio.wait_for(proc.communicate(payload), timeout=timeout)
     except TimeoutError as exc:
-        _terminate(proc)
+        _terminate_run(proc)
         await proc.communicate()
         raise ProcessTimeout(
             what=f"{Path(argv[0]).name} timed out after {timeout / 60:.0f} min",
@@ -104,7 +106,7 @@ async def run(
     except asyncio.CancelledError:
         # An outer benchmark deadline or Ctrl-C cancels communicate(), not the engine.
         # Reap the child before another trial starts, or timings include orphan work.
-        _terminate(proc)
+        _terminate_run(proc)
         await proc.communicate()
         raise
 
@@ -172,3 +174,12 @@ def _terminate(proc: asyncio.subprocess.Process) -> None:
     """Kill a child that blew its timeout, tolerating one that already exited."""
     with contextlib.suppress(ProcessLookupError):
         proc.kill()
+
+
+def _terminate_run(process: asyncio.subprocess.Process) -> None:
+    """Kill the private run() session, including workers launched by a uv wrapper."""
+    if os.name == "posix":
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    else:
+        _terminate(process)

@@ -32,7 +32,7 @@ def document():
 def wav(path, frames=16000):
     with wave.open(str(path), "wb") as audio:
         audio.setparams((1, 2, 16000, frames, "NONE", "not compressed"))
-        audio.writeframes(b"\0\0" * frames)
+        audio.writeframes(b"\1\0" * frames)
     return path
 
 

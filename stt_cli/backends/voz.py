@@ -69,7 +69,7 @@ def _arm64_macho(path: Path) -> bool:
         magic = header[:4]
         if magic in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf"):
             endian = "<" if magic == b"\xcf\xfa\xed\xfe" else ">"
-            return struct.unpack_from(endian + "I", header, 4)[0] == 0x0100000C
+            return bool(struct.unpack_from(endian + "I", header, 4)[0] == 0x0100000C)
         fats = {
             b"\xca\xfe\xba\xbe": (">", 20),
             b"\xbe\xba\xfe\xca": ("<", 20),
@@ -244,6 +244,15 @@ def _wav_duration(path: Path) -> float:
         ) from exc
 
 
+def _digital_silence(path: Path) -> bool:
+    """Exact zero PCM only: never use a loudness threshold that could erase quiet speech."""
+    with wave.open(str(path), "rb") as audio:
+        while block := audio.readframes(32768):
+            if any(block):
+                return False
+    return True
+
+
 class VozBackend:
     name = "voz"
 
@@ -364,8 +373,13 @@ class VozBackend:
         _validate_request(request)
         wav = request.wav.expanduser().resolve()
         duration = _wav_duration(wav)
-        if duration == 0:
-            self.last_metrics = {"duration_sec": 0.0, "load_sec": 0.0, "processing_sec": 0.0}
+        if duration == 0 or _digital_silence(wav):
+            self.last_metrics = {
+                "duration_sec": duration,
+                "load_sec": 0.0,
+                "processing_sec": 0.0,
+                "digital_silence_fast_path": 1.0,
+            }
             return []
         await self.ensure_model(request.model)
         assert self._binary is not None
@@ -379,6 +393,6 @@ class VozBackend:
         self.last_metrics = {
             "duration_sec": _number(document.get("durationSec"), "durationSec"),
             "load_sec": _number(document.get("loadSec"), "loadSec"),
-            "processing_sec": _number(document.get("processingSec"), "processing_sec"),
+            "processing_sec": _number(document.get("processingSec"), "processingSec"),
         }
         return segments

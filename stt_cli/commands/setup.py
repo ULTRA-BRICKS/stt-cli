@@ -31,6 +31,10 @@ PROS_CONS = {
         "and per-token confidence",
         "needs a compiled binary (brew install whisper-cpp, or build the repo yourself)",
     ),
+    "voz": (
+        "native Core ML release; no Python ML dependencies",
+        "opt-in with --backend voz; requires a known language; no Whisper prompt/context sampling",
+    ),
     "mlx": (
         "installs with uv in about a minute, no compiler; models download themselves; "
         "access to model variants with no ggml build",
@@ -60,14 +64,19 @@ def run(argv: list[str]) -> int:
     if chosen is None:
         return EXIT_MISSING_DEP
 
-    model = args.model or registry.DEFAULT_MODEL
+    supported = registry.for_engine(chosen)
+    preferred = next((m.name for m in supported if m.name == registry.DEFAULT_MODEL), None)
+    model = args.model or preferred or (supported[0].name if supported else registry.DEFAULT_MODEL)
+    registry.require_for_engine(model, chosen)
+    if not _install_model(chosen, model):
+        return EXIT_MISSING_DEP
     config.save_setting("backend", chosen)
     config.save_setting("model", model)
     print(f"\nsaved: backend={chosen}, model={model}  ({config.config_path()})")
 
-    _install_model(chosen, model)
     _report_llm()
-    print("\nReady. Try:  stt <your recording> -f txt")
+    language_hint = " -l <language-code>" if chosen == "voz" else ""
+    print(f"\nReady. Try:  stt <your recording>{language_hint} -f txt")
     return EXIT_OK
 
 
@@ -96,10 +105,10 @@ def _report(survey: list[tuple[str, backends.Availability]]) -> None:
 
 def _choose(survey: list[tuple[str, backends.Availability]], *, assume_yes: bool) -> str | None:
     """Ask which engine to use, defaulting to the best one that actually works here."""
-    usable = [name for name, status in survey if status.ok]
+    usable = [name for name, status in survey if status.ok and name in backends.AUTO_ORDER]
     if not usable:
         print(
-            "No engine is installed. The quickest route from here:\n"
+            "No automatic engine is installed. Voz requires --backend voz. Otherwise:\n"
             "  brew install whisper-cpp      (native, brings the Silero detector)\n"
             "  or: uv tool install --with mlx-whisper stt-cli",
             file=sys.stderr,
@@ -121,7 +130,7 @@ def _choose(survey: list[tuple[str, backends.Availability]], *, assume_yes: bool
     return answer
 
 
-def _install_model(backend_name: str, model: str) -> None:
+def _install_model(backend_name: str, model: str) -> bool:
     """Make sure the chosen model is actually on disk before the first real run needs it."""
     import asyncio
 
@@ -131,8 +140,10 @@ def _install_model(backend_name: str, model: str) -> None:
     try:
         asyncio.run(backend.ensure_model(model))
         print("model is ready.")
+        return True
     except MissingDependencyError as exc:
         print(f"could not prepare the model: {exc.what}\n  {exc.how}", file=sys.stderr)
+        return False
 
 
 def _report_llm() -> None:

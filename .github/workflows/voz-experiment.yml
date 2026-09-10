@@ -38,6 +38,17 @@ jobs:
           chmod +x "$binary"
           echo "STT_VOZ_BIN=$binary" >> "$GITHUB_ENV"
           "$binary" schema --json > report/schema.json
+      - name: Install and identify the CPU baseline
+        run: |
+          brew install whisper-cpp
+          brew list --versions whisper-cpp | tee report/whisper-version.txt
+          real_binary="$(command -v whisper-cli)"
+          shasum -a 256 "$real_binary" | tee report/whisper-binary-sha256.txt
+          "$real_binary" --help > report/whisper-help.txt 2>&1
+          mkdir -p "$RUNNER_TEMP/whisper-cpu/build/bin"
+          printf '#!/bin/sh\nexec "%s" --no-gpu "$@"\n' "$real_binary" > "$RUNNER_TEMP/whisper-cpu/build/bin/whisper-cli"
+          chmod +x "$RUNNER_TEMP/whisper-cpu/build/bin/whisper-cli"
+          echo "STT_WHISPERCPP_ROOT=$RUNNER_TEMP/whisper-cpu" >> "$GITHUB_ENV"
       - name: Prepare a public human-labelled corpus, never private recordings
         run: |
           brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
@@ -56,10 +67,11 @@ jobs:
         if: always()
         run: |
           mkdir -p report
-          uv run --python 3.13 --extra dev ruff check . > report/lint.txt || true
-          uv run --python 3.13 --extra dev ruff format --diff > report/format.diff || true
-          uv run --python 3.13 --extra dev mypy stt_cli > report/types.txt || true
-          tar -czf report/source.tgz stt_cli tests tools docs .github pyproject.toml conftest.py
+          uv sync --python 3.11 --extra dev
+          uv run --python 3.11 --extra dev ruff check . > report/lint.txt || true
+          uv run --python 3.11 --extra dev ruff format --diff > report/format.diff || true
+          uv run --python 3.11 --extra dev mypy stt_cli > report/types.txt || true
+          tar -czf report/source.tgz stt_cli tests tools docs .github pyproject.toml conftest.py README.md AGENTS.md
       - name: Public pilot evidence (NOT a physical-Mac Neural Engine benchmark)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

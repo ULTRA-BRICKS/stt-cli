@@ -56,7 +56,7 @@ def _pull(model: str, backend_name: str | None) -> int:
     spec = registry.get(model)
     name = backend_name or _default_engine(spec)
     backend = backends.resolve(name)
-    resources.require_space(spec.size_bytes, path=config.models_dir(), what=f"the {model} model")
+    # Each backend guards its actual cache volume; STT_HOME is not necessarily that volume.
     for warning in resources.check_memory(spec.size_bytes, model=model):
         print(f"warning: {warning}")
     asyncio.run(backend.ensure_model(model))
