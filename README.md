@@ -10,6 +10,7 @@ stt talk.mp4 -f srt -o subs/                     # subtitles, straight from a vi
 stt call.ogg -t absolute --tz Europe/Belgrade    # wall-clock timestamps
 stt meeting.m4a --fix --summary -f md            # corrected transcript + structured summary
 stt meeting.m4a --diarize -f speakers            # split into speaker turns
+stt meeting.m4a -b voz -m voz -l ru              # native Voz, explicitly selected
 ```
 
 ## Install
@@ -79,8 +80,9 @@ A `creation_time` tag *is* a real instant, so that one is converted into the dis
 
 ## Variants and confidence
 
-Every segment carries the decoder's confidence. Where that confidence is low, `stt` can go
-back and decode just that moment again:
+Whisper segments carry the decoder's confidence. Engines that do not expose confidence,
+including Voz, leave it unknown rather than inventing a score. Where confidence is low,
+`stt` can go back and decode just that moment again:
 
 ```bash
 stt rec.m4a --variants 2 --show-variants          # extra decodings of the shaky parts
@@ -100,6 +102,9 @@ extra.
     ├ alt (0.38, whispercpp:large-v3-turbo@t0.4): и тогда мы решили сделать бренч
     ├ alt (0.52, whispercpp:large-v3): и тогда мы решили сделать бридж-бот
 ```
+
+Voz does not implement temperature sampling or Whisper context. Its `--fix` recipe uses a
+separate Whisper model instead; see [Voz settings and limitations](docs/voz.md).
 
 ## Correction and summary
 
@@ -144,6 +149,8 @@ It is used in three places, because each one catches what the others cannot:
    silently rewrite your transcript.
 3. **In the LLM correction prompt**, with the flagged candidates attached, so the pass that
    can read the sentence decides which suspicions the sentence supports.
+
+Voz cannot use the first mechanism; exact post-corrections and LLM context still apply.
 
 The phonetic matcher is home-grown on purpose: Soundex and Metaphone are built for English
 orthography and do not accept Cyrillic at all, and these recordings switch language
@@ -255,7 +262,8 @@ the check prints the numbers to choose from.
 It also needs the `whisper-server` binary, which comes from the same whisper.cpp build as
 `whisper-cli` — and it uses whisper.cpp whatever engine you have configured for files,
 because MLX has no way to keep a model loaded between questions and loading one per sentence
-costs more than the entire latency budget.
+costs more than the entire latency budget. The Voz integration is for file transcription;
+it does not change live dictation.
 
 **How it tells you what it is doing.** The terminal you started it from shows a live status
 line — what is being heard, and whether it has settled. A short system sound and a
@@ -323,10 +331,43 @@ stt models ls          # the pool, with sizes, languages and rough quality/speed
 stt models pull large-v3
 ```
 
-Two engines, one interface. **whisper.cpp** runs natively on Metal and brings the Silero
+Three engines, one interface. **whisper.cpp** runs natively on Metal and brings the Silero
 voice-activity detector plus per-token confidence. **mlx-whisper** installs with `uv` in
-about a minute with no compiler and downloads its own models. `stt setup` looks at what you
-have, explains the trade-off, and remembers your answer; `--backend` overrides it per run.
+about a minute with no compiler and downloads its own models. **Voz** uses the native
+Desert Ant Core ML release without a Python ML stack. `stt setup` explains the options and
+remembers the choice; `--backend` overrides it per run. Voz is explicitly selected and never
+silently replaces Whisper in `auto` mode.
+
+### Voz on Apple Silicon
+
+```bash
+brew install desert-ant-labs/tap/desertant
+stt recording.m4a --backend voz --model voz --language ru
+# Optional: make Voz the default file engine after its model is ready.
+stt setup --backend voz
+```
+
+This adapter targets Desert Ant CLI **0.1.1**, Voz weights **v0.1.0**, native arm64 Python
+and macOS **14+**. The language declaration is required; it does not force the decoder's
+language. Word timestamps are preserved, while confidence remains unknown. Existing SDK
+weights are reused, and free space is checked on the SDK's actual cache volume.
+
+See [Voz setup, supported settings, licensing and published benchmarks](docs/voz.md) and
+[our measured pilot and its hardware limitations](docs/voz-benchmark-2026-09-10.md).
+Native execution is tested, but physical-Mac Neural Engine performance is not inferred
+from a virtual Mac's CPU fallback timings.
+
+### Compare engines on the same labelled corpus
+
+```bash
+stt bench corpus.json --engine voz:voz --engine whispercpp:large-v3-turbo \
+  --engine mlx:large-v3-turbo --repeats 5 --seed 37 -o comparison.json
+```
+
+The [manifest and methodology](docs/voz.md#run-the-same-comparison-on-your-recordings)
+cover weighted WER/CER, full wall time, first passes, failures, silence and repeatability.
+No transcript cache or LLM correction is used in the comparison. Reports contain the
+reference text and recognized speech: keep private recordings and their reports private.
 
 Adding a model is one entry in `stt_cli/registry.py`, and adding an engine is one class — so
 if something better than Whisper shows up, it is an addition rather than a rewrite. Downloads
@@ -340,7 +381,9 @@ check free disk space and physical memory first, and refuse rather than fail at 
 
 ## Requirements
 
-macOS (Apple Silicon for the MLX engine), Python 3.11+, `ffmpeg`, and one speech engine.
+macOS (Apple Silicon for MLX and Voz), Python 3.11+, `ffmpeg`, and one speech engine.
+Voz specifically requires native arm64 execution and macOS 14+.
 Nothing else: the package itself has zero third-party runtime dependencies.
 
-MIT.
+The stt-cli code is MIT. Voz weights and its SDK retain their separate upstream license;
+see [licensing notes](docs/voz.md#upstream-contracts-and-licensing).

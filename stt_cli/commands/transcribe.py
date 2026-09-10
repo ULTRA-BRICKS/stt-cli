@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  stt call.ogg -t absolute --tz Europe/Belgrade\n"
             "  stt rec.m4a --fix --summary -f md     corrected, summarized, one document\n"
             "  stt rec.m4a --diarize -f speakers     split into speaker turns\n"
+            "  stt rec.m4a -b voz -m voz -l ru       native Voz on Apple Silicon\n"
         ),
     )
     parser.add_argument("inputs", nargs="+", metavar="FILE", help="audio or video files")
@@ -80,11 +81,15 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_engine_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("engine")
-    group.add_argument("-b", "--backend", default=None, help="auto (default), whispercpp, mlx")
+    group.add_argument(
+        "-b", "--backend", default=None,
+        help="auto (default), whispercpp, mlx, or voz (requires -m voz and -l)",
+    )  # fmt: skip
     group.add_argument("-m", "--model", default=None, help="model name (see `stt models`)")
     group.add_argument(
-        "-l", "--language", default=None, help="spoken language, e.g. ru (default: auto-detect)"
-    )
+        "-l", "--language", default=None,
+        help="spoken language (e.g. ru); required for Voz, otherwise auto-detect",
+    )  # fmt: skip
     group.add_argument(
         "--threads", type=int, default=None, help="engine threads (0 = engine default)"
     )
