@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "source_version": 4,
+  "context": {
+    "repository": "ultrabricks/stt-cli",
+    "repository_id": 1353687987,
+    "source_ref": "f707ee2b2f643a4621121187df442554aa968244",
+    "snapshot_run": "34541300125",
+    "mutations": "body only",
+    "manual_exclusions": []
+  },
+  "mode": "apply",
+  "started_at": "2026-09-10T23:38:28.309646+00:00",
+  "events": [
+    {
+      "key": "stt-cli#15",
+      "number": 15,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "4b1a3719e2a01281e5f91c47329ce02d0b94310be17769f376007e1de4085dbd"
+    },
+    {
+      "key": "stt-cli#42",
+      "number": 42,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "d0b9358028d92ec40b1b083db43a39a77f67e5cf7ca26b2ba9294ae1f3c7e051"
+    },
+    {
+      "key": "stt-cli#38",
+      "number": 38,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "44fdc7b06a07f4bc5130eebdd0170c909881fee7a8b59bfa5f5cb290e8342060"
+    },
+    {
+      "key": "stt-cli#34",
+      "number": 34,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "4701e0ef54e003e8203667c26a2bfaf37a22e81a225a2b72ae00f8660b414406"
+    },
+    {
+      "key": "stt-cli#30",
+      "number": 30,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "1cbfcf1c3d9240b98e86da6cefdda867568362372afc63bc5ab1c8f370eeee0e"
+    },
+    {
+      "key": "stt-cli#27",
+      "number": 27,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "0c74de6639cfcc7e6ec0c8cd83eeac9648f1bebbf3760db60bd74b2da84ea252"
+    },
+    {
+      "key": "stt-cli#24",
+      "number": 24,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "fdd339ce54be9b6e683f6c1f6df01ad87975f82ede89f9e7ab5ceb1833a12721"
+    },
+    {
+      "key": "stt-cli#23",
+      "number": 23,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "fe0c42ec76053639061d5f75929177cc43e24de479f070f49994c78d27acf9e6"
+    },
+    {
+      "key": "stt-cli#22",
+      "number": 22,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "d8e0d60dd36f0ff630d19557bb1e00599b2a0342a5d8c350fb57f6b25f8a6ddb"
+    },
+    {
+      "key": "stt-cli#21",
+      "number": 21,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "1327e709bbab36cc1dac35fab585c04c421e373d51518db807c8ac984d091b83"
+    },
+    {
+      "key": "stt-cli#19",
+      "number": 19,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "10b09a37680b4316b563c64eba62e1852fd78b7856e44bcfc91321819276a399"
+    },
+    {
+      "key": "stt-cli#18",
+      "number": 18,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "eed334ced2223c2af63d169963518816b775b6452c5193f61b5fb467fadebb12"
+    },
+    {
+      "key": "stt-cli#17",
+      "number": 17,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "c10f9c6d5f107334166843d85d68977e8d7ccd23ea8a61274388c34257d62a57"
+    },
+    {
+      "key": "stt-cli#16",
+      "number": 16,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "5931fbcd2f7faba2cf4b36cad826b1f718aca8d6cb6f294ce76e95d260dd1cbd"
+    },
+    {
+      "key": "stt-cli#14",
+      "number": 14,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "f8930425601a78f1d871065e6ddbb2234a721f8297049d7650cec46fded812ee"
+    },
+    {
+      "key": "stt-cli#13",
+      "number": 13,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "0c8c42c8e4b87fefec2375b87bdbebe69f712525e3c0640166a65aa004a6408e"
+    },
+    {
+      "key": "stt-cli#11",
+      "number": 11,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "69c7569f8c42b4931bc63929b3f1512d12fb90ad88db1aaeac70aa2e0f92b7cd"
+    },
+    {
+      "key": "stt-cli#10",
+      "number": 10,
+      "result": "delivery-uncertain",
+      "observed_before_sha256": "7347df0b5f419ab22924bbffbcd54aaa3266adb3b9134114838543f5cb69d8bf"
+    }
+  ],
+  "writes": 17,
+  "complete": false,
+  "fatal": "delivery-uncertain",
+  "product_acceptance": false,
+  "counts": {
+    "patch-received-awaiting-readback": 17,
+    "delivery-uncertain": 1
+  },
+  "pending_write": {
+    "key": "stt-cli#10",
+    "intended_sha256": "f1c031c4705aa4ff03153de2886812a3eeae105ff87b8816d5499f8b440e415a"
+  },
+  "readback_error": "HTTPError",
+  "planned": 33,
+  "remaining_or_conflicted": 33,
+  "finished_at": "2026-09-10T23:40:57.662168+00:00"
+}
