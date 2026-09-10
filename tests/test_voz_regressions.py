@@ -1,6 +1,7 @@
 """Regression checks for cancellation and malformed native/input boundaries."""
 
 import asyncio
+import contextlib
 import os
 import struct
 import sys
@@ -116,7 +117,5 @@ async def test_cancellation_closes_pipes_inherited_by_grandchildren(tmp_path):
     finally:
         if not task.done():
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass

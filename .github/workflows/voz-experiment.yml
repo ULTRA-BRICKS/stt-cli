@@ -1,10 +1,6 @@
 name: Voz public-corpus pilot
 
 on:
-  pull_request:
-    paths:
-      - tools/voz_experiment.py
-      - .github/workflows/voz-experiment.yml
   workflow_dispatch:
 
 permissions:
@@ -12,7 +8,6 @@ permissions:
 
 jobs:
   compare:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'feat/voz-native-backend'
     runs-on: macos-15
     timeout-minutes: 20
     steps:
