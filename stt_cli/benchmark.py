@@ -15,7 +15,7 @@ import random
 import statistics
 import time
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -153,6 +153,7 @@ async def compare(
     repeats: int = 5,
     timeout: float = 300,
     seed: int = 0,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     from . import registry
     from ._errors import SttError, UsageError
@@ -201,8 +202,15 @@ async def compare(
         metadata = {**case, "sha256": digest, "duration_sec": duration}
         report["cases"].append(metadata)
         prepared.append(metadata)
+
+    def emit(event: str, **data: Any) -> None:
+        if on_event is not None:
+            on_event({"event": event, **data})
+
+    emit("started", **report, engines=engines)
     usable = []
     for label, backend, model in configured:
+        emit("preparation_started", engine=label)
         began = time.perf_counter()
         try:
             await asyncio.wait_for(backend.ensure_model(model), timeout=max(timeout, 1200))
@@ -213,19 +221,20 @@ async def compare(
                 "error_type": type(exc).__name__,
                 "error": exc.what if isinstance(exc, SttError) else "preparation timed out",
             }
+            emit("preparation_finished", engine=label, result=report["preparation"][label])
             continue
         report["preparation"][label] = {
             "ok": True,
             "wall_sec": time.perf_counter() - began,
             "runtime": getattr(backend, "runtime_info", {}),
         }
+        emit("preparation_finished", engine=label, result=report["preparation"][label])
         usable.append((label, backend, model))
     rng = random.Random(seed)
     for repeat in range(repeats + 1):
         order = [(case, engine) for case in prepared for engine in usable]
         rng.shuffle(order)
         for case, (label, backend, model) in order:
-            began = time.perf_counter()
             row: dict[str, Any] = {
                 "case": case["id"],
                 "engine": label,
@@ -233,6 +242,8 @@ async def compare(
                 "phase": "first_pass" if repeat == 0 else "measured",
                 "duration_sec": case["duration_sec"],
             }
+            emit("trial_started", **row)
+            began = time.perf_counter()
             try:
                 segments = await asyncio.wait_for(
                     backend.decode(
@@ -254,6 +265,7 @@ async def compare(
                     error=exc.what if isinstance(exc, SttError) else "decode timed out",
                 )
             report["rows"].append(row)
+            emit("trial_finished", **row)
     report["summary"] = {
         label: {
             **summarize([r for r in report["rows"] if r["engine"] == label]),
@@ -265,4 +277,5 @@ async def compare(
         row["available"] and row["failures"] == 0 and row["first_pass_failures"] == 0
         for row in report["summary"].values()
     )
+    emit("completed", complete=report["complete"], summary=report["summary"])
     return report

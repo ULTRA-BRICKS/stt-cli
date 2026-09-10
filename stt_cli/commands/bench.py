@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from .. import benchmark
-from .._errors import UsageError
+from .._errors import ProcessTimeout, UsageError
+from ..benchmark_journal import Journal
 
 NAME = "bench"
 SUMMARY = "compare ASR accuracy, latency and failures on a labelled local corpus"
@@ -45,24 +48,51 @@ def run(argv: list[str]) -> int:
     parser.add_argument("--engine", action="append", required=True, metavar="ENGINE:MODEL")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="optional whole-run deadline, including model preparation; preserves the journal",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.max_seconds is not None and (
+        not math.isfinite(args.max_seconds) or args.max_seconds <= 0
+    ):
+        raise UsageError(what="--max-seconds must be finite and positive")
     if args.output.exists() or args.output.is_symlink():
         raise UsageError(what="benchmark output already exists", how="choose a new output filename")
     try:
         args.output.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise UsageError(what="cannot create benchmark output directory", why=str(exc)) from exc
-    report = asyncio.run(
-        benchmark.compare(
-            benchmark.load_manifest(args.manifest),
-            args.engine,
-            repeats=args.repeats,
-            timeout=args.timeout,
-            seed=args.seed,
-        )
-    )
+    cases = benchmark.load_manifest(args.manifest)
+    journal_path = Path(str(args.output) + ".events.jsonl")
+
+    async def execute(journal: Journal) -> dict[str, Any]:
+        deadline = asyncio.timeout(args.max_seconds)
+        try:
+            async with deadline:
+                return await benchmark.compare(
+                    cases,
+                    args.engine,
+                    repeats=args.repeats,
+                    timeout=args.timeout,
+                    seed=args.seed,
+                    on_event=journal.emit,
+                )
+        except TimeoutError as exc:
+            if not deadline.expired():
+                raise
+            raise ProcessTimeout(
+                what="benchmark exceeded its whole-run time budget",
+                why=f"completed trials and the last started operation are in {journal_path}",
+                how="inspect the journal; use fewer cases or a larger --max-seconds budget",
+            ) from exc
+
+    with Journal(journal_path) as journal:
+        report = asyncio.run(execute(journal))
     _write_report(args.output, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2, allow_nan=False))
     return 0 if report["complete"] else 10
