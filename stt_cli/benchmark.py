@@ -28,9 +28,7 @@ def normalize(text: str) -> str:
     """
     text = unicodedata.normalize("NFKC", text).casefold()
     return " ".join(
-        "".join(
-            " " if unicodedata.category(char)[0] in "PS" else char for char in text
-        ).split()
+        "".join(" " if unicodedata.category(char)[0] in "PS" else char for char in text).split()
     )
 
 
@@ -126,15 +124,18 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "trials": len(measured),
         "failures": len(measured) - len(good),
+        "first_pass_failures": sum(r["phase"] == "first_pass" and not r["ok"] for r in rows),
         "quality_cases": len(scored),
         "missing_quality_cases": len(first) - len(scored),
         "wer": (
             sum(r["word_errors"] for r in scored if r["reference_words"]) / ref_words
-            if ref_words else None
+            if ref_words
+            else None
         ),
         "cer": (
             sum(r["character_errors"] for r in scored if r["reference_characters"]) / ref_chars
-            if ref_chars else None
+            if ref_chars
+            else None
         ),
         "silence_insertions": sum(r["silence_insertions"] for r in scored),
         "median_wall_sec": statistics.median(latencies) if latencies else None,
@@ -261,6 +262,7 @@ async def compare(
         for label in engines
     }
     report["complete"] = all(
-        row["available"] and row["failures"] == 0 for row in report["summary"].values()
+        row["available"] and row["failures"] == 0 and row["first_pass_failures"] == 0
+        for row in report["summary"].values()
     )
     return report

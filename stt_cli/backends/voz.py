@@ -27,7 +27,33 @@ CLI_VERSION = "0.1.1"
 WEIGHTS_REVISION = "v0.1.0"
 INSTALL = "brew install desert-ant-labs/tap/desertant"
 LANGUAGES = frozenset(
-    "bg hr cs da nl en et fi fr de el hu it lv lt mt pl pt ro ru sk sl es sv uk".split()
+    [
+        "bg",
+        "hr",
+        "cs",
+        "da",
+        "nl",
+        "en",
+        "et",
+        "fi",
+        "fr",
+        "de",
+        "el",
+        "hu",
+        "it",
+        "lv",
+        "lt",
+        "mt",
+        "pl",
+        "pt",
+        "ro",
+        "ru",
+        "sk",
+        "sl",
+        "es",
+        "sv",
+        "uk",
+    ]
 )
 # Two 80 ms model frames. Small endpoint rounding is clamped, not allowed to escape
 # the recording; larger discrepancies are a protocol error, not plausible timing.
@@ -48,7 +74,7 @@ def _arm64_macho(path: Path) -> bool:
             b"\xca\xfe\xba\xbe": (">", 20),
             b"\xbe\xba\xfe\xca": ("<", 20),
             b"\xca\xfe\xba\xbf": (">", 32),
-            b"\xbf\xba\fe\xca": ("<", 32),
+            b"\xbf\xba\xfe\xca": ("<", 32),
         }
         if magic in fats:
             endian, stride = fats[magic]
@@ -136,7 +162,9 @@ def parse_document(
         said = raw["text"].strip()
         start, end = _number(raw.get("start"), "word.start"), _number(raw.get("end"), "word.end")
         if not said or end < start or start < previous_start or end > limit + TIMING_TOLERANCE:
-            raise _protocol_error("empty word, unordered timestamps, or timestamp outside the audio")
+            raise _protocol_error(
+                "empty word, unordered timestamps, or timestamp outside the audio"
+            )
         previous_start = start
         words.append(Word(min(start, limit) + offset, min(end, limit) + offset, said))
     # Reject truncated documents instead of archiving a plausible-looking partial transcript.
@@ -186,7 +214,9 @@ def _validate_request(request: DecodeRequest) -> None:
         )
     _number(request.offset, "offset")
     if request.initial_prompt:
-        warn_once("Voz cannot bias its decoder with a glossary; dictionary post-corrections still run")
+        warn_once(
+            "Voz cannot bias its decoder with a glossary; dictionary post-corrections still run"
+        )
     if request.threads:
         warn_once("Voz manages Neural Engine scheduling natively; --threads is not used")
 
@@ -201,8 +231,10 @@ def _wav_duration(path: Path) -> float:
                     what="Voz backend expects 16 kHz mono PCM16 WAV",
                     how="use the stt transcription pipeline to normalize audio/video first",
                 )
-            if audio.getnframes() and not audio.readframes(1):
-                raise wave.Error("missing PCM data")
+            if audio.getnframes():
+                audio.setpos(audio.getnframes() - 1)
+                if len(audio.readframes(1)) != 2:
+                    raise wave.Error("truncated PCM data")
             return audio.getnframes() / 16000
     except (OSError, EOFError, wave.Error) as exc:
         raise UsageError(
@@ -244,7 +276,8 @@ class VozBackend:
         if not _arm64_macho(binary):
             return Availability(False, "desertant is not an arm64 Mach-O executable", INSTALL)
         return Availability(
-            True, f"native Voz CLI: {binary}; runtime checked when used; ANE utilization is not measured"
+            True,
+            f"native Voz CLI: {binary}; runtime checked when used; ANE utilization is not measured",
         )
 
     def vad_provider(self) -> VadProvider | None:
@@ -272,7 +305,9 @@ class VozBackend:
             self._binary = _find_binary()
             assert self._binary is not None
             schema = _object(
-                (await proc.run([str(self._binary), "schema", "--json"], timeout=30, check=True)).stdout
+                (
+                    await proc.run([str(self._binary), "schema", "--json"], timeout=30, check=True)
+                ).stdout
             )
             if schema.get("tool") != "desertant" or schema.get("version") != CLI_VERSION:
                 raise _protocol_error(f"this adapter is validated against CLI {CLI_VERSION}")
@@ -284,7 +319,9 @@ class VozBackend:
                 ).stdout
             )
             if info.get("runnableHere") is not True:
-                raise MissingDependencyError(what="this Desert Ant build cannot run Voz", how=INSTALL)
+                raise MissingDependencyError(
+                    what="this Desert Ant build cannot run Voz", how=INSTALL
+                )
             if (
                 info.get("weightsRevision") != revision
                 or info.get("weightsRepo") != "desert-ant-labs/voz"
@@ -342,6 +379,6 @@ class VozBackend:
         self.last_metrics = {
             "duration_sec": _number(document.get("durationSec"), "durationSec"),
             "load_sec": _number(document.get("loadSec"), "loadSec"),
-            "processing_sec": _number(document.get("processingSec"), "processingSec"),
+            "processing_sec": _number(document.get("processingSec"), "processing_sec"),
         }
         return segments

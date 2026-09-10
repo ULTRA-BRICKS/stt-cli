@@ -92,6 +92,7 @@ async def run(
         out, err = await asyncio.wait_for(proc.communicate(payload), timeout=timeout)
     except TimeoutError as exc:
         _terminate(proc)
+        await proc.communicate()
         raise ProcessTimeout(
             what=f"{Path(argv[0]).name} timed out after {timeout / 60:.0f} min",
             why="the process produced no result within the allowed time",
@@ -100,6 +101,12 @@ async def run(
                 "the job really is that long"
             ),
         ) from exc
+    except asyncio.CancelledError:
+        # An outer benchmark deadline or Ctrl-C cancels communicate(), not the engine.
+        # Reap the child before another trial starts, or timings include orphan work.
+        _terminate(proc)
+        await proc.communicate()
+        raise
 
     result = Result(
         code=proc.returncode or 0,
