@@ -1,0 +1,380 @@
+{
+  "repository": "alex-mextner/stt-cli",
+  "plan_ref": "94a1825f2f9e611031dd6b74eb1de2d8b3130c56",
+  "plan_sha256": "2e44dcc182074fa7f55035df67bed0c4dbada34401fa72b406037dc83a74ba8c",
+  "started_at": "2026-09-10T13:35:57.470784+00:00",
+  "mode": "apply",
+  "events": [
+    {
+      "number": 42,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    {
+      "number": 1,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "9f3b8a5b84f1903218e35912ad0c2df32a77e1da5b8b1c89b207694a16cd866c",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/1"
+    },
+    {
+      "number": 2,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "cdd9cb648b14affde189234e921d9e5faff9ef7c732d2a4363c83806d39a07b9",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/2"
+    },
+    {
+      "number": 3,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "5658d34a70a6a3e13278139073d8306aa97b924c990d8163c62c12f12ca97d2b",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/3"
+    },
+    {
+      "number": 4,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "8f03f3daedeede722c4d03df4da6d83ec038bfc60354a2b84b4d21d54b9218d2",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/4"
+    },
+    {
+      "number": 6,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "b95fe9a0c99b724780b1e8892c6f4779a625eab490dd4b0c034a3d04fc3c9f96",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/6"
+    },
+    {
+      "number": 7,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "2f656ff95756597fa1792f6e91f70381c2be3d38a41e2b2fbd7ee9b89eb13e97",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/7"
+    },
+    {
+      "number": 8,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "66f0963c7e3a520d0e8a5f6703d1e500bfbc32f128f25b0a719f3edbc2c9d996",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/8"
+    },
+    {
+      "number": 9,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "d52c0398c9575eaabc332c5c92fe164399f04e0a04058c12835520411dff6563",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/9"
+    },
+    {
+      "number": 10,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "7347df0b5f419ab22924bbffbcd54aaa3266adb3b9134114838543f5cb69d8bf",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/10"
+    },
+    {
+      "number": 11,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "69c7569f8c42b4931bc63929b3f1512d12fb90ad88db1aaeac70aa2e0f92b7cd",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/11"
+    },
+    {
+      "number": 12,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "5f23240c3ccfd78b6b6cd680a46a58e42c7e6aae71474bf92d91df6f59f87e9a",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/12"
+    },
+    {
+      "number": 13,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0c8c42c8e4b87fefec2375b87bdbebe69f712525e3c0640166a65aa004a6408e",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/13"
+    },
+    {
+      "number": 14,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f8930425601a78f1d871065e6ddbb2234a721f8297049d7650cec46fded812ee",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/14"
+    },
+    {
+      "number": 15,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4b1a3719e2a01281e5f91c47329ce02d0b94310be17769f376007e1de4085dbd",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/15"
+    },
+    {
+      "number": 16,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "5931fbcd2f7faba2cf4b36cad826b1f718aca8d6cb6f294ce76e95d260dd1cbd",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/16"
+    },
+    {
+      "number": 17,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "c10f9c6d5f107334166843d85d68977e8d7ccd23ea8a61274388c34257d62a57",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/17"
+    },
+    {
+      "number": 18,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "eed334ced2223c2af63d169963518816b775b6452c5193f61b5fb467fadebb12",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/18"
+    },
+    {
+      "number": 19,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "10b09a37680b4316b563c64eba62e1852fd78b7856e44bcfc91321819276a399",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/19"
+    },
+    {
+      "number": 20,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f4722035a278fc6e6c6e9ca2a543299b9e9dbd55d3796a8ba09fe1fb16558584",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/20"
+    },
+    {
+      "number": 21,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "1327e709bbab36cc1dac35fab585c04c421e373d51518db807c8ac984d091b83",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/21"
+    },
+    {
+      "number": 22,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "d8e0d60dd36f0ff630d19557bb1e00599b2a0342a5d8c350fb57f6b25f8a6ddb",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/22"
+    },
+    {
+      "number": 23,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "fe0c42ec76053639061d5f75929177cc43e24de479f070f49994c78d27acf9e6",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/23"
+    },
+    {
+      "number": 24,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "fdd339ce54be9b6e683f6c1f6df01ad87975f82ede89f9e7ab5ceb1833a12721",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/24"
+    },
+    {
+      "number": 25,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "18277d350a1d3040f5649ba6e2155697b16ea4a565371219f3d3173c84a75e4b",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/25"
+    },
+    {
+      "number": 27,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0c74de6639cfcc7e6ec0c8cd83eeac9648f1bebbf3760db60bd74b2da84ea252",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/27"
+    },
+    {
+      "number": 28,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "67f80ef73d6ecfef3b12f2ea2153510a7e7c36ce14a044fd970e4fece0275389",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/28"
+    },
+    {
+      "number": 30,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "1cbfcf1c3d9240b98e86da6cefdda867568362372afc63bc5ab1c8f370eeee0e",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/30"
+    },
+    {
+      "number": 31,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "b315f1e0402496d2d351521790c4a0908c66de6ea6bf25d6401e958afc777ee2",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/31"
+    },
+    {
+      "number": 34,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4701e0ef54e003e8203667c26a2bfaf37a22e81a225a2b72ae00f8660b414406",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/34"
+    },
+    {
+      "number": 35,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f08047e9c1f3a06b9073000f3ad1adb115342e5718fddbabba082ff36f1cb565",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/35"
+    },
+    {
+      "number": 37,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "c961ea465db5c06a5879d292badb0a0143721896c9b83d2382ef2d5c0aad1a4e",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/37"
+    },
+    {
+      "number": 38,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "44fdc7b06a07f4bc5130eebdd0170c909881fee7a8b59bfa5f5cb290e8342060",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/38"
+    }
+  ],
+  "parents": {
+    "1": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "2": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "3": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "4": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "6": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "7": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "8": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "9": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "10": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "11": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "12": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "13": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "14": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "15": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "16": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "17": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "18": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "19": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "20": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "21": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "22": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "23": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "24": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "25": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "27": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "28": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "30": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "31": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "34": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "35": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "37": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    },
+    "38": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/stt-cli/issues/42",
+      "verified_parent": "https://github.com/alex-mextner/stt-cli/issues/42"
+    }
+  },
+  "newly_discovered": [],
+  "counts": {
+    "parent-created": 1,
+    "body-updated-readback-verified": 32
+  },
+  "api_reads": 36,
+  "api_writes": 70,
+  "root": "https://github.com/alex-mextner/stt-cli/issues/42",
+  "finished_at": "2026-09-10T13:38:30.951313+00:00",
+  "planned_issues": 32,
+  "processed_bodies": 32,
+  "native_parents_verified": 32
+}
