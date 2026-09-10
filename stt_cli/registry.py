@@ -134,6 +134,13 @@ MODELS: tuple[ModelSpec, ...] = (
         quality=1,
         speed=5,
     ),
+    ModelSpec(
+        name="voz",
+        summary="Parakeet v3 via native Core ML; explicit language; see docs/voz.md",
+        size_bytes=467 * MIB,
+        engine_ids={"voz": "v0.1.0"},
+        languages="25 langs",
+    ),
 )
 
 BY_NAME: dict[str, ModelSpec] = {m.name: m for m in MODELS}

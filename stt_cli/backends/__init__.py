@@ -3,8 +3,8 @@
 ``auto`` is not a coin flip: it prefers whatever is genuinely ready to run on this machine,
 in the order that costs the user least. A working whisper.cpp build wins, because it needs
 no download beyond the model and runs on Metal today; mlx-whisper is next, because ``uv``
-can conjure it on demand. If neither is present, the error names both and says how to get
-each — never a bare "no backend".
+can conjure it on demand. Voz is explicit: it does not support every Whisper language or
+setting, so installing it must not silently change existing transcription commands.
 """
 
 from __future__ import annotations
@@ -28,8 +28,9 @@ def _configured_root() -> str | None:
         return None
 
 
-# Preference order for `--backend auto`.
-ORDER = ("whispercpp", "mlx")
+# Discovery order. Keep the established automatic choice separate from opt-in engines.
+ORDER = ("whispercpp", "mlx", "voz")
+AUTO_ORDER = ("whispercpp", "mlx")
 
 
 def create(name: str, *, whispercpp_root: str | None = None) -> Backend:
@@ -48,6 +49,10 @@ def create(name: str, *, whispercpp_root: str | None = None) -> Backend:
         from .mlx import MlxBackend
 
         return MlxBackend()
+    if name == "voz":
+        from .voz import VozBackend
+
+        return VozBackend()
     raise unknown_item("backend", name, list(ORDER))
 
 
@@ -94,13 +99,15 @@ def resolve(name: str, *, whispercpp_root: str | None = None) -> Backend:
 
     problems: list[str] = []
     for candidate, status in survey(whispercpp_root=whispercpp_root):
+        if candidate not in AUTO_ORDER:
+            continue
         if status.ok:
             return create(candidate, whispercpp_root=whispercpp_root)
         problems.append(f"  {candidate}: {status.detail}\n    -> {status.how_to_install}")
     raise MissingDependencyError(
-        what="no speech engine is available",
-        why="none of the supported engines is installed:\n" + "\n".join(problems),
-        how="run `stt setup` — it detects what you have and installs the rest",
+        what="no automatic speech engine is available",
+        why="none of the automatic engines is installed:\n" + "\n".join(problems),
+        how="run `stt setup`; Voz is opt-in with --backend voz --model voz --language ru",
     )
 
 

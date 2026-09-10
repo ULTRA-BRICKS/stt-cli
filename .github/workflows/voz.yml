@@ -1,0 +1,85 @@
+name: Voz native validation
+
+on:
+  pull_request:
+    paths:
+      - 'stt_cli/**'
+      - 'tests/test_voz.py'
+      - 'tests/test_benchmark.py'
+      - 'tools/ane_probe.swift'
+      - '.github/workflows/voz.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-contract:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+      - name: Native host and Neural Engine visibility
+        run: |
+          mkdir -p report
+          uname -a | tee report/host.txt
+          sysctl -n machdep.cpu.brand_string | tee -a report/host.txt
+          sysctl -n hw.memsize | tee -a report/host.txt
+          swift tools/ane_probe.swift | tee report/ane.json
+      - name: Install the pinned native release, not a debug build
+        run: |
+          mkdir -p "$RUNNER_TEMP/voz"
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/Desert-Ant-Labs/desert-ant-cli/releases/download/v0.1.1/desertant-darwin-arm64.tar.gz \
+            -o "$RUNNER_TEMP/voz.tar.gz"
+          echo "1d87de0de8b1115a4c01b165dfa7f4933cd7f1489b51ae48d41264dd9d427ec0  $RUNNER_TEMP/voz.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/voz.tar.gz" -C "$RUNNER_TEMP/voz"
+          binary="$(find "$RUNNER_TEMP/voz" -type f -name desertant -print -quit)"
+          test -n "$binary"
+          chmod +x "$binary"
+          echo "STT_VOZ_BIN=$binary" >> "$GITHUB_ENV"
+          "$binary" schema --json | tee report/schema.json
+          "$binary" info voz --json | tee report/voz-info.json
+      - name: Verify the native executable and run contract tests
+        run: |
+          uv run --extra test python -c 'from stt_cli.backends.voz import VozBackend; s=VozBackend().availability(); print(s); assert s.ok'
+          uv run --extra test pytest -q tests/test_voz.py tests/test_benchmark.py
+      - name: Real inference only when a Neural Engine is visible
+        run: |
+          if ! grep -q '"neural_engine":true' report/ane.json; then
+            echo 'NOT MEASURED: this hosted Mac does not expose a Neural Engine.' | tee report/inference.txt
+            exit 0
+          fi
+          brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+          say -o "$RUNNER_TEMP/speech.aiff" 'This synthetic recording checks local speech recognition. The deployment starts on Friday.'
+          ffmpeg -v error -i "$RUNNER_TEMP/speech.aiff" -ar 16000 -ac 1 -c:a pcm_s16le report/speech.wav
+          uv run python - <<'PY'
+          import asyncio, json
+          from pathlib import Path
+          from stt_cli.backends import DecodeRequest
+          from stt_cli.backends.voz import VozBackend
+          async def main():
+              backend = VozBackend()
+              await backend.ensure_model('voz')
+              result = await backend.decode(DecodeRequest(Path('report/speech.wav'), 'voz', 'en'))
+              output = {'synthetic_smoke_only': True, 'text': ' '.join(s.text for s in result), 'metrics': backend.last_metrics}
+              Path('report/inference.json').write_text(json.dumps(output, indent=2))
+              print(json.dumps(output, indent=2))
+              assert output['text'].strip(), 'speech produced an empty transcript'
+          asyncio.run(main())
+          PY
+      - name: Preserve reproducible source snapshot
+        if: always()
+        run: |
+          mkdir -p report
+          tar -czf report/source.tgz stt_cli tests pyproject.toml conftest.py
+          uv run --extra dev ruff format --diff > report/format.diff || test "$?" = 1
+          cat report/format.diff
+      - name: Preserve validation evidence (never user's recordings)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: voz-native-validation
+          path: report/
+          retention-days: 14
