@@ -28,11 +28,10 @@ SKILL_MD = """\
 ---
 name: stt
 description: >-
-  Transcribe any audio or video file to text on macOS. Use when a task involves a
-  recording, voice memo, meeting, call, podcast or video that needs to become text —
-  including subtitles (srt/vtt), speaker-separated dialogue, or a structured summary of
-  what was said. Handles any container/codec, skips silence so the model cannot hallucinate
-  over it, scrubs known subtitle-credit artefacts and decoder loops, and caches every run.
+  Transcribe any audio or video file to text on macOS. Use for a recording, voice
+  memo, meeting, call, podcast, or video needing text — subtitles (srt/vtt),
+  speaker-separated dialogue, or a summary. Handles any container/codec, skips
+  silence, scrubs subtitle-credit artefacts, caches every run.
 metadata:
   author: alex-mextner
   repo: https://github.com/alex-mextner/stt-cli
