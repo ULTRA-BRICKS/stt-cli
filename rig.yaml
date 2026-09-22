@@ -139,3 +139,10 @@ project_tools:
     enabled: true
     register: true
     reindex: false
+
+task:
+  backend: forgejo
+  forgejo:
+    url: https://git.hyperide.ai
+    repo: ultrabricks/stt-cli
+    attachment_mode: native
