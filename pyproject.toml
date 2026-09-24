@@ -44,8 +44,8 @@ dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 stt = "stt_cli.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/alex-mextner/stt-cli"
-Issues = "https://github.com/alex-mextner/stt-cli/issues"
+Homepage = "https://git.hyperide.ai/ultrabricks/stt-cli"
+Issues = "https://git.hyperide.ai/ultrabricks/stt-cli/issues"
 
 [tool.setuptools.packages.find]
 include = ["stt_cli*"]

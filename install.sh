@@ -2,7 +2,7 @@
 # install.sh — install the `stt` CLI (macOS, Python 3.11+)
 #
 # Works from a local clone (./install.sh) and piped from curl:
-#   curl -fsSL https://raw.githubusercontent.com/alex-mextner/stt-cli/main/install.sh | bash
+#   curl -fsSL https://git.hyperide.ai/ultrabricks/stt-cli/raw/branch/main/install.sh | bash
 #
 # stt has ZERO required Python dependencies — the engine is a native binary and every media
 # operation shells out to ffmpeg — so the install is fast and cannot be broken by a wheel
@@ -12,7 +12,7 @@ set -euo pipefail
 
 TOOL="stt"
 REPO="stt-cli"
-GITHUB_USER="alex-mextner"
+FORGE_OWNER="ultrabricks"
 ENTRY="bin/stt"
 CLONE_BASE="${XDG_DATA_HOME:-$HOME/.local/share}"
 
@@ -38,7 +38,7 @@ if [[ -n "$_script_dir" && -f "$_script_dir/$ENTRY" ]]; then
 else
   mkdir -p "$CLONE_BASE"
   CLONE_DIR="$CLONE_BASE/$REPO"
-  EXPECT_URL="https://github.com/$GITHUB_USER/$REPO.git"
+  EXPECT_URL="https://git.hyperide.ai/$FORGE_OWNER/$REPO.git"
   if [[ -d "$CLONE_DIR/.git" ]]; then
     actual_url="$(git -C "$CLONE_DIR" remote get-url origin 2>/dev/null || echo "")"
     if [[ "$actual_url" != "$EXPECT_URL" ]]; then

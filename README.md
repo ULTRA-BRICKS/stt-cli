@@ -15,7 +15,7 @@ stt meeting.m4a --diarize -f speakers            # split into speaker turns
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alex-mextner/stt-cli/main/install.sh | bash
+curl -fsSL https://git.hyperide.ai/ultrabricks/stt-cli/raw/branch/main/install.sh | bash
 stt setup       # detects what you already have, explains the options, picks an engine
 ```
 

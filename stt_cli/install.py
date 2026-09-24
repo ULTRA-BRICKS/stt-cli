@@ -34,7 +34,7 @@ description: >-
   silence, scrubs subtitle-credit artefacts, caches every run.
 metadata:
   author: alex-mextner
-  repo: https://github.com/alex-mextner/stt-cli
+  repo: https://git.hyperide.ai/ultrabricks/stt-cli
 ---
 
 # stt — speech to text for any audio or video file
