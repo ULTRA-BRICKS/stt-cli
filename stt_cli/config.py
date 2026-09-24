@@ -114,6 +114,16 @@ class Settings:
     # doing. Zero means the detector's own default. Raise it in a room where stray noises get
     # typed; lower it if a quiet voice goes unheard. `stt mic --check` reports both numbers.
     mic_threshold: float = 0.0
+    # The global chord that starts/stops a background `stt mic` daemon (`live/hotkey.py`),
+    # e.g. "cmd+shift+space". None means nobody has chosen one, which `hotkey.resolve` reads
+    # as "use the built-in default" — the same None-means-unset convention `language` and
+    # `timezone` already use, so a fresh install still states a real default in `--help`
+    # without this file hard-coding what that default is.
+    hotkey: str | None = None
+    # "toggle" (press once to start, again to stop) or "hold" (dictate only while held).
+    # None resolves through `hotkey.resolve_mode` the same way `hotkey` resolves through
+    # `hotkey.resolve` — one place owns the actual default word.
+    hotkey_mode: str | None = None
 
     # voice activity detection
     vad: str = "auto"  # auto | silero | ffmpeg | none
@@ -426,6 +436,32 @@ def save_setting(key: str, value: Any) -> None:
         # whatever was really in the file.
         raw: dict[str, Any] = _settings_object(target)
         raw[key] = value
+        write_atomic(target, _serialized(raw, named))
+
+
+def unset_setting(key: str) -> None:
+    """Remove one preference from ``config.json``, so it goes back to answering with the
+    built-in default — the reset half of `save_setting`, sharing the same one-file,
+    one-transaction lock so a concurrent `set` and `unset` cannot interleave.
+
+    Removing a key that was never stored is not an error: "make sure this is not
+    overridden" is a sensible thing to ask for whether or not anybody had overridden it.
+    """
+    from ._errors import unknown_item
+
+    if key not in _CONFIGURABLE:
+        raise unknown_item("setting", key, sorted(_CONFIGURABLE))
+    ensure_dirs()
+    named = config_path()
+    target = Path(os.path.realpath(named))
+    _refuse_a_strange_target(target)
+    from .archive import write_atomic
+
+    with _editing_the_settings(target):
+        raw: dict[str, Any] = _settings_object(target)
+        if key not in raw:
+            return
+        del raw[key]
         write_atomic(target, _serialized(raw, named))
 
 

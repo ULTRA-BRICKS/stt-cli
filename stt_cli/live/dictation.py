@@ -22,7 +22,7 @@ from pathlib import Path
 from .. import config, dictionary, phrases
 from .._errors import EXIT_OK, EngineError, MissingDependencyError, UsageError
 from ..backends import whispercpp
-from . import capture, quartz, status, tap
+from . import capture, hotkey, quartz, status, tap
 from .gate import Gate
 from .server import Transcriber, Voice, WhisperServer
 from .session import IDLE_MINUTES, Progress, Session
@@ -256,11 +256,25 @@ def gate_for(settings: config.Settings) -> Gate:
 
 
 async def _through_the_microphone(
-    device: capture.Device, dictating: Session, line: status.Line, *, quiet: bool
+    device: capture.Device,
+    dictating: Session,
+    line: status.Line,
+    *,
+    quiet: bool,
+    interruptible: bool = True,
 ) -> str:
-    """The microphone stays open for exactly as long as this block runs."""
+    """The microphone stays open for exactly as long as this block runs.
+
+    ``interruptible=False`` skips installing the per-burst SIGINT handler: the daemon (see
+    `_idle_loop`) installs ONE handler for its whole process lifetime instead, and a second
+    `add_signal_handler` here would silently replace it, then `_interruptible`'s own
+    `remove_signal_handler` on exit would delete it outright — leaving a later Ctrl-C/
+    `stt mic stop` unhandled after the first burst. The ad-hoc single-session path keeps the
+    default: there the burst IS the whole process, so installing it here is correct.
+    """
     async with capture.listening(device) as audio:
-        with _interruptible(dictating):
+        ctx = _interruptible(dictating) if interruptible else contextlib.nullcontext()
+        with ctx:
             line.show(status.render(listening=True, text="", settled=False))
             # Announced beside the session, not in front of it. The sound and the banner
             # are each a subprocess, and `afplay` alone takes a second and a half to play a
@@ -368,6 +382,277 @@ def _watch(dictating: Session, marker: int) -> tap.Watcher:
     if watcher.failure:
         # Stopped before the error goes up, because nothing above will ever see this object
         # again — the `finally` that normally stops it only runs once it has been returned.
+        watcher.stop()
+        raise EngineError(
+            what="stt cannot tell when you type",
+            why=watcher.failure,
+            how="without it stt could delete text it did not write, so it will not start",
+        )
+    return watcher
+
+
+# ---------------------------------------------------------------------------------------
+# The daemon: idle with the microphone closed until the hotkey fires, dictate, repeat.
+# `stt mic run`/`start` reach this instead of `dictate`; the ad-hoc path above is unchanged.
+# ---------------------------------------------------------------------------------------
+
+
+async def dictate_daemon(args: argparse.Namespace) -> None:
+    """The daemon behind `stt mic run`/`start`: idle until the hotkey, one burst per press.
+
+    Both models load exactly once, here, at daemon start — the 30-45 second wait a cold
+    ad-hoc `stt mic` pays happens a single time instead of before every dictation. From then
+    on the daemon sits with the microphone CLOSED (nothing is captured while idle — the same
+    "a microphone left open is a room being recorded" rule the ad-hoc path keeps) until the
+    configured hotkey fires; each activation opens the microphone for one burst, reusing the
+    exact loop `dictate` uses for its single session, and returns to idle when the hotkey
+    says so again (toggle) or is released (hold) — never by exiting. Only `stt mic stop`
+    (SIGTERM) or Ctrl-C ends the process, and a burst already in flight is allowed to finish
+    (Escape-twice / idle-timeout still apply to it) before it does.
+    """
+    quartz.require_accessibility()
+    settings = config.load_settings().merged(hotkey=args.hotkey, hotkey_mode=args.hotkey_mode)
+    combo, mode = _resolved_hotkey(settings)
+    device = await capture.resolve(args.device)
+    with _the_only_session():
+        async with _models(args, settings) as models:
+            await _idle_loop(args, device, models, settings, combo, mode)
+
+
+def _resolved_hotkey(settings: config.Settings) -> tuple[hotkey.Combo, str]:
+    """`hotkey.resolve`/`resolve_mode`, but a bad spec becomes a diagnosed `UsageError`
+    instead of a raw `HotkeyError` traceback. `--hotkey` is already validated at the argparse
+    layer (see `commands/mic.py`'s `--hotkey` type), so this exists for the path argparse
+    cannot reach: a hand-edited `config.json` whose stored ``hotkey``/``hotkey_mode`` is
+    invalid. Uncaught, that crash is worse than an ordinary one — `stt mic enable` bakes the
+    daemon's argv into a launchd `LaunchAgent` with `KeepAlive`, so a crash on every start is
+    a restart loop, not a one-time failure.
+    """
+    try:
+        return hotkey.resolve(settings.hotkey), hotkey.resolve_mode(settings.hotkey_mode)
+    except hotkey.HotkeyError as broken:
+        raise UsageError(
+            what="the configured hotkey is invalid",
+            why=str(broken),
+            how="fix it with `stt config set hotkey ...` / `stt config set hotkey_mode ...`, "
+            "or `stt config unset hotkey` to go back to the default",
+        ) from broken
+
+
+class _Toggle:
+    """Marshals the tap thread's hotkey presses onto the event loop as burst start/stop.
+
+    `_Stopper`/`arrived` above run same-thread on purpose — a correction has to win a race
+    against an edit already queued on the loop. A hotkey activation is a different kind of
+    event: it starts or stops a whole *session* (opens the microphone, creates tasks), which
+    only the loop can do, so handing it across with `call_soon_threadsafe` is the right tool
+    here, not a repeat of the mistake `arrived`'s docstring warns about.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self.events: asyncio.Queue[bool] = asyncio.Queue()
+
+    def __call__(self, pressed: bool) -> None:
+        self._loop.call_soon_threadsafe(self.events.put_nowait, pressed)
+
+
+@dataclass
+class _Active:
+    """The one burst currently open, if any — so a signal or the tap can reach it."""
+
+    stopper: _Stopper | None = None
+    session: Session | None = None
+
+
+async def _idle_loop(
+    args: argparse.Namespace,
+    device: capture.Device,
+    models: Models,
+    settings: config.Settings,
+    combo: hotkey.Combo,
+    mode: str,
+) -> None:
+    """Idle with the microphone closed until the hotkey fires, dictate, and repeat."""
+    loop = asyncio.get_running_loop()
+    marker = tap.new_marker()
+    shutdown = asyncio.Event()
+    toggle = _Toggle(loop)
+    active = _Active()
+
+    def _stop_everything() -> None:
+        shutdown.set()
+        if active.session is not None:
+            active.session.stop()
+
+    # ONE handler for the daemon's whole lifetime, not per burst — see the `interruptible`
+    # note on `_through_the_microphone`. `stt mic stop` sends SIGTERM; Ctrl-C (SIGINT) is the
+    # same "finish, don't discard" request `_interruptible` gives the ad-hoc path.
+    handled = [
+        sig for sig in (signal.SIGTERM, signal.SIGINT) if _try_handle(loop, sig, _stop_everything)
+    ]
+    watcher = _watch_daemon(marker, combo, toggle, active)
+    try:
+        status.note(
+            f"stt mic daemon ready — {mode} {combo.spec} to dictate; `stt mic stop` to quit",
+            quiet=args.quiet,
+        )
+        while not shutdown.is_set():
+            pressed = await _next_hotkey_edge(toggle, shutdown)
+            if not pressed or shutdown.is_set():
+                # The second check is belt-and-braces over `_next_hotkey_edge`'s own
+                # shutdown-wins-the-race guard: a burst must never start once stop has been
+                # asked for, on ANY path that could reach here — see that function.
+                continue
+            # The burst's own transcript is deliberately NEVER logged here. `dictate`'s
+            # ad-hoc path prints it to stdout for the human watching that one terminal;
+            # `start`/`enable` run headless with stdout/stderr redirected to a PERSISTENT
+            # logfile (`agenttools_service`'s detached spawner), so doing the same thing
+            # here would silently write every word ever dictated — passwords included — to
+            # a plaintext file with no rotation, regardless of `--quiet`. The burst already
+            # typed the words where they were meant to go; the log only needs to know it
+            # ran, which `status.opened`/`status.closed` (inside `_burst`) already say.
+            try:
+                await _burst(args, device, models, settings, marker, active, toggle, mode)
+            except Exception as failed:
+                # A burst failing (the mic unplugged mid-recording, a decode error) must not
+                # take the whole daemon down with it — this docstring promises only SIGTERM/
+                # Ctrl-C end the process. Left uncaught, `stt mic enable`'s launchd unit
+                # (`KeepAlive`) would restart the whole process — reloading both models —
+                # for a failure that only needed to end one burst and return to idle.
+                status.note(f"a burst ended in an error: {failed}", quiet=args.quiet)
+    finally:
+        for sig in handled:
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.remove_signal_handler(sig)
+        watcher.stop()
+
+
+def _try_handle(
+    loop: asyncio.AbstractEventLoop, sig: signal.Signals, handler: Callable[[], None]
+) -> bool:
+    try:
+        loop.add_signal_handler(sig, handler)
+    except (NotImplementedError, RuntimeError):  # pragma: no cover - not the main thread
+        return False
+    return True
+
+
+async def _next_hotkey_edge(toggle: _Toggle, shutdown: asyncio.Event) -> bool:
+    """The next hotkey press/release while idle, or ``False`` if shutdown won the race first
+    (a release also means "keep idling" — only a press starts a burst).
+
+    Shutdown ALWAYS wins a simultaneous completion, checked first and unconditionally — a
+    security review found that a hotkey press already sitting in the queue when `stt mic
+    stop`/Ctrl-C arrives could resolve `get_task` and `shutdown_task` in the very same
+    `asyncio.wait`, and the original code checked `get_task` regardless of whether shutdown
+    ALSO completed. That started a burst — opened the microphone — after the user had just
+    asked the daemon to stop, the exact "a microphone left open is a room being recorded"
+    failure this whole design exists to prevent.
+    """
+    get_task = asyncio.create_task(toggle.events.get())
+    shutdown_task = asyncio.create_task(shutdown.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {get_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if shutdown_task in done:
+            return False
+        return bool(get_task in done and get_task.result())
+    finally:
+        for task in (get_task, shutdown_task):
+            if not task.done():
+                task.cancel()
+
+
+async def _burst(
+    args: argparse.Namespace,
+    device: capture.Device,
+    models: Models,
+    settings: config.Settings,
+    marker: int,
+    active: _Active,
+    toggle: _Toggle,
+    mode: str,
+) -> str:
+    """One activation: open the microphone, dictate, close it, and hand control back to idle."""
+    line = status.Line(enabled=not args.quiet)
+    dictating = Session(
+        typist=Typist(keys=_Keys(marker=marker)),
+        settled=models.settled,
+        draft=models.draft,
+        terms=dictionary.load() if settings.dictionary else dictionary.Dictionary(),
+        bias=bool(settings.dictionary and settings.dict_bias),
+        refuse=phrases.compile_all(phrases.load_user_patterns(config.app_home()))[0],
+        idle_after=_idle_seconds(args),
+        report=lambda progress: line.show(_paint(progress)),
+        gate=gate_for(settings),
+    )
+    active.session = dictating
+    active.stopper = _Stopper(dictating)
+    try:
+        status.note(f"listening on {device.name} — {_off_hint(mode)}", quiet=args.quiet)
+        burst = asyncio.create_task(
+            _through_the_microphone(device, dictating, line, quiet=args.quiet, interruptible=False)
+        )
+        off = asyncio.create_task(_await_release(toggle, mode))
+        done, _pending = await asyncio.wait({burst, off}, return_when=asyncio.FIRST_COMPLETED)
+        if off in done and not burst.done():
+            dictating.stop()
+        else:
+            off.cancel()
+        return await burst
+    finally:
+        active.session = None
+        active.stopper = None
+        line.clear()
+        await status.closed(said=dictating.transcript, quiet=args.quiet)
+
+
+async def _await_release(toggle: _Toggle, mode: str) -> None:
+    """Wait for whichever hotkey edge ends THIS burst: another press in toggle mode, a
+    release in hold mode. Any other edge (a release the daemon never asked about in toggle
+    mode, a spurious extra press mid-hold) is consumed here and ignored, rather than left in
+    the queue to misfire the next activation."""
+    while True:
+        pressed = await toggle.events.get()
+        if mode == "hold" and not pressed:
+            return
+        if mode == "toggle" and pressed:
+            return
+
+
+def _off_hint(mode: str) -> str:
+    if mode == "hold":
+        return "release the hotkey, or press Escape twice, to finish"
+    return "press the hotkey again, or Escape twice, to finish"
+
+
+def _watch_daemon(
+    marker: int, combo: hotkey.Combo, toggle: _Toggle, active: _Active
+) -> tap.Watcher:
+    """Start the ONE keyboard watcher the whole daemon shares across every burst.
+
+    Unlike the ad-hoc path's `_watch` (one `Watcher` per session), a daemon needs the tap
+    running while idle too — that is how it ever sees the hotkey that starts the first burst.
+    `on_key` (the correction-interrupt) is routed to whichever burst is currently open, if
+    any; while idle there is nothing to interrupt, so a press is simply dropped.
+    """
+
+    def arrived(code: int) -> None:
+        # Read ONCE into a local, not `if active.stopper is not None: active.stopper(code)`.
+        # `arrived` runs on the tap's own background thread; `_burst`'s `finally` clears
+        # `active.stopper` on the LOOP thread. Two separate reads of the same attribute let
+        # the loop thread null it between the check and the call — a key pressed at the
+        # exact instant a burst ends called `None(code)` inside the Quartz C callback,
+        # which is about as bad a place for an unhandled `TypeError` as this file has.
+        stopper = active.stopper
+        if stopper is not None:
+            stopper(code)
+
+    watcher = tap.Watcher(marker=marker, on_key=arrived, hotkey=combo, on_hotkey=toggle)
+    watcher.start()
+    if watcher.failure:
         watcher.stop()
         raise EngineError(
             what="stt cannot tell when you type",

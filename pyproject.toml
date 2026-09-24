@@ -25,6 +25,18 @@ mlx = ["mlx-whisper>=0.4"]
 # Speaker diarization. Heavy (torch + pyannote, ~2.5 GB) and gated behind a Hugging Face
 # token, so it is NEVER a default install: `stt diarize install` pulls it when asked.
 diarize = ["pyannote.audio>=3.1", "torch>=2.2"]
+# `stt mic` as a MANAGED SERVICE (run/start/status/stop/enable/disable + launchd/systemd
+# autostart, and the global push-to-talk hotkey daemon) is powered by the shared
+# `agenttools_service` lib — ONE service-manager every long-running agent-tools server reuses
+# (the review dashboard, spec-web, and now `stt mic`), instead of hand-rolling pidfiles/
+# autostart units per tool. It is an IN-ECOSYSTEM dependency
+# (agent-tools/lib/agenttools_service, itself stdlib-only + agenttools-daemon), not on PyPI,
+# so it CANNOT be listed as a normal dep. Install editable from the agent-tools checkout:
+#   pip install -e <agent-tools>/lib/agenttools_daemon -e <agent-tools>/lib/agenttools_service
+# The lazy import in commands/mic.py emits an actionable error (exit 127) if it is missing.
+# NOTE: this extra intentionally lists no PyPI packages — the dep is an in-ecosystem local
+# install. `stt mic run` (ad-hoc, foreground) and a bare `stt mic` work without it regardless.
+service = []
 test = ["pytest", "pytest-asyncio"]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 
@@ -61,4 +73,9 @@ warn_unreachable = true
 # `_colorize` is CPython's own, present from 3.13 on but absent from the 3.11 typeshed.
 [[tool.mypy.overrides]]
 module = ["mlx_whisper.*", "pyannote.*", "torch.*", "_colorize"]
+ignore_missing_imports = true
+# The in-ecosystem `agenttools_service` lib (see the `service` extra above) is not on PyPI
+# and carries no bundled type stubs available to this checkout's type-check env.
+[[tool.mypy.overrides]]
+module = ["agenttools_service.*"]
 ignore_missing_imports = true

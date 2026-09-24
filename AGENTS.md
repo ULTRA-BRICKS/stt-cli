@@ -42,11 +42,13 @@ invariants of its own on top of the ones below.
 | module | what it is |
 | --- | --- |
 | `quartz.py`, `tap.py` | the four macOS calls, through `ctypes`: type, backspace, watch, ask |
+| `hotkey.py` | a spec string ("cmd+shift+space") <-> the keycode + modifier bits `tap.py` matches |
 | `capture.py` | the microphone as PCM, via the ffmpeg that is already required |
 | `gate.py` | where one utterance ends, so silence never reaches a model |
 | `server.py` | a `whisper-server` process: a model that stays loaded between questions |
 | `typist.py` | what is on screen, what is ours, and the smallest edit between the two |
 | `session.py` | the two-speed loop; `dictation.py` wires it up, `status.py` reports |
+| `mic_service.py` | the `agenttools_service.Service` descriptor for `stt mic`'s daemon lifecycle |
 
 - **stt deletes only characters stt typed, and only while it still owns them.** Ownership
   ends the instant the user presses a key or clicks — see `Typist.disown`, which deliberately
@@ -63,6 +65,14 @@ invariants of its own on top of the ones below.
 - **A key code never leaves `tap.py` for anything but a comparison.** A system-wide key-down
   tap is a keylogger with a different name, and the only defence that holds is that nothing
   writes one to a log, a file or the archive.
+- **The daemon's own keyboard watcher is started once, for the whole process, not once per
+  burst.** A hotkey has to fire while idle (mic closed) too, since that idleness is what it
+  ends — the opposite of the ad-hoc path's `Watcher`, created fresh per session. `on_key`
+  (the correction interrupt) is routed to whichever burst is currently open, if any, and
+  dropped while idle; `on_hotkey` is always live. See `dictation._watch_daemon`.
+- **A hotkey must carry a modifier.** `hotkey.parse` refuses a bare key — without one it
+  would fire on every ordinary letter typed while the daemon idles, which is not a hotkey,
+  it is a keylogger that occasionally opens a microphone.
 - **Never call `quartz.type_text` or `press_backspace` outside `stt mic` without first
   focusing a throwaway document.** They type into the frontmost window of whoever is at the
   machine; the per-session marker only tells our own tap to ignore them. A benchmark of the

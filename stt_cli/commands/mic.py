@@ -9,6 +9,12 @@ dictionary reaches both, so a project name comes out spelled the way you wrote i
 Press any key yourself and stt stops correcting the sentence in flight and leaves it alone —
 it will never delete a character it did not type. Escape twice ends the session.
 
+A bare `stt mic` (no subcommand) is the ad-hoc path above: dictate right now, in this shell,
+until you stop it. `run`/`start`/`status`/`stop`/`enable`/`disable` are a SEPARATE, newer way
+to use the same dictation: a background daemon that loads both models once and then idles
+with the microphone CLOSED until a global hotkey opens it for one burst at a time — see
+`stt mic --help` for the ad-hoc flags and `stt mic run --help` for the daemon's.
+
 WHAT IT NEEDS THAT NOTHING ELSE IN STT NEEDS
     Accessibility and Microphone, both granted to the terminal application rather than to
     stt, because that is the level macOS grants them at.
@@ -29,8 +35,14 @@ import argparse
 import asyncio
 import math
 import sys
+from typing import TYPE_CHECKING
 
-from .._errors import EXIT_ENGINE, EXIT_OK, EXIT_PERMISSION, SttError
+from .._errors import EXIT_ENGINE, EXIT_MISSING_DEP, EXIT_OK, EXIT_PERMISSION, SttError
+from ..live import hotkey as hotkey_mod
+from ..live.mic_service import SERVE_TOKEN
+
+if TYPE_CHECKING:
+    from agenttools_service import ServiceManager
 
 NAME = "mic"
 SUMMARY = "dictate into the focused window, corrected live"
@@ -39,8 +51,16 @@ SUMMARY = "dictate into the focused window, corrected live"
 # or two. `base` is the smallest one that produces recognisable Russian.
 DEFAULT_DRAFT = "base"
 
+# The words that mean "manage the background daemon" rather than "dictate now, ad-hoc". None
+# of the ad-hoc flags below start with one of these bare words, so the split is unambiguous.
+_LIFECYCLE = ("run", "start", "stop", "status", "enable", "disable")
+
 
 def run(argv: list[str]) -> int:
+    if argv and argv[0] == SERVE_TOKEN:
+        return _serve(argv[1:])
+    if argv and argv[0] in _LIFECYCLE:
+        return _lifecycle(argv)
     args = _parse(argv)
     # Listing first. `--check` was tested first and `--list-devices` is handled further in,
     # so `stt mic --check --list-devices` spent six seconds listening instead of printing the
@@ -54,15 +74,11 @@ def run(argv: list[str]) -> int:
     return asyncio.run(dictation.dictate(args))
 
 
-def _parse(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="stt mic",
-        description=SUMMARY,
-        epilog=(
-            "any key you press yourself stops stt correcting the sentence in flight; "
-            "press Escape twice to finish"
-        ),
-    )
+def _add_dictation_flags(parser: argparse.ArgumentParser, *, daemon: bool) -> None:
+    """The flags common to the ad-hoc path and the daemon: one place a default or a help
+    string is written, instead of the two places `_parse`/`_daemon_parser` used to keep in
+    sync by hand. ``daemon`` only changes the `--idle-minutes` wording (a "session" versus
+    a "burst") — everything else is identical."""
     parser.add_argument("--device", help="microphone index or part of its name")
     parser.add_argument("--model", help="the accurate model (default: your configured one)")
     parser.add_argument(
@@ -84,22 +100,213 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="threads per model (default: your configured one; 0 lets the engine choose)",
     )
-    parser.add_argument(
-        "--idle-minutes",
-        type=_minutes,
-        default=None,
-        help="stop after this long with nobody speaking (0 to never stop)",
+    idle_help = (
+        "end a burst after this long with nobody speaking (0 to never)"
+        if daemon
+        else "stop after this long with nobody speaking (0 to never stop)"
     )
+    parser.add_argument("--idle-minutes", type=_minutes, default=None, help=idle_help)
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="no status line, sounds or notifications"
+    )
+
+
+def _parse(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="stt mic",
+        description=SUMMARY,
+        epilog=(
+            "any key you press yourself stops stt correcting the sentence in flight; "
+            "press Escape twice to finish. run/start/status/stop/enable/disable run the "
+            "same dictation as a background daemon behind a hotkey instead — see "
+            "`stt mic run --help`"
+        ),
+    )
+    _add_dictation_flags(parser, daemon=False)
     parser.add_argument(
         "--check",
         action="store_true",
         help="open the microphone, show what it hears, and say whether that is enough",
     )
-    parser.add_argument(
-        "-q", "--quiet", action="store_true", help="no status line, sounds or notifications"
-    )
     parser.add_argument("--list-devices", action="store_true", help="show microphones and exit")
     return parser.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------------------
+# The daemon: `run`/`start`/`status`/`stop`/`enable`/`disable`, via the shared
+# `agenttools_service` lib — the same one review-cli's dashboard and spec-web use, not
+# hand-rolled here. A bare `stt mic` above is completely unaffected by any of this.
+# ---------------------------------------------------------------------------------------
+
+_MISSING_LIB_MSG = (
+    "[stt mic] the managed-service subcommands need the shared 'agenttools_service' lib, "
+    "which isn't installed.\n"
+    "  why:  run/start/status/stop/enable/disable come from one shared service-manager "
+    "(agent-tools/lib/agenttools_service) — the same one review-cli's dashboard and spec-web "
+    "use — instead of a per-tool copy.\n"
+    "  fix:  pip install -e <agent-tools>/lib/agenttools_daemon "
+    "-e <agent-tools>/lib/agenttools_service\n"
+    "  note: `stt mic run` still works without it, and a bare `stt mic` (ad-hoc, no "
+    "subcommand) was never affected."
+)
+
+
+def _daemon_parser() -> argparse.ArgumentParser:
+    """The flags the daemon itself takes — shared between `_lifecycle` (as top-level options
+    on `run`/`start`/`status`/`stop`/`enable`/`disable`) and the hidden `__serve` entry those
+    actions ultimately run or detach."""
+    parser = argparse.ArgumentParser(
+        prog="stt mic",
+        description=f"{SUMMARY} — as a managed background daemon",
+        epilog=(
+            "run/start load both models once, then idle with the microphone CLOSED; the "
+            "hotkey opens it for one burst at a time. any key you press yourself during a "
+            "burst stops stt correcting the sentence in flight; Escape twice, the hotkey "
+            "again (toggle mode), or releasing it (hold mode) ends that burst. "
+            "`stt mic stop` ends the daemon itself."
+        ),
+    )
+    _add_dictation_flags(parser, daemon=True)
+    parser.add_argument(
+        "--hotkey",
+        type=_hotkey_spec,
+        default=None,
+        help=f"the chord that starts/stops dictation (default: {hotkey_mod.DEFAULT_HOTKEY}; "
+        "also settable with `stt config set hotkey ...`)",
+    )
+    parser.add_argument(
+        "--hotkey-mode",
+        choices=hotkey_mod.VALID_MODES,
+        default=None,
+        help="toggle: press once to start, again to stop. hold: dictate only while held "
+        f"(push-to-talk). (default: {hotkey_mod.DEFAULT_MODE})",
+    )
+    return parser
+
+
+def _lifecycle(argv: list[str]) -> int:
+    """`stt mic {run,start,status,stop,enable,disable}` — the daemon as a MANAGED service.
+
+      run      run the daemon in the FOREGROUND (this shell), blocking.
+      start    start it in the BACKGROUND (detached); return immediately.
+      status   is it running? pid / autostart-enabled.
+      stop     stop the background instance.
+      enable   install OS autostart (launchd / systemd --user) AND start now.
+      disable  remove OS autostart AND stop.
+
+    A bare `stt mic` (no lifecycle word) is UNCHANGED by any of this: it still dictates
+    immediately in this shell, ad-hoc, the way it always has. Everything here (the shared
+    service lib, the daemon's own flags) is imported lazily, so the ad-hoc path never pays
+    for it.
+    """
+    try:
+        from agenttools_service import add_service_subcommands, dispatch
+    except ImportError:
+        return _lifecycle_without_lib(argv)
+
+    parser = _daemon_parser()
+    subs = parser.add_subparsers(dest="action")
+    ns: argparse.Namespace
+    add_service_subcommands(subs, manager_factory=lambda: _manager(ns), service_name="mic")
+    ns = parser.parse_args(_reordered_for_argparse(argv))
+
+    def _print_help_ok() -> int:
+        parser.print_help()
+        return 0
+
+    return int(dispatch(ns, on_no_subcommand=_print_help_ok))
+
+
+def _reordered_for_argparse(argv: list[str]) -> list[str]:
+    """`stt mic start --hotkey X` — the lifecycle word first, its flags after, the only order
+    every example in this file's own help text and the README shows — does not parse as
+    written. `_daemon_parser`'s flags live on the PARENT parser, but once `argv[0]` (the
+    lifecycle word — guaranteed present and first; `run()` only reaches `_lifecycle` when it
+    is) is consumed as the subcommand, argparse hands everything AFTER it to that
+    subcommand's OWN subparser, which `add_service_subcommands` builds with no flags of its
+    own — so `--hotkey X` there is reported as unrecognized. Moving the lifecycle word to the
+    end lets the flags reach the parser that actually declares them, while `argv[0]` is still
+    what `run()` looks at to decide `_lifecycle` should run at all — the user-facing order
+    never changes, only what this function hands to `argparse.parse_args`.
+    """
+    if not argv:
+        return argv
+    return [*argv[1:], argv[0]]
+
+
+def _lifecycle_without_lib(argv: list[str]) -> int:
+    """Fallback when `agenttools_service` is not installed: `run` still works (it never
+    needed the lib, only the OS-lifecycle actions do); everything else names what to install.
+    """
+    action = argv[0]
+    if action == "run":
+        return _serve(argv[1:])
+    print(_MISSING_LIB_MSG, file=sys.stderr)
+    return EXIT_MISSING_DEP
+
+
+def _manager(ns: argparse.Namespace) -> ServiceManager:
+    """Build the `ServiceManager` for THIS invocation's flags (lazy: constructed only when an
+    action actually runs, per the shared lib's `manager_factory` contract)."""
+    from agenttools_service import ServiceManager
+
+    from ..live.mic_service import mic_service
+
+    return ServiceManager(mic_service(extra_argv=_daemon_extra_argv(ns)))
+
+
+def _daemon_extra_argv(ns: argparse.Namespace) -> list[str]:
+    """The parsed daemon flags, rendered back to CLI tokens for the detached `__serve`
+    process — one owner (this function) for what a daemon flag looks like on the wire."""
+    argv: list[str] = []
+    if ns.device is not None:
+        argv += ["--device", str(ns.device)]
+    if ns.model is not None:
+        argv += ["--model", ns.model]
+    argv += ["--draft-model", ns.draft_model]
+    if not ns.draft:
+        argv += ["--no-draft"]
+    if ns.language is not None:
+        argv += ["--language", ns.language]
+    if ns.threads is not None:
+        argv += ["--threads", str(ns.threads)]
+    if ns.idle_minutes is not None:
+        argv += ["--idle-minutes", str(ns.idle_minutes)]
+    if ns.hotkey is not None:
+        argv += ["--hotkey", ns.hotkey]
+    if ns.hotkey_mode is not None:
+        argv += ["--hotkey-mode", ns.hotkey_mode]
+    if ns.quiet:
+        argv += ["--quiet"]
+    return argv
+
+
+def _serve(rest: list[str]) -> int:
+    """Hidden entry: `stt mic __serve` — run the daemon, blocking, in THIS process.
+
+    What `run` runs directly and what `start`/`enable` detach into the background. Reachable
+    without the shared service lib (see `_lifecycle_without_lib`): a host that HAS the lib can
+    `start` a daemon whose detached child still lands here regardless.
+    """
+    args = _daemon_parser().parse_args(rest)
+    from ..live import dictation
+
+    asyncio.run(dictation.dictate_daemon(args))
+    return EXIT_OK
+
+
+def _hotkey_spec(given: str) -> str:
+    """`--hotkey` refusing a spec `hotkey.parse` cannot use, at parse time, not at daemon
+    startup. `stt mic enable` bakes the argv this validates into a launchd `LaunchAgent`
+    with `KeepAlive`; an unreachable `--hotkey` that only failed once the daemon actually
+    started would have crash-looped it — every restart reloading both models before dying
+    on the same invalid spec.
+    """
+    try:
+        hotkey_mod.parse(given)
+    except hotkey_mod.HotkeyError as broken:
+        raise argparse.ArgumentTypeError(str(broken)) from broken
+    return given
 
 
 def _minutes(given: str) -> float:

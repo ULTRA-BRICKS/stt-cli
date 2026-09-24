@@ -274,6 +274,40 @@ rather than a command. So provisional text here looks like ordinary typed text a
 corrected underneath you. If you would rather never see a wrong word at all, `--no-draft`
 types nothing until it is final.
 
+### Push-to-talk: a hotkey instead of a terminal window
+
+```bash
+stt config set hotkey "cmd+shift+space"   # the chord that starts/stops dictation
+stt config set hotkey_mode hold           # hold: push-to-talk. toggle: press twice
+stt mic enable                            # start now, and start at every login
+stt mic status                            # is it running?
+stt mic stop                              # stop it
+```
+
+`stt mic run`/`start`/`status`/`stop`/`enable`/`disable` run the same dictation as a
+background daemon instead of a foreground session: both models load once, and from then on
+the microphone stays CLOSED — nothing is captured — until the configured hotkey opens it for
+one burst. `hold` mode is push-to-talk in the literal, radio sense: dictate exactly while the
+chord is held, stop the instant you release it. `toggle` mode is press-once-to-start,
+press-again-to-stop, for a sentence you don't want to hold a key through. Either way, because
+both models are already loaded, the delay between the hotkey and the microphone being live is
+under a second — a cold ad-hoc `stt mic` spends 30-45 seconds loading them first.
+
+`enable` also installs OS autostart (a launchd `LaunchAgent`) so the daemon comes back after
+a restart; `disable` removes it. These six lifecycle subcommands come from the same
+`agenttools_service` library every other long-running agent-tools server uses (the review-cli
+dashboard, spec-web) — not reimplemented here — so it needs a small additional install:
+
+```bash
+pip install -e <agent-tools>/lib/agenttools_daemon -e <agent-tools>/lib/agenttools_service
+```
+
+Without it, `stt mic run` still works (an ad-hoc foreground daemon, Ctrl-C to stop); only
+`start`/`status`/`stop`/`enable`/`disable` need the library, and say so if it's missing.
+
+A bare `stt mic` — no subcommand — is completely unaffected by any of this: it still dictates
+immediately in the current terminal, exactly as it always has.
+
 ## Archive
 
 ```bash
@@ -309,7 +343,16 @@ stt config set language ru
 stt config set timestamps absolute
 stt config set timezone Europe/Belgrade
 stt config list
+stt config unset language          # back to the built-in default
 ```
+
+A bare `stt config`, typed at an interactive terminal, opens a browsable screen instead —
+every setting grouped by what it affects, with a plain-language description, worked
+examples, and the exact `stt config set` line an edit is equivalent to. Arrow keys or a
+mouse click move between settings and tabs, `/` searches by name or by what a setting does
+(typing "who is speaking" finds `diarize`), Enter edits, Space toggles a boolean, `r` resets
+one setting to its default. Piped, redirected, or run from a script, `stt config` prints the
+same plain list it always has — nothing about scripting it changes.
 
 A flag still wins over a stored value for a single run — in both directions. Every switch has
 a negative twin, so a stored default can always be turned off for one run: `--no-fix`,
