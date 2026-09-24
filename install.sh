@@ -2,7 +2,7 @@
 # install.sh — install the `stt` CLI (macOS, Python 3.11+)
 #
 # Works from a local clone (./install.sh) and piped from curl:
-#   curl -fsSL https://raw.githubusercontent.com/alex-mextner/stt-cli/main/install.sh | bash
+#   curl -fsSL https://git.hyperide.ai/ultrabricks/stt-cli/raw/branch/main/install.sh | bash
 #
 # stt has ZERO required Python dependencies — the engine is a native binary and every media
 # operation shells out to ffmpeg — so the install is fast and cannot be broken by a wheel
@@ -12,9 +12,10 @@ set -euo pipefail
 
 TOOL="stt"
 REPO="stt-cli"
-GITHUB_USER="alex-mextner"
+FORGE="https://git.hyperide.ai/ultrabricks"   # canonical home; github.com/alex-mextner is an archived mirror
 ENTRY="bin/stt"
 CLONE_BASE="${XDG_DATA_HOME:-$HOME/.local/share}"
+EXPECT_URL="$FORGE/$REPO.git"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -25,6 +26,22 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   warn "Metal acceleration and the file-creation-time handling are all Apple-specific."
   warn "Continuing anyway; expect rough edges."
 fi
+
+# Origins that are the same repo: the canonical Forgejo URL (https or ssh) and the pre-migration
+# GitHub ones. A GitHub origin is re-pointed at Forgejo — the GitHub copy is frozen.
+_origin_is_canonical() {
+  case "$1" in
+    "$EXPECT_URL"|"${EXPECT_URL%.git}"|*hyperide.ai*/ultrabricks/"$REPO"|*hyperide.ai*/ultrabricks/"$REPO".git) return 0 ;;
+  esac
+  return 1
+}
+_origin_is_legacy() {
+  case "$1" in
+    *github.com[:/]alex-mextner/"$REPO"|*github.com[:/]alex-mextner/"$REPO".git) return 0 ;;
+    *github.com[:/]ultrabricks/"$REPO"|*github.com[:/]ultrabricks/"$REPO".git) return 0 ;;
+  esac
+  return 1
+}
 
 # ── locate the source ─────────────────────────────────────────────────────────
 _script_dir=""
@@ -38,10 +55,12 @@ if [[ -n "$_script_dir" && -f "$_script_dir/$ENTRY" ]]; then
 else
   mkdir -p "$CLONE_BASE"
   CLONE_DIR="$CLONE_BASE/$REPO"
-  EXPECT_URL="https://github.com/$GITHUB_USER/$REPO.git"
   if [[ -d "$CLONE_DIR/.git" ]]; then
     actual_url="$(git -C "$CLONE_DIR" remote get-url origin 2>/dev/null || echo "")"
-    if [[ "$actual_url" != "$EXPECT_URL" ]]; then
+    if _origin_is_legacy "$actual_url"; then
+      say "stt: $REPO moved to $FORGE — re-pointing origin ($actual_url -> $EXPECT_URL)"
+      git -C "$CLONE_DIR" remote set-url origin "$EXPECT_URL"
+    elif ! _origin_is_canonical "$actual_url"; then
       warn "ERROR: $CLONE_DIR exists but its origin is '$actual_url', not $EXPECT_URL."
       warn "       Remove that directory or fix its remote, then re-run."
       exit 1

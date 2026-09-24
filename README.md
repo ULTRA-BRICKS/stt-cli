@@ -14,10 +14,33 @@ stt meeting.m4a --diarize -f speakers            # split into speaker turns
 
 ## Install
 
+Pick one — each ends with `stt` on your PATH:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alex-mextner/stt-cli/main/install.sh | bash
-stt setup       # detects what you already have, explains the options, picks an engine
+# 1. uv — recommended; macOS, Linux and Windows (incl. Cygwin / Git Bash)
+uv tool install git+https://git.hyperide.ai/ultrabricks/stt-cli
+
+# 2. pipx
+pipx install git+https://git.hyperide.ai/ultrabricks/stt-cli
+
+# 3. one-liner — clones to ~/.local/share/stt-cli, links stt into ~/.local/bin, registers the agent skill
+curl -fsSL https://git.hyperide.ai/ultrabricks/stt-cli/raw/branch/main/install.sh | bash
+
+# 4. from a clone — to hack on it; `git pull` updates the installed tool
+git clone https://git.hyperide.ai/ultrabricks/stt-cli && cd stt-cli && ./install.sh
 ```
+
+- After **1** or **2**, run `stt install-skill` once so coding agents discover `stt` (3 and 4 do it for you).
+- **Update:** `uv tool upgrade stt-cli` · `pipx upgrade stt-cli` · re-run the one-liner · `git pull`.
+- **Via rig:** clone into `~/xp/stt-cli` and list `stt` under `tools.items` in `~/.config/rig/config.yaml` — `rig apply commit` runs its `install.sh` and keeps the clone fresh.
+
+> **Not on PyPI — always install from the git URL.** A bare `pipx install stt-cli` /
+> `uv tool install stt-cli` does not install this tool: the name is unclaimed on PyPI or (for
+> `rig-cli`, `dev-cli`, `harness-cli`) belongs to an unrelated project. The canonical repo is
+> **git.hyperide.ai/ultrabricks/stt-cli**; `github.com/alex-mextner/stt-cli` is a frozen,
+> archived mirror.
+
+stt is **macOS-only**. Then run `stt setup` — it detects what you already have, explains the options and picks an engine.
 
 The installer adds `ffmpeg` and a speech engine if they are missing, and registers `stt`
 as an agent skill so coding agents find it on their own. `stt doctor` reports every
