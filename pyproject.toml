@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stt-cli"
+name = "hyper-stt"
 version = "0.3.4"
 description = "Speech-to-text for any audio/video file on macOS: VAD-gated transcription, hallucination and loop scrubbing, decoding variants with confidence, optional LLM correction and speaker diarization, all cached in a local content-addressed archive."
 readme = "README.md"
