@@ -104,18 +104,23 @@ def _set(key: str, raw: str) -> int:
 
         raise unknown_item("setting", key, sorted(config.configurable()))
     value = config.coerce(key, raw)
-    _validate_extra(key, value)
+    validate_extra(key, value)
     config.save_setting(key, value)
     print(f"{key} = {_show(value)}   ({config.config_path()})")
     return EXIT_OK
 
 
-def _validate_extra(key: str, value: object) -> None:
+def validate_extra(key: str, value: object) -> None:
     """A handful of settings mean nothing as a bare type-check — a syntactically fine string
     can still be a hotkey chord nothing can ever press, or a mode word that isn't one. Those
     get one extra pass here, refused with the SAME clean error `stt config set` and the TUI
     already refuse a bad type with, instead of surfacing later as a raw crash inside
     whatever actually tries to use the value.
+
+    Public — imported by ``configtui.apply_edit`` so the TUI's edit path shares this exact
+    check instead of re-implementing it against a private name (`list_settings`, just above,
+    was made public for the identical reason: the TUI reuses this module's logic, not just
+    its own copy of it).
     """
     if key in ("hotkey", "hotkey_mode") and value is not None:
         from ..live import hotkey as hotkey_mod

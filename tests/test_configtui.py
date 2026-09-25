@@ -208,3 +208,60 @@ def test_every_choice_offered_is_itself_a_value_apply_edit_accepts(
     for choice in configtui._choices()[key]:
         ok, _message = configtui.apply_edit(key, choice)
         assert ok, f"{key}={choice!r} from its own choice list was refused"
+
+
+# ── apply_edit shares config_cmd's PUBLIC extra-validation, not a private copy ──────────
+
+
+def test_apply_edit_reuses_config_cmds_validate_extra_for_a_bad_hotkey_chord(
+    tmp_path, monkeypatch
+) -> None:
+    """`apply_edit` must refuse exactly what `stt config set` refuses, through the SAME
+    `config_cmd.validate_extra` — proven by getting the identical refusal message out of
+    both paths for a syntactically fine string ("shift+a") that is still not a legal chord,
+    not just two independently-worded refusals that happen to both say no."""
+    from stt_cli._errors import SttError
+    from stt_cli.commands.config_cmd import _set
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    ok, message = configtui.apply_edit("hotkey", "shift+a")
+    assert not ok
+    with pytest.raises(SttError) as excinfo:
+        _set("hotkey", "shift+a")
+    assert message == excinfo.value.what, "the TUI and `stt config set` must refuse identically"
+    assert config.load_settings().hotkey is None, "the invalid chord was never stored"
+
+
+def test_configtui_imports_the_public_validate_extra_not_a_private_name() -> None:
+    """Ticket #48: `configtui` must not import `config_cmd._validate_extra` — `list_settings`
+    was already made public for exactly this reason, and `validate_extra` is its sibling."""
+    import inspect
+
+    from stt_cli.commands import config_cmd
+
+    assert hasattr(config_cmd, "validate_extra")
+    assert not hasattr(config_cmd, "_validate_extra")
+    source = inspect.getsource(configtui.apply_edit)
+    assert "_validate_extra" not in source
+    assert "validate_extra" in source
+
+
+# ── the curses.error fallback: a terminal too small/without TUI support never crashes ──
+
+
+def test_launch_falls_back_to_the_plain_list_on_a_curses_error(monkeypatch, capsys) -> None:
+    """Ticket #46's third acceptance criterion: a terminal too small or lacking TUI support
+    degrades to the existing plain list instead of crashing."""
+    import curses
+
+    from stt_cli._errors import EXIT_OK
+
+    def _raise(_loop):
+        raise curses.error("terminal too small")
+
+    monkeypatch.setattr(curses, "wrapper", _raise)
+    exit_code = configtui.launch()
+    assert exit_code == EXIT_OK
+    out = capsys.readouterr().out
+    assert "terminal error" in out
+    assert "backend" in out  # the `config list` fallback output that follows
