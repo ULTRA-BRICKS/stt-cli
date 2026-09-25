@@ -69,7 +69,7 @@ jobs:
       # npm-only repos need nothing extra. Pin each action to a commit SHA. Add/trim for YOUR
       # ecosystems:
       #   - uses: actions/setup-node@<pinned-sha>     # package-lock -> npm/pnpm/yarn audit
-      #   - uses: actions/setup-python@<pinned-sha>   # pyproject    -> pip-audit (pipx install pip-audit)
+      #   - uses: actions/setup-python@<pinned-sha>   # pyproject    -> pip-audit (pip install pip-audit — NOT pipx, which isn't preinstalled on this Forgejo runner image; see the step below)
       #   - run: rustup default stable                # Cargo.lock   -> cargo audit (cargo install cargo-audit)
       - name: Set up bun (bun.lock -> bun audit)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -83,7 +83,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install pip-audit
-        run: pipx install pip-audit
+        # WHY NOT pipx (stt-cli#53): pipx itself is not preinstalled on this Forgejo
+        # runner image (unlike GitHub's hosted ubuntu-latest, which ships it) — the step
+        # failed with "pipx: command not found" (exit 127) on every run, unrelated to any
+        # dependency advisory. `pip install` needs no extra tool: it drops pip-audit's
+        # console script straight into the same interpreter's bin dir that
+        # actions/setup-python already put on PATH.
+        run: pip install --quiet pip-audit
 
       # codeql[actions/untrusted-checkout/medium]
       # Justified: under pull_request_target this fetches the PR head as a git OBJECT only —
