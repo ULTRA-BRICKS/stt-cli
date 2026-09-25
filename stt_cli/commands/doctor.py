@@ -10,6 +10,9 @@ thirty-second check rather than a discovery made forty minutes into a transcript
 from __future__ import annotations
 
 import argparse
+import sys
+import time
+from collections.abc import Callable
 
 from .. import backends, config, llm, proc, resources
 from .._errors import EXIT_MISSING_DEP, EXIT_OK
@@ -20,18 +23,79 @@ SUMMARY = "check ffmpeg, engines, models, LLM tools and disk space"
 
 def run(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="stt doctor", description=SUMMARY)
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="after reporting, attempt auto-fixable gaps (currently: trigger the native "
+        "macOS Accessibility prompt) and report the result",
+    )
+    args = parser.parse_args(argv)
 
     required_ok = _media_section()
     engine_ok = _engine_section()
     _optional_section()
     _storage_section()
 
+    if args.fix:
+        _fix_section()
+
     if required_ok and engine_ok:
         print("\nEverything stt needs is present.")
         return EXIT_OK
     print("\nSomething required is missing — see the fix lines above, or run `stt setup`.")
     return EXIT_MISSING_DEP
+
+
+def _fix_section() -> None:
+    """`--fix`: attempt the auto-fixable gaps found above, then report where they landed.
+
+    The only fixable gap today is Accessibility, and "fix" is generous: the OS lets code
+    RAISE its own consent flow (`quartz.ask_for_trust`) but never lets code finish it —
+    completing it stays the user's, done in their own time. This waits a few seconds for
+    whoever is at the machine to do that, then reports whichever state it settled in; it
+    never blocks indefinitely on an action that may not come.
+    """
+    from ..live import quartz
+
+    print("\nfix")
+    if quartz.trusted():
+        print(f"  {_mark(True)} Accessibility: already granted, nothing to fix")
+        return
+    if sys.platform != "darwin":
+        # `ask_for_trust`/`trusted` both fail soft to False off macOS (no frameworks to
+        # load), indistinguishable from "prompt shown, not yet granted" — so without this
+        # gate the report below would tell a Linux user to follow a dialog that can never
+        # appear, then poll it for several silent seconds before saying so.
+        print(f"  {_mark(False)} Accessibility: not applicable (macOS only)")
+        return
+    print(
+        "  a native macOS Accessibility prompt is about to appear — follow it to grant "
+        "access to your terminal application"
+    )
+    quartz.ask_for_trust()
+    granted = _wait_for_trust(quartz.trusted)
+    print(f"  {_mark(granted)} Accessibility: {'granted' if granted else 'still NOT granted'}")
+    if not granted:
+        print("      if you granted it just now, stt may need a new terminal to see it:")
+        print(f"      {quartz.ACCESSIBILITY_HINT}")
+
+
+def _wait_for_trust(
+    is_trusted: Callable[[], bool], *, attempts: int = 10, interval: float = 1.0
+) -> bool:
+    """Poll `is_trusted` for a few seconds, sleeping only BETWEEN checks.
+
+    A single immediate check would read the prompt's OWN pre-action state almost every
+    time — completing it is a human action on their own schedule, not an instant callback.
+    `is_trusted` is injected (rather than this calling `quartz.trusted` itself) so a test
+    can prove the retry happens without waiting on a real clock or a real dialog.
+    """
+    for attempt in range(attempts):
+        if is_trusted():
+            return True
+        if attempt < attempts - 1:
+            time.sleep(interval)
+    return False
 
 
 def _media_section() -> bool:
@@ -85,7 +149,10 @@ def _optional_section() -> None:
     names = ", ".join(t.name for t in tools) or "none"
     print(f"  {_mark(bool(tools))} LLM correction / --summary: {names}")
     if not tools:
-        print(f"      fix: install one of {', '.join(llm.ORDER)} to enable --fix and --summary")
+        print(
+            f"      fix: install one of {', '.join(llm.ORDER)} to enable "
+            "`stt transcribe --fix`/`--summary`"
+        )
 
     import asyncio
 

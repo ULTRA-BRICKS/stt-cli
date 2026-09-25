@@ -87,3 +87,130 @@ def test_config_round_trip_through_the_cli(capsys) -> None:
     capsys.readouterr()
     assert main(["config", "get", "language"]) == EXIT_OK
     assert capsys.readouterr().out.strip() == "ru"
+
+
+@pytest.fixture
+def no_diarize_probe(monkeypatch):
+    """`doctor`'s optional section always calls `diarize.ready()`, which shells out to a
+    real `uv run` and, on a warm cache, imports torch — tens of seconds. Every doctor test
+    below stubs it out to keep this file's own no-GPU/no-network contract (see the module
+    docstring), matching the same stub `test_read_only_commands_run` already applies.
+    """
+    from stt_cli import diarize as diarize_mod
+
+    async def not_ready() -> bool:
+        return False
+
+    monkeypatch.setattr(diarize_mod, "ready", lambda **_: not_ready())
+
+
+def test_doctor_fix_prompts_when_accessibility_not_granted(
+    monkeypatch, capsys, no_diarize_probe
+) -> None:
+    """`stt doctor --fix` triggers the native prompt exactly when Accessibility is missing,
+    and reports the state the poll afterwards settles in."""
+    import sys
+
+    from stt_cli.live import quartz
+
+    state = {"granted": False}
+    asked = []
+
+    def fake_ask_for_trust() -> bool:
+        asked.append(True)
+        state["granted"] = True  # the "click" a human would make, simulated instantly
+        return False
+
+    monkeypatch.setattr(quartz, "trusted", lambda: state["granted"])
+    monkeypatch.setattr(quartz, "ask_for_trust", fake_ask_for_trust)
+    # The prompt is only raised on macOS; CI runs this file on ubuntu-latest too (see
+    # .github/workflows/tests.yml), so without pinning this here the new platform gate in
+    # `_fix_section` would short-circuit before `ask_for_trust` and this test would fail.
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    main(["doctor", "--fix"])
+
+    assert asked == [True]
+    out = capsys.readouterr().out
+    assert "Accessibility: granted" in out
+
+
+def test_doctor_fix_skips_prompt_when_already_granted(
+    monkeypatch, capsys, no_diarize_probe
+) -> None:
+    """Nothing to fix, nothing shown."""
+    from stt_cli.live import quartz
+
+    asked = []
+    monkeypatch.setattr(quartz, "trusted", lambda: True)
+    monkeypatch.setattr(quartz, "ask_for_trust", lambda: asked.append(True))
+
+    main(["doctor", "--fix"])
+
+    assert asked == []
+    out = capsys.readouterr().out
+    assert "already granted, nothing to fix" in out
+
+
+def test_doctor_fix_reports_not_applicable_off_macos(monkeypatch, capsys, no_diarize_probe) -> None:
+    """Off macOS, `trusted`/`ask_for_trust` both fail soft to `False` — indistinguishable
+    from "prompt shown, not yet granted" — so `--fix` must gate on the platform itself
+    rather than tell a Linux user to follow a dialog that can never appear."""
+    import sys
+
+    from stt_cli.live import quartz
+
+    asked = []
+    monkeypatch.setattr(quartz, "trusted", lambda: False)
+    monkeypatch.setattr(quartz, "ask_for_trust", lambda: asked.append(True))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    main(["doctor", "--fix"])
+
+    assert asked == []
+    assert "not applicable" in capsys.readouterr().out
+
+
+def test_doctor_without_fix_never_prompts(monkeypatch, capsys, no_diarize_probe) -> None:
+    """The default `stt doctor` (no `--fix`) never pops the native dialog."""
+    from stt_cli.live import quartz
+
+    asked = []
+    monkeypatch.setattr(quartz, "trusted", lambda: False)
+    monkeypatch.setattr(quartz, "ask_for_trust", lambda: asked.append(True))
+
+    main(["doctor"])
+
+    assert asked == []
+    assert "\nfix" not in capsys.readouterr().out
+
+
+def test_wait_for_trust_retries_until_the_predicate_flips() -> None:
+    """The whole point of the poll: it retries rather than trusting a single stale read.
+
+    Deleting the retry loop (returning `is_trusted()` once) would make this fail, unlike
+    the CLI-level tests above where the fake flips synchronously on the first check.
+    """
+    from stt_cli.commands.doctor import _wait_for_trust
+
+    calls = {"n": 0}
+
+    def flips_on_the_third_check() -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    assert _wait_for_trust(flips_on_the_third_check, attempts=5, interval=0) is True
+    assert calls["n"] == 3
+
+
+def test_wait_for_trust_times_out_when_never_granted() -> None:
+    from stt_cli.commands.doctor import _wait_for_trust
+
+    calls = {"n": 0}
+
+    def never_trusted() -> bool:
+        calls["n"] += 1
+        return False
+
+    assert _wait_for_trust(never_trusted, attempts=4, interval=0) is False
+    assert calls["n"] == 4
