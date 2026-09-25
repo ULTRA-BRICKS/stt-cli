@@ -34,6 +34,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .. import config
+from ._keycodes import (
+    BACKSPACE_KEYS,
+    ENTER_KEYS,
+    ESCAPE_KEYS,
+    KEY_TAB,
+    PRINTABLE_HIGH,
+    PRINTABLE_LOW,
+)
 
 # ---------------------------------------------------------------------------------------
 # Metadata: grouping, descriptions, examples and fixed choices for every configurable
@@ -218,15 +226,15 @@ class TuiState:
 def apply_edit(key: str, raw: str) -> tuple[bool, str]:
     """Coerce and store one typed value, the same way `stt config set` does — the TUI's
     edit prompt and the CLI command share this exact path (including the extra hotkey/mode
-    check `config_cmd._validate_extra` does — a bad chord is refused here too, with a clean
+    check `config_cmd.validate_extra` does — a bad chord is refused here too, with a clean
     message, instead of only failing later when a daemon tries to start), so an edit here
     can never accept something `stt config set` would refuse, or vice versa."""
     from .._errors import SttError
-    from .config_cmd import _validate_extra
+    from .config_cmd import validate_extra
 
     try:
         value = config.coerce(key, raw)
-        _validate_extra(key, value)
+        validate_extra(key, value)
         config.save_setting(key, value)
     except SttError as failed:
         return False, failed.what
@@ -327,13 +335,13 @@ def _handle(
 ) -> tuple[config.Settings, dict[str, Any], bool]:
     if state.search is not None:
         return _handle_search(state, key, settings, stored)
-    if key in (ord("q"), 27):  # q or plain Escape
+    if key in (ord("q"), *ESCAPE_KEYS):  # q or plain Escape
         return settings, stored, False
     if key in (curses.KEY_UP, ord("k")):
         state.move(-1)
     elif key in (curses.KEY_DOWN, ord("j")):
         state.move(1)
-    elif key in (curses.KEY_LEFT, ord("h"), 9):  # Tab also cycles groups
+    elif key in (curses.KEY_LEFT, ord("h"), KEY_TAB):  # Tab also cycles groups
         state.prev_group()
     elif key in (curses.KEY_RIGHT, ord("l")):
         state.next_group()
@@ -346,7 +354,7 @@ def _handle(
             state.message_ok = ok
             if ok:
                 settings, stored = _reload()
-    elif key in (10, 13, curses.KEY_ENTER, ord(" ")):
+    elif key in (*ENTER_KEYS, ord(" ")):
         settings, stored = _activate(stdscr, state, settings, stored, toggle_only=key == ord(" "))
     elif key == curses.KEY_MOUSE:
         settings, stored = _handle_mouse(stdscr, state, settings, stored)
@@ -359,15 +367,15 @@ def _handle_search(
     settings: config.Settings,
     stored: dict[str, Any],
 ) -> tuple[config.Settings, dict[str, Any], bool]:
-    if key in (27, 10, 13, curses.KEY_ENTER):  # Escape or Enter both leave search mode
+    if key in (*ESCAPE_KEYS, *ENTER_KEYS):  # Escape or Enter both leave search mode
         state.end_search()
     elif key == curses.KEY_UP:
         state.move(-1)
     elif key == curses.KEY_DOWN:
         state.move(1)
-    elif key in (curses.KEY_BACKSPACE, 127, 8):
+    elif key in BACKSPACE_KEYS:
         state.type_search((state.search or "")[:-1])
-    elif 32 <= key < 127:
+    elif PRINTABLE_LOW <= key < PRINTABLE_HIGH:
         state.type_search((state.search or "") + chr(key))
     return settings, stored, True
 
@@ -472,23 +480,23 @@ def _prompt(stdscr: curses.window, key: str, current: object) -> str | None:
         with contextlib.suppress(curses.error):
             stdscr.move(height - 1, min(len(line) + cursor, max(0, width - 2)))
         code = stdscr.getch()
-        if code in (27,):
+        if code in ESCAPE_KEYS:
             curses.curs_set(0)
             return None
-        if code in (10, 13, curses.KEY_ENTER):
+        if code in ENTER_KEYS:
             curses.curs_set(0)
             return buf
-        if code == 9 and choices:  # Tab: cycle to the next fixed choice
+        if code == KEY_TAB and choices:  # Tab: cycle to the next fixed choice
             here = choices.index(buf) if buf in choices else -1
             buf = choices[(here + 1) % len(choices)]
             cursor = len(buf)
-        elif code in (curses.KEY_BACKSPACE, 127, 8):
+        elif code in BACKSPACE_KEYS:
             buf, cursor = buf[: max(0, cursor - 1)] + buf[cursor:], max(0, cursor - 1)
         elif code == curses.KEY_LEFT:
             cursor = max(0, cursor - 1)
         elif code == curses.KEY_RIGHT:
             cursor = min(len(buf), cursor + 1)
-        elif 32 <= code < 127:
+        elif PRINTABLE_LOW <= code < PRINTABLE_HIGH:
             buf = buf[:cursor] + chr(code) + buf[cursor:]
             cursor += 1
 

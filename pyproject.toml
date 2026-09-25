@@ -67,6 +67,11 @@ asyncio_mode = "auto"
 
 [tool.mypy]
 python_version = "3.11"
+# Pin the type-check target OS: this is a macOS-only tool (see AGENTS.md), so mypy
+# must model Darwin regardless of which OS actually runs mypy (e.g. Linux CI runners),
+# or sys.platform guards get statically evaluated with the wrong branch flagged
+# unreachable under warn_unreachable/strict.
+platform = "darwin"
 strict = true
 warn_unreachable = true
 # Optional engines are imported lazily and are not installed in the type-check env.

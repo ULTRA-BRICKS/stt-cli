@@ -158,9 +158,17 @@ def ask_for_trust() -> bool:
         core.CFRelease(options)
 
 
+# A full URL, not the relative `docs/accessibility.md` path: this hint is read by whoever
+# installed stt however they installed it (`uv tool install`, a plain `pip install`, the
+# packaged wheel), and only `stt_cli*` ships in the package (see `pyproject.toml`) — `docs/`
+# does not.
+ACCESSIBILITY_DOC_URL = (
+    "https://git.hyperide.ai/ultrabricks/stt-cli/src/branch/main/docs/accessibility.md"
+)
 ACCESSIBILITY_HINT = (
     "grant Accessibility to the terminal application running stt in System Settings > "
-    "Privacy & Security > Accessibility, then start a new terminal"
+    "Privacy & Security > Accessibility, then start a new terminal "
+    f"(see {ACCESSIBILITY_DOC_URL} for why stt cannot do this step itself)"
 )
 
 

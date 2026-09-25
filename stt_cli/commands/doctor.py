@@ -210,10 +210,7 @@ def _dictation_line() -> None:
 
         print(f"      fix: {SERVER_HINT}")
     if not granted:
-        print(
-            "      fix: grant Accessibility to your terminal in System Settings > "
-            "Privacy & Security, then start a new terminal"
-        )
+        print(f"      fix: {quartz.ACCESSIBILITY_HINT}")
 
 
 def _storage_section() -> None:
