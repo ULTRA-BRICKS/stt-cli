@@ -35,7 +35,7 @@ from typing import Any
 
 __all__ = ["__version__"]
 
-DISTRIBUTION = "stt-cli"
+DISTRIBUTION = "hyper-stt"
 _UNKNOWN = "0+unknown"
 
 
