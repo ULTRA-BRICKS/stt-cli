@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyper-stt"
-version = "0.3.4"
+version = "0.4.0"
 description = "Speech-to-text for any audio/video file on macOS: VAD-gated transcription, hallucination and loop scrubbing, decoding variants with confidence, optional LLM correction and speaker diarization, all cached in a local content-addressed archive."
 readme = "README.md"
 requires-python = ">=3.11"
