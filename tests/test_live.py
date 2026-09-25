@@ -1619,6 +1619,45 @@ def test_doctor_survives_the_broken_config_it_exists_to_report(
     assert "fix:" in said, "and it says what to do about it"
 
 
+def test_doctor_prints_the_shared_accessibility_hint_not_a_local_copy(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """`_dictation_line` used to hand-duplicate `quartz.ACCESSIBILITY_HINT` with slightly
+    different wording. Pin it to the shared constant directly — a doc-only check (below)
+    would keep passing even if a local string crept back into doctor.py, because nothing
+    would then compare doctor's actual STDOUT to the constant it is supposed to reuse."""
+    from stt_cli import config
+    from stt_cli.backends import whispercpp
+    from stt_cli.commands import doctor
+    from stt_cli.live import quartz
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    config.ensure_dirs()
+    monkeypatch.setattr(whispercpp, "server_binary", lambda root=None: "/somewhere/whisper-server")
+    monkeypatch.setattr(quartz, "trusted", lambda: False)
+
+    doctor._dictation_line()
+
+    said = capsys.readouterr().out
+    # Not just "the hint appears somewhere" — a re-added local `print` alongside the shared
+    # constant would leave a SECOND "fix:" line with wording that could silently drift from
+    # this one, and a bare `in` check would not notice. There is exactly one Accessibility
+    # fix line, and it ends the report.
+    assert said.count("fix:") == 1
+    assert said.endswith(f"      fix: {quartz.ACCESSIBILITY_HINT}\n")
+
+
+def test_the_accessibility_doc_quotes_the_current_hint_verbatim() -> None:
+    """docs/accessibility.md commits a sample `stt doctor` line so a reader can trust the
+    pointer the hint gives them without running stt themselves. Pinned to the exact printed
+    line (leading spaces and the `fix:` prefix included), not just the hint text on its own,
+    so an indentation drift between the doc's sample and doctor's real output is caught too."""
+    from stt_cli.live import quartz
+
+    doc = Path(__file__).resolve().parent.parent / "docs" / "accessibility.md"
+    assert f"      fix: {quartz.ACCESSIBILITY_HINT}" in doc.read_text(encoding="utf-8")
+
+
 def test_a_conjunct_or_a_syllable_block_is_one_press_of_backspace() -> None:
     """The claim that this counting is "safe because it under-counts" was false for scripts
     nobody here had tried. `क्ष` is one character in a text field and was counted as two,
