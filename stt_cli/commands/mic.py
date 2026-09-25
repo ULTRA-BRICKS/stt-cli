@@ -55,6 +55,12 @@ DEFAULT_DRAFT = "base"
 # of the ad-hoc flags below start with one of these bare words, so the split is unambiguous.
 _LIFECYCLE = ("run", "start", "stop", "status", "enable", "disable")
 
+# `agenttools_service.run_action`'s own convention (its docstring: "3 when status/stop find
+# nothing running") — `_status` returns it too when IT is the one deciding nothing is
+# running, so a script branching on `stt mic status`'s exit code sees one convention either
+# way, not a different number depending on which code path answered.
+_EXIT_NOT_RUNNING = 3
+
 
 def run(argv: list[str]) -> int:
     if argv and argv[0] == SERVE_TOKEN:
@@ -116,10 +122,15 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         prog="stt mic",
         description=SUMMARY,
         epilog=(
-            "any key you press yourself stops stt correcting the sentence in flight; "
-            "press Escape twice to finish. run/start/status/stop/enable/disable run the "
-            "same dictation as a background daemon behind a hotkey instead — see "
-            "`stt mic run --help`"
+            "types twice per sentence: a fast draft model answers first so words appear "
+            "while you are still speaking, then the accurate model replaces them a moment "
+            "later with punctuation and proper nouns corrected. any key you press yourself "
+            "stops that second pass on the sentence in flight; press Escape twice to finish. "
+            "needs Accessibility and Microphone granted to the TERMINAL running stt (not "
+            "stt itself) — System Settings > Privacy & Security. if nothing appears at all, "
+            "`stt mic --check` shows what the microphone actually hears against the bar it "
+            "has to clear. run/start/status/stop/enable/disable run the same dictation as a "
+            "background daemon behind a hotkey instead — see `stt mic run --help`"
         ),
     )
     _add_dictation_flags(parser, daemon=False)
@@ -160,10 +171,20 @@ def _daemon_parser() -> argparse.ArgumentParser:
         description=f"{SUMMARY} — as a managed background daemon",
         epilog=(
             "run/start load both models once, then idle with the microphone CLOSED; the "
-            "hotkey opens it for one burst at a time. any key you press yourself during a "
-            "burst stops stt correcting the sentence in flight; Escape twice, the hotkey "
+            "hotkey opens it for one burst at a time — a fast draft model answers first, "
+            "then the accurate one retypes it corrected, same two-pass dictation as the "
+            "ad-hoc path (see `stt mic --help`). any key you press yourself during a burst "
+            "stops that second pass on the sentence in flight; Escape twice, the hotkey "
             "again (toggle mode), or releasing it (hold mode) ends that burst. "
-            "`stt mic stop` ends the daemon itself."
+            "`stt mic stop` ends the daemon itself. needs Accessibility and Microphone: "
+            "granted to the TERMINAL for `run` (foreground, this shell) — but `start`/"
+            "`enable` detach into a launchd-spawned process with its OWN grant, separate "
+            "from any terminal's, so `stt mic status` names that process specifically if "
+            "it is what is missing the grant. System Settings > Privacy & Security. the "
+            "pidfile lives at $XDG_STATE_HOME/stt/mic.pid (default "
+            "~/.local/state/stt/mic.pid), the log at $XDG_CACHE_HOME/stt/mic.log (default "
+            "~/.cache/stt/mic.log) — the first place to look if `stt mic status` says it is "
+            "enabled but dictation never actually starts."
         ),
     )
     _add_dictation_flags(parser, daemon=True)
@@ -206,14 +227,24 @@ def _lifecycle(argv: list[str]) -> int:
 
     parser = _daemon_parser()
     subs = parser.add_subparsers(dest="action")
-    ns: argparse.Namespace
+    # `ns` is bound to a real (if not yet populated) `Namespace` from this first line, not
+    # merely annotated — `manager_factory` below closes over it before it holds anything,
+    # and reading a name a closure captures before its enclosing function ever assigns it
+    # is exactly the "bare-annotated before assignment" shape #48 flagged here. Passing this
+    # same object to `parse_args(namespace=...)` has it populate `ns` IN PLACE instead of
+    # building a new one and rebinding the name, so there is only ever one assignment.
+    ns = argparse.Namespace()
     add_service_subcommands(subs, manager_factory=lambda: _manager(ns), service_name="mic")
-    ns = parser.parse_args(_reordered_for_argparse(argv))
+    parser.parse_args(_reordered_for_argparse(argv), namespace=ns)
 
     def _print_help_ok() -> int:
         parser.print_help()
         return 0
 
+    if ns.action == "status":
+        # The one action the shared lib cannot answer correctly for an OS-managed
+        # (`enable`d) daemon — see `_status` and ticket #54.
+        return _status(ns)
     return int(dispatch(ns, on_no_subcommand=_print_help_ok))
 
 
@@ -253,6 +284,70 @@ def _manager(ns: argparse.Namespace) -> ServiceManager:
     from ..live.mic_service import mic_service
 
     return ServiceManager(mic_service(extra_argv=_daemon_extra_argv(ns)))
+
+
+def _status(ns: argparse.Namespace) -> int:
+    """`stt mic status`, but naming the real state instead of a bare "running" (#54).
+
+    `ServiceManager.status()` cannot distinguish a genuinely alive daemon from a launchd
+    job that is merely REGISTERED for an OS-managed (`enable`d) service: there is no
+    pidfile to probe there, only "is the unit installed" — its own docstring calls this
+    "deliberately out of scope here; use the OS's own tools for authoritative OS-managed
+    liveness." `mic_service.probe_launchd` is that OS tool; this is where its answer
+    reaches the CLI. Every other state (a pidfile-tracked instance, a genuinely stopped
+    one, a foreign listener) is already reported correctly, so those fall straight through
+    to the shared lib's own formatting.
+    """
+    from agenttools_service import run_action
+
+    from ..live import mic_service
+
+    manager = _manager(ns)
+    # `run_action` re-derives `ServiceManager.status()` internally (no way to hand it a
+    # `ServiceStatus` already in hand) — a second pidfile/plist read on the fall-through
+    # paths below, not a bug: cheap, and the alternative is reimplementing its formatting.
+    st = manager.status()
+    if st.state != "autostart":
+        return int(run_action(manager, "status"))
+
+    probe = mic_service.probe_launchd(manager.service.label)
+    if probe is None:
+        # launchctl itself unreachable (or off macOS): no better answer than the shared
+        # lib's own OS-managed-is-presumed-running read.
+        return int(run_action(manager, "status"))
+    if probe.alive:
+        # The shared lib's own status() has no pid here (an OS-managed instance has no
+        # pidfile to read one from) — launchctl just gave us a better answer than
+        # `run_action` would print, so use it instead of discarding it.
+        print(f"mic: running (pid {probe.pid}) [autostart on]")
+        return EXIT_OK
+
+    # Registered and enabled, but launchd has no live process for it right now — exactly
+    # the crash-loop #54 was filed from. The reason, when known, comes from the DAEMON's
+    # own diagnosed exit code — NOT `quartz.trusted()` of this CLI process: a launchd job
+    # execs a different binary under a different TCC identity than the terminal `status`
+    # runs in, so a terminal already granted Accessibility (the common case: ad-hoc `stt
+    # mic` already works, which is why someone ran `enable` at all) would make
+    # `quartz.trusted()` here answer for the WRONG process and miss the diagnosis
+    # entirely. `require_accessibility` (`live/quartz.py`) is the only place anywhere
+    # `dictate_daemon` can reach that raises `PermissionDeniedError`, so the daemon's own
+    # `last exit code == EXIT_PERMISSION` is unambiguous evidence about THAT process.
+    exit_note = "" if probe.last_exit_code is None else f" (last exit code {probe.last_exit_code})"
+    if probe.last_exit_code == EXIT_PERMISSION:
+        print(
+            f"mic: not running — crash-looping{exit_note}: the daemon exited denied Accessibility"
+        )
+        print(
+            "     fix: grant Accessibility to the process launchd runs for the daemon "
+            "(its python interpreter, or bin/stt — add it manually in System Settings > "
+            "Privacy & Security > Accessibility if not listed; the terminal `stt mic "
+            "status` runs in does not cover this separate, launchd-spawned process), "
+            "then `stt mic disable && stt mic enable`"
+        )
+        return EXIT_PERMISSION
+    print(f"mic: not running — enabled, but currently down between restarts{exit_note}")
+    print(f"     check the log: {manager.service.logfile}")
+    return _EXIT_NOT_RUNNING
 
 
 def _daemon_extra_argv(ns: argparse.Namespace) -> list[str]:
