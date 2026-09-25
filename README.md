@@ -263,7 +263,9 @@ the same window and each would delete what it believed it wrote.
 
 It needs two permissions, both granted to the terminal application rather than to stt,
 because that is the level macOS grants them at: **Accessibility**, to type at all, and
-**Microphone**, the first time it records.
+**Microphone**, the first time it records. `stt doctor --fix` triggers macOS's own
+Accessibility consent flow if it has not been granted yet — stt cannot complete that flow
+for you, so finishing it is still yours to do.
 
 `stt mic --check` is what to run when dictation appears to do nothing, which is a real way
 for it to fail: if every frame the microphone delivers is below the bar the detector sets,

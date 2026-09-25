@@ -1148,6 +1148,39 @@ def test_typing_never_splits_an_emoji_in_half() -> None:
     assert all(piece.encode("utf-16-le") for piece in pieces)
 
 
+def test_ask_for_trust_fails_soft_when_the_frameworks_do_not_load(monkeypatch) -> None:
+    """Mirrors `trusted()`'s own contract: a machine without the frameworks (not macOS)
+    gets `False` rather than a crash on `stt doctor --fix`."""
+    from stt_cli.live import quartz
+
+    def boom() -> quartz._Frameworks:
+        raise OSError("framework not found")
+
+    monkeypatch.setattr(quartz, "frameworks", boom)
+    assert quartz.ask_for_trust() is False
+
+
+def test_ask_for_trust_fails_soft_when_a_symbol_is_missing(monkeypatch) -> None:
+    """`ctypes.in_dll` raises `ValueError` (not `OSError`) for a symbol that isn't exported
+    — an OS version that renamed or dropped one of the CF/AX constants this function looks
+    up. Only that one lookup is faked; `ask_for_trust` returns as soon as it fails, before
+    any real CF/AX call is made, so this can never pop a real dialog.
+    """
+    import ctypes
+
+    from stt_cli.live import quartz
+
+    real_in_dll = ctypes.c_void_p.in_dll
+
+    def fake_in_dll(dll: ctypes.CDLL, name: str) -> ctypes.c_void_p:
+        if name == "kAXTrustedCheckOptionPrompt":
+            raise ValueError(f"symbol {name!r} not found")
+        return real_in_dll(dll, name)
+
+    monkeypatch.setattr(ctypes.c_void_p, "in_dll", fake_in_dll)
+    assert quartz.ask_for_trust() is False
+
+
 def test_a_sentence_that_never_ends_is_cut_anyway() -> None:
     """Somebody who talks without pausing should still see text, and the accurate pass has to
     be handed a bounded amount of work."""

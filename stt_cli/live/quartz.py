@@ -1,17 +1,18 @@
-"""quartz — the three macOS calls live dictation needs, through ``ctypes``.
+"""quartz — the four macOS calls live dictation needs, through ``ctypes``.
 
 WHY NOT PYOBJC
     Typing into whatever window has focus is a Quartz call, and the obvious way to reach it
     is `pyobjc`, which is 40 MB of bridge and a build step. This module reaches the same
-    three C functions through `ctypes` against the framework the system already ships, so
-    `stt mic` stays inside the rule the rest of the tool keeps: nothing is required at
-    install time that the machine does not already have.
+    handful of C functions through `ctypes` against the frameworks the system already
+    ships, so `stt mic` stays inside the rule the rest of the tool keeps: nothing is
+    required at install time that the machine does not already have.
 
 WHAT THE SYSTEM STILL DEMANDS
     Accessibility. Synthesizing a keystroke and watching for one are both privileged, and
-    macOS grants them per application — the terminal running `stt`, not `stt` itself. There
-    is no way to ask for it from inside a process; the checkbox is the user's to tick. So
-    the only honest thing to do is detect the state and say precisely which application to
+    macOS grants them per application — the terminal running `stt`, not `stt` itself. A
+    process CAN ask for it (:func:`ask_for_trust` raises the OS's own consent flow) but
+    cannot grant it to itself; finishing that flow is the user's to do. So the only honest
+    thing to do beyond asking is detect the state and say precisely which application to
     grant it to, which is what :func:`trusted` and its caller do.
 """
 
@@ -67,6 +68,17 @@ class _Frameworks:
         ]
         services.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
         services.AXIsProcessTrusted.restype = ctypes.c_bool
+        services.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+        services.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+        core.CFDictionaryCreate.restype = ctypes.c_void_p
+        core.CFDictionaryCreate.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
         core.CFRelease.argtypes = [ctypes.c_void_p]
 
 
@@ -98,6 +110,52 @@ def trusted() -> bool:
         return bool(frameworks().services.AXIsProcessTrusted())
     except OSError:
         return False
+
+
+def ask_for_trust() -> bool:
+    """Trigger macOS's own Accessibility consent dialog, if it has not been granted yet.
+
+    `AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt=True` is the ONLY
+    sanctioned way to make the OS raise its own Accessibility consent flow — there is no
+    API that GRANTS the permission from inside the process; only the user, at the
+    keyboard, can finish that flow.
+
+    Returns the trust state at the moment of the call — before the user has acted on
+    whatever the OS just showed them. `stt doctor --fix` re-polls :func:`trusted`
+    afterwards for whatever state their action actually produces.
+    """
+    try:
+        api = frameworks()
+        core, services = api.core, api.services
+        prompt_key = ctypes.c_void_p.in_dll(services, "kAXTrustedCheckOptionPrompt")
+        true_value = ctypes.c_void_p.in_dll(core, "kCFBooleanTrue")
+        # These two are `CFDictionaryKeyCallBacks`/`CFDictionaryValueCallBacks` STRUCTS, not
+        # single bytes — `c_byte` is only a placeholder so `in_dll` gives us the struct's
+        # address (via `byref` below) without declaring its full field layout, which
+        # `CFDictionaryCreate` never dereferences on our behalf.
+        key_callbacks = ctypes.c_byte.in_dll(core, "kCFTypeDictionaryKeyCallBacks")
+        value_callbacks = ctypes.c_byte.in_dll(core, "kCFTypeDictionaryValueCallBacks")
+    except (OSError, ValueError):
+        # OSError: a framework didn't load (not macOS). ValueError: `in_dll` couldn't find
+        # one of the symbols above (an OS version that renamed or dropped it). Either way,
+        # no dialog can be raised — fail soft like `trusted()` rather than crash the report.
+        return False
+    keys = (ctypes.c_void_p * 1)(prompt_key.value)
+    values = (ctypes.c_void_p * 1)(true_value.value)
+    options = core.CFDictionaryCreate(
+        None,
+        keys,
+        values,
+        1,
+        ctypes.byref(key_callbacks),
+        ctypes.byref(value_callbacks),
+    )
+    if not options:  # pragma: no cover - CFDictionaryCreate does not fail for fixed inputs
+        return False
+    try:
+        return bool(services.AXIsProcessTrustedWithOptions(options))
+    finally:
+        core.CFRelease(options)
 
 
 ACCESSIBILITY_HINT = (

@@ -19,6 +19,7 @@ scope; the lazy-import discipline is about `agenttools_service`, not about this 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -51,5 +52,48 @@ def mic_service(*, extra_argv: list[str] | None = None) -> Service:
 
 
 def _serve_argv(extra_argv: list[str]) -> list[str]:
-    """The FOREGROUND command the service runs (``run``) or detaches (``start``)."""
-    return [sys.executable, "-m", "stt_cli.cli", "mic", SERVE_TOKEN, *extra_argv]
+    """The FOREGROUND command the service runs (``run``) or detaches (``start``) — and,
+    critically, the ONE argv ``enable`` bakes verbatim into a launchd LaunchAgent (or a
+    systemd unit) that some LATER process — launchd, at next login, in a minimal
+    environment with none of THIS process's cwd or ``sys.path`` — re-execs unchanged. It
+    therefore has to be self-sufficient on its own, not merely correct here-and-now.
+
+    A real package install (``uv tool install`` / ``pipx install`` / ``pip install``)
+    already is: `stt_cli` sits in ``sys.executable``'s own site-packages there, so
+    ``[sys.executable, "-m", "stt_cli.cli", ...]`` needs nothing else, regardless of who
+    re-execs it or from where.
+
+    The symlink/dev-checkout install (`install.sh`'s fallback, and this repo's own
+    ``./bin/stt``) is NOT: `stt_cli` is only importable there because ``bin/stt`` inserts
+    the repo root onto ``sys.path`` at the top of every invocation. Baking bare
+    ``-m stt_cli.cli`` into the persisted argv drops that insertion — it can still look
+    like it works interactively (a `-m` invocation implicitly adds `cwd` to `sys.path`,
+    and `cwd` was the repo root at the time), then breaks the moment launchd re-runs the
+    identical argv from its own, cwd-less context: ``ModuleNotFoundError: No module named
+    'stt_cli'`` on every relaunch, while ``status``/``launchctl`` keep reporting "running"
+    because nothing about enabling the LaunchAgent itself failed. ``_dev_wrapper()``
+    re-points the daemon at ``bin/stt`` itself in that case instead — found via this
+    module's own ``__file__``, never `cwd`, so it is unaffected by whatever directory
+    launchd happens to be running in when it re-execs this later.
+    """
+    wrapper = _dev_wrapper()
+    entry = (
+        [sys.executable, str(wrapper)]
+        if wrapper is not None
+        else [sys.executable, "-m", "stt_cli.cli"]
+    )
+    return [*entry, "mic", SERVE_TOKEN, *extra_argv]
+
+
+def _dev_wrapper() -> Path | None:
+    """``bin/stt`` next to the checkout `stt_cli` is currently running from, IF it is
+    running from a source checkout (the symlink install path) rather than a real package
+    install — ``None`` there, since bare ``-m stt_cli.cli`` is already self-sufficient.
+    Resolved from THIS module's own ``__file__`` (``stt_cli/live/mic_service.py``, so the
+    repo root is two parents up), never `cwd`/`sys.path[0]`, so a caller's working
+    directory — an interactive shell's, launchd's own default, a detached daemon's — can
+    never change the answer.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    wrapper = repo_root / "bin" / "stt"
+    return wrapper if wrapper.is_file() else None

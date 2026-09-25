@@ -766,18 +766,63 @@ def test_run_dispatches_the_hidden_serve_token_to_the_daemon(monkeypatch) -> Non
     assert called[0].hotkey == "cmd+shift+d"  # type: ignore[attr-defined]
 
 
-def test_mic_service_serve_argv_reinvokes_this_interpreter_at_the_hidden_entry() -> None:
+def test_mic_service_serve_argv_points_at_bin_stt_in_a_source_checkout() -> None:
+    """In THIS repo — a source checkout, where `stt_cli` is only importable via `bin/stt`'s
+    own `sys.path` insertion — the persisted daemon argv must re-invoke `bin/stt` itself,
+    not `-m stt_cli.cli`: the bare module form only worked when `enable` ran interactively
+    (its `-m` implicitly added the repo-root `cwd` to `sys.path`) and silently
+    `ModuleNotFoundError`'d the moment launchd re-exec'd the identical argv later, from its
+    own cwd-less context — while `status`/`launchctl` kept reporting "running" because
+    nothing about enabling the LaunchAgent itself had failed (launchd-autostart bug)."""
     import sys
+    from pathlib import Path
 
     from stt_cli.live.mic_service import SERVE_TOKEN, _serve_argv
 
     argv = _serve_argv(["--hotkey", "cmd+shift+d"])
+    repo_root = Path(__file__).resolve().parent.parent
     assert argv == [
         sys.executable,
-        "-m",
-        "stt_cli.cli",
+        str(repo_root / "bin" / "stt"),
         "mic",
         SERVE_TOKEN,
         "--hotkey",
         "cmd+shift+d",
     ]
+
+
+def test_mic_service_serve_argv_falls_back_to_the_module_form_for_a_real_install(
+    monkeypatch,
+) -> None:
+    """Outside a source checkout (`uv tool install` / `pipx install` / `pip install`),
+    `stt_cli` is properly installed onto `sys.executable`'s own site-packages, so there is
+    no `bin/stt` to re-point at — the bare `-m stt_cli.cli` form is already self-sufficient
+    there, and must stay the argv."""
+    import sys
+
+    from stt_cli.live import mic_service
+
+    monkeypatch.setattr(mic_service, "_dev_wrapper", lambda: None)
+    argv = mic_service._serve_argv(["--hotkey", "cmd+shift+d"])
+    assert argv == [
+        sys.executable,
+        "-m",
+        "stt_cli.cli",
+        "mic",
+        mic_service.SERVE_TOKEN,
+        "--hotkey",
+        "cmd+shift+d",
+    ]
+
+
+def test_dev_wrapper_resolves_via_module_file_not_the_callers_cwd(tmp_path, monkeypatch) -> None:
+    """`_dev_wrapper` has to answer the same regardless of the CALLER's cwd — launchd
+    starts the re-exec'd process with none of the interactive shell's — so it must be
+    pinned to `__file__`, not an accidentally-correct `cwd`."""
+    from stt_cli.live.mic_service import _dev_wrapper
+
+    monkeypatch.chdir(tmp_path)
+    wrapper = _dev_wrapper()
+    assert wrapper is not None
+    assert wrapper.name == "stt"
+    assert wrapper.parent.name == "bin"
