@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import IO, Union
+from typing import IO, Any, TypeAlias
 
 O_NONBLOCK: int = getattr(os, "O_NONBLOCK", 0)
 
-Lockable = Union[int, IO]
+Lockable: TypeAlias = int | IO[Any]  # a raw descriptor or an open file object
 
 
 def _fd(target: Lockable) -> int:
