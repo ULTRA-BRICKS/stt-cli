@@ -12,14 +12,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import fcntl
 import signal
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config, dictionary, phrases
+from .. import config, dictionary, phrases, portable
 from .._errors import EXIT_OK, EngineError, MissingDependencyError, UsageError
 from ..backends import whispercpp
 from . import capture, hotkey, quartz, status, tap
@@ -55,7 +54,7 @@ def _the_only_session() -> Iterator[None]:
     handle = marker.open("a")
     try:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock(handle, blocking=False)
         except OSError as exc:
             raise UsageError(
                 what="dictation is already running",

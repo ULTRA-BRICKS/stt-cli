@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from stt_cli import config
-from stt_cli.commands import configtui
+from stt_cli.commands import _configtui as configtui
 
 # ── metadata stays in sync with Settings ─────────────────────────────────────
 

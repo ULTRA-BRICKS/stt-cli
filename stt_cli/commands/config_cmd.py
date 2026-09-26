@@ -5,7 +5,7 @@ they are your defaults. Store them once and the command line goes back to being 
 name. A flag always still wins over a stored value for a single run.
 
 A bare ``stt config``, typed at an interactive terminal, opens a browsable screen instead of
-printing the list once — see ``configtui.py``. Piped, redirected, or run from a script, it
+printing the list once — see ``_configtui.py``. Piped, redirected, or run from a script, it
 prints the same list `--list`/no-TUI callers have always gotten: nothing about scripting
 `stt config` changes.
 """
@@ -46,8 +46,11 @@ def run(argv: list[str]) -> int:
         args.action is None and sys.stdout.isatty() and sys.stdin.isatty()
     )
     if want_tui:
-        from .configtui import launch
-
+        try:
+            from ._configtui import launch
+        except ImportError:  # no curses (Windows Python): the same list the TUI would show
+            print("stt config: this Python has no curses, so here is `stt config list` instead")
+            return list_settings()
         return launch()
     if args.action is None or args.action == "list":
         return list_settings()
