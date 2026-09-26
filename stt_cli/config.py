@@ -398,11 +398,12 @@ def _validate(raw: dict[str, Any]) -> None:
             )
 
 
-def save_setting(key: str, value: Any) -> None:
-    """Persist one preference into ``config.json``, leaving the rest untouched.
+@contextmanager
+def _settings_transaction(key: str) -> Iterator[tuple[dict[str, Any], Path, Path]]:
+    """Resolve, validate and lock ``config.json`` for one read-modify-write.
 
-    The whole of this is one transaction over ONE file, and both halves of that sentence had
-    to be argued for.
+    ``save_setting`` and ``unset_setting`` used to repeat this in full: the whole of it is
+    one transaction over ONE file, and both halves of that sentence had to be argued for.
 
     One file: `config.json` may be a symlink into a dotfiles checkout, which is an ordinary
     thing to do, so the link is resolved once at the top and everything after — the check,
@@ -416,6 +417,11 @@ def save_setting(key: str, value: Any) -> None:
     is three operations, and two terminals doing it at once both read the old object — then
     whichever renames last stores a version that never saw the other's key, gone with no
     error anywhere. The lock spans the read and the write, the way `dictionary.editing` does.
+
+    Yields ``(raw, named, target)``: the loaded dict to mutate in place, the (possibly
+    symlinked) configured path, and its resolved target — the two paths `write_atomic`
+    needs. Whether anything is actually written is the caller's call, not this one:
+    `unset_setting` skips the write entirely when the key was never stored.
     """
     from ._errors import unknown_item
 
@@ -425,16 +431,21 @@ def save_setting(key: str, value: Any) -> None:
     named = config_path()
     target = Path(os.path.realpath(named))
     _refuse_a_strange_target(target)
+    with _editing_the_settings(target):
+        # Through the same guarded loader as everything else: a corrupt config must produce
+        # the diagnosed error, not a traceback out of json or the codec — and not, as an
+        # earlier version of this line did through `as_dict`, a silent `{}` written back
+        # over whatever was really in the file.
+        yield _settings_object(target), named, target
+
+
+def save_setting(key: str, value: Any) -> None:
+    """Persist one preference into ``config.json``, leaving the rest untouched."""
     # Imported here, not at the top: `archive` imports `config` back, the way
     # `dictionary.save` does it for the same reason.
     from .archive import write_atomic
 
-    with _editing_the_settings(target):
-        # Through the same guarded loader as everything else: a corrupt config must produce
-        # the diagnosed error, not a traceback out of json or the codec — and not, as an
-        # earlier version of this line did through `as_dict`, a silent `{}` written back over
-        # whatever was really in the file.
-        raw: dict[str, Any] = _settings_object(target)
+    with _settings_transaction(key) as (raw, named, target):
         raw[key] = value
         write_atomic(target, _serialized(raw, named))
 
@@ -447,18 +458,9 @@ def unset_setting(key: str) -> None:
     Removing a key that was never stored is not an error: "make sure this is not
     overridden" is a sensible thing to ask for whether or not anybody had overridden it.
     """
-    from ._errors import unknown_item
-
-    if key not in _CONFIGURABLE:
-        raise unknown_item("setting", key, sorted(_CONFIGURABLE))
-    ensure_dirs()
-    named = config_path()
-    target = Path(os.path.realpath(named))
-    _refuse_a_strange_target(target)
     from .archive import write_atomic
 
-    with _editing_the_settings(target):
-        raw: dict[str, Any] = _settings_object(target)
+    with _settings_transaction(key) as (raw, named, target):
         if key not in raw:
             return
         del raw[key]

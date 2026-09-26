@@ -18,7 +18,12 @@ scope; the lazy-import discipline is about `agenttools_service`, not about this 
 
 from __future__ import annotations
 
+import os
+import re
+import subprocess
 import sys
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -97,3 +102,85 @@ def _dev_wrapper() -> Path | None:
     repo_root = Path(__file__).resolve().parent.parent.parent
     wrapper = repo_root / "bin" / "stt"
     return wrapper if wrapper.is_file() else None
+
+
+# ---------------------------------------------------------------------------------------
+# Launchd liveness — the OS-authoritative check `ServiceManager.status()` deliberately does
+# not do. See `commands/mic.py::_status` and ticket #54: for an OS-managed (`enable`d)
+# service, the shared lib's own `status()` docstring says "running is inferred from the
+# unit being installed... deliberately out of scope here; use the OS's own tools for
+# authoritative OS-managed liveness." This is that OS tool.
+# ---------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchdProbe:
+    """What ``launchctl print`` says about the daemon's OS-managed instance right now.
+
+    ``alive`` is ``True`` only when launchd itself reports a live ``pid`` for the job — a
+    crash-looping job between restarts (state ``spawn scheduled``) has none, which is
+    exactly the "running while nothing is up" gap #54 is about. ``last_exit_code`` is
+    whatever launchd last saw the job exit with, whether or not it is alive right now — the
+    crash-loop's own diagnostic, not a statement about this instant.
+    """
+
+    alive: bool
+    pid: int | None
+    last_exit_code: int | None
+
+
+_STATE_RE = re.compile(r"^\tstate = ", re.MULTILINE)
+_PID_RE = re.compile(r"^\tpid = (\d+)$", re.MULTILINE)
+_LAST_EXIT_RE = re.compile(r"^\tlast exit code = (-?\d+)$", re.MULTILINE)
+
+
+def probe_launchd(
+    label: str,
+    *,
+    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> LaunchdProbe | None:
+    """Ask launchd itself whether ``label`` has a live process right now.
+
+    ``launchctl print gui/<uid>/<label>`` prints a top-level ``pid = N`` line ONLY while a
+    process is actually running; a job stuck retrying (``state = spawn scheduled``, the
+    exact machine state #54 was filed from — ``runs=50``, ``last exit code=8``, no live
+    process) has no such line. That single fact is the OS-authoritative liveness
+    ``ServiceManager.status()`` cannot provide for an `enable`d service.
+
+    Returns ``None`` off macOS, when launchctl has nothing registered for ``label`` at all
+    (not enabled, or a domain launchctl itself cannot reach), OR when the output it DID
+    print doesn't look like ``launchctl print``'s documented shape at all (no top-level
+    ``state = `` line found) — a format ``launchctl print`` is Apple's own undocumented
+    debug output, with no stability guarantee, and "the regex didn't match" must not be
+    read as "the field is confirmed absent" if the output itself is unrecognized; a real
+    format change would otherwise silently misreport a healthy daemon as dead. The caller
+    falls back to the shared lib's own read in every ``None`` case, rather than treating
+    "no evidence" (of either kind) as "dead".
+
+    ``runner`` is injectable (same shape as ``agenttools_service``'s own autostart-command
+    runner) so this is testable without a real ``launchctl`` or a real launchd job.
+    """
+    if runner is None and sys.platform != "darwin":
+        return None
+    run = runner or _default_launchctl_runner
+    try:
+        result = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not _STATE_RE.search(result.stdout):
+        return None
+    pid_match = _PID_RE.search(result.stdout)
+    exit_match = _LAST_EXIT_RE.search(result.stdout)
+    return LaunchdProbe(
+        alive=pid_match is not None,
+        pid=int(pid_match.group(1)) if pid_match else None,
+        last_exit_code=int(exit_match.group(1)) if exit_match else None,
+    )
+
+
+def _default_launchctl_runner(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    # A quick, synchronous system-state query — not a `proc.run` (the transcription/live
+    # path's async, timed, output-draining runner for engines and media), the same way
+    # `agenttools_service`'s own autostart-command runner (the launchctl/systemctl calls
+    # `enable`/`disable` already make) is a plain synchronous `subprocess.run`, not that.
+    return subprocess.run(list(cmd), capture_output=True, text=True, timeout=5, check=False)

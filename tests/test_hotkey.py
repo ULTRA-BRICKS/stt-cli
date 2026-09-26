@@ -826,3 +826,246 @@ def test_dev_wrapper_resolves_via_module_file_not_the_callers_cwd(tmp_path, monk
     assert wrapper is not None
     assert wrapper.name == "stt"
     assert wrapper.parent.name == "bin"
+
+
+# ── ticket #54: `stt mic status` distinguishing alive from crash-looping ────────────────
+
+
+def test_probe_launchd_reports_dead_for_a_crash_looping_job() -> None:
+    """The exact machine state #54 was filed from: `launchctl print` shows the job
+    registered and retrying (`state = spawn scheduled`, a real `runs`/`last exit code`) but
+    prints no top-level `pid = ` line, because nothing is alive between restarts."""
+    import subprocess
+
+    from stt_cli.live import mic_service
+
+    output = (
+        "gui/501/com.agenttools.stt.mic = {\n"
+        "\tactive count = 0\n"
+        "\ttype = LaunchAgent\n"
+        "\tstate = spawn scheduled\n"
+        "\tdomain = gui/501 [100029]\n"
+        "\truns = 6603\n"
+        "\tlast exit code = 8\n"
+        "}\n"
+    )
+
+    def fake_runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout=output, stderr="")
+
+    probe = mic_service.probe_launchd("com.agenttools.stt.mic", runner=fake_runner)
+    assert probe == mic_service.LaunchdProbe(alive=False, pid=None, last_exit_code=8)
+
+
+def test_probe_launchd_reports_alive_with_the_real_pid() -> None:
+    """A genuinely running job prints a top-level `pid = ` line — that is the one fact
+    `ServiceManager.status()` cannot see for an OS-managed service, and this is the OS tool
+    that can."""
+    import subprocess
+
+    from stt_cli.live import mic_service
+
+    output = (
+        "gui/501/com.agenttools.stt.mic = {\n"
+        "\tstate = running\n"
+        "\tpid = 4242\n"
+        "\tlast exit code = (never exited)\n"
+        "}\n"
+    )
+
+    def fake_runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout=output, stderr="")
+
+    probe = mic_service.probe_launchd("com.agenttools.stt.mic", runner=fake_runner)
+    assert probe == mic_service.LaunchdProbe(alive=True, pid=4242, last_exit_code=None)
+
+
+def test_probe_launchd_is_none_when_launchctl_has_nothing_registered() -> None:
+    """Not enabled, or a domain launchctl itself cannot reach — `launchctl print` exits
+    nonzero with no useful stdout. The caller must fall back to the shared lib's own read
+    rather than treating "no evidence" as "confirmed dead"."""
+    import subprocess
+
+    from stt_cli.live import mic_service
+
+    def fake_runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 113, stdout="", stderr="Bad request.\n")
+
+    assert mic_service.probe_launchd("com.agenttools.stt.nonexistent", runner=fake_runner) is None
+
+
+def test_probe_launchd_is_none_for_output_with_no_recognizable_state_line() -> None:
+    """`launchctl print` is Apple's own undocumented debug format, no stability guarantee
+    across macOS versions. Exit 0 with output that doesn't even have a top-level `state =
+    ` line must NOT be read as "confirmed no pid" — that would silently misreport a
+    healthy daemon as dead the moment the format ever changes. It has to fall back to the
+    shared lib's own read instead, the same as launchctl failing outright."""
+    import subprocess
+
+    from stt_cli.live import mic_service
+
+    def fake_runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout="something unrecognized\n", stderr="")
+
+    assert mic_service.probe_launchd("com.agenttools.stt.mic", runner=fake_runner) is None
+
+
+def test_probe_launchd_is_none_off_macos(monkeypatch) -> None:
+    from stt_cli.live import mic_service
+
+    monkeypatch.setattr(mic_service.sys, "platform", "linux")
+    assert mic_service.probe_launchd("com.agenttools.stt.mic") is None
+
+
+def _fake_service_lib(monkeypatch, *, run_action):
+    """A minimal `agenttools_service` stand-in exposing only what `_status` reads
+    (`run_action`) — `_manager` itself is monkeypatched separately in each test, so nothing
+    here needs to build a real `Service`/`ServiceManager`."""
+    import sys
+    import types
+
+    fake = types.ModuleType("agenttools_service")
+    fake.run_action = run_action
+    monkeypatch.setitem(sys.modules, "agenttools_service", fake)
+
+
+def test_status_falls_through_to_the_shared_lib_for_a_pidfile_tracked_instance(
+    monkeypatch,
+) -> None:
+    """Any state other than `"autostart"` (a real pidfile-tracked instance, a genuinely
+    stopped one, a foreign listener) is already reported correctly by the shared lib —
+    `_status` must not second-guess those, only the one gap #54 names."""
+    from stt_cli.commands import mic
+
+    class _FakeManager:
+        def status(self) -> object:
+            return argparse.Namespace(state="running")
+
+    calls: list[str] = []
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    _fake_service_lib(monkeypatch, run_action=lambda manager, action: calls.append(action) or 0)
+
+    assert mic._status(argparse.Namespace()) == 0
+    assert calls == ["status"]
+
+
+def test_status_falls_through_when_launchctl_itself_is_unreachable(monkeypatch) -> None:
+    """`state == "autostart"` but `probe_launchd` returns `None` (off macOS, or launchctl
+    itself failed): no evidence either way, so the shared lib's own read still applies —
+    this is the one case `test_probe_launchd_is_none_*` cannot exercise on its own, since
+    it never reaches `_status`'s own fall-through decision."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(state="autostart")
+
+    calls: list[str] = []
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(mic_service, "probe_launchd", lambda label: None)
+    _fake_service_lib(monkeypatch, run_action=lambda manager, action: calls.append(action) or 0)
+
+    assert mic._status(argparse.Namespace()) == 0
+    assert calls == ["status"]
+
+
+def test_status_prints_the_pid_launchctl_found_when_genuinely_alive(monkeypatch, capsys) -> None:
+    """`state == "autostart"` but `probe_launchd` finds a live pid: genuinely healthy.
+    `ServiceManager.status()` has no pid to offer here (an OS-managed instance has no
+    pidfile) — launchctl's answer is strictly better, so `_status` prints it directly
+    rather than discarding it through a `run_action` call that would omit it."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(state="autostart")
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=999, last_exit_code=None),
+    )
+    # `_status`'s top-of-function `from agenttools_service import run_action` runs
+    # unconditionally even though this alive=True path never calls it - every sibling
+    # `_status` test below stubs the module for exactly that reason; this one was missing
+    # it, so it only passed on a machine that happened to already have the real (editable,
+    # this-machine-only) package installed, not on a clean env like CI's.
+    _fake_service_lib(monkeypatch, run_action=lambda manager, action: 0)
+
+    exit_code = mic._status(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "running" in out
+    assert "999" in out
+
+
+def test_status_names_the_crash_loop_from_the_daemons_own_exit_code(monkeypatch, capsys) -> None:
+    """The exact #54 scenario: registered/enabled, launchd has no live process, and the
+    daemon's own last exit code is `EXIT_PERMISSION` — the only failure anywhere
+    `dictate_daemon` can reach that produces it (`require_accessibility`). Must say so,
+    not print "running", and must NOT depend on `quartz.trusted()` of the STATUS
+    process — an earlier version of this fix read that instead, which is a DIFFERENT TCC
+    principal than the launchd-spawned daemon: a terminal already granted Accessibility
+    (the common case — ad-hoc `stt mic` already worked, which is why `enable` ran at all)
+    made that check answer for the wrong process and silently skip this exact diagnosis."""
+    from stt_cli._errors import EXIT_PERMISSION
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic", logfile="/fake/mic.log")
+
+        def status(self) -> object:
+            return argparse.Namespace(state="autostart")
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=False, pid=None, last_exit_code=8),
+    )
+    _fake_service_lib(monkeypatch, run_action=lambda manager, action: 0)
+
+    exit_code = mic._status(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert exit_code == EXIT_PERMISSION
+    assert "not running" in out
+    assert "Accessibility" in out
+    assert "running" not in out.split("not running")[0]  # never a bare "running" prefix
+
+
+def test_status_names_down_between_restarts_for_an_undiagnosed_crash(monkeypatch, capsys) -> None:
+    """Registered/enabled, launchd has no live process, but the last exit code is NOT
+    `EXIT_PERMISSION` — an undiagnosed crash (missing whisper-server, a bad stored
+    hotkey, ...). Must still say "not running", must NOT claim Accessibility (that would
+    be a wrong diagnosis for a different failure), and must point at the log."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic", logfile="/fake/mic.log")
+
+        def status(self) -> object:
+            return argparse.Namespace(state="autostart")
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=False, pid=None, last_exit_code=127),
+    )
+    _fake_service_lib(monkeypatch, run_action=lambda manager, action: 0)
+
+    exit_code = mic._status(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert exit_code == mic._EXIT_NOT_RUNNING
+    assert "not running" in out
+    assert "Accessibility" not in out
+    assert "/fake/mic.log" in out

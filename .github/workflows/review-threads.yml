@@ -71,10 +71,11 @@ permissions:
 concurrency:
   # A single review submit can fan out into a pull_request_review (submitted) event PLUS one
   # or more pull_request_review_comment (created) events for its inline comments — each its
-  # own run + GraphQL call. Coalesce per PR and cancel superseded runs: safe because every run
-  # re-queries LIVE thread state, so the surviving (latest) run always reports the truthful
-  # status. Falls back to run_id when no PR number is resolvable (each such run gets its own
-  # group — no cancellation), so the key is always defined.
+  # own run + Forgejo REST calls (stt-cli#53: no GraphQL API on this host). Coalesce per PR
+  # and cancel superseded runs: safe because every run re-queries LIVE thread state, so the
+  # surviving (latest) run always reports the truthful status. Falls back to run_id when no
+  # PR number is resolvable (each such run gets its own group — no cancellation), so the key
+  # is always defined.
   group: review-threads-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
@@ -99,7 +100,12 @@ jobs:
 
       - name: Fail on unresolved review threads
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Forgejo Actions' own auto-token (still surfaced under the GITHUB_TOKEN secret
+          # name for GitHub-Actions compatibility) — it authenticates against THIS Forgejo
+          # instance's own API, unlike `gh`'s token which only ever worked against
+          # github.com (stt-cli#53). Optional: the gate still runs anonymously against a
+          # public repo, just at a lower rate limit.
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PR number: every pull_request-family event (pull_request_target,
           # pull_request_review, pull_request_review_comment) carries
           # github.event.pull_request.number; a manual run falls back to the required input.

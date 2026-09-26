@@ -156,7 +156,7 @@ if [ "$py_manifest" = "1" ] || [ -f pyproject.toml ] || [ -f poetry.lock ]; then
       miss "python project (pyproject.toml/poetry.lock) present but no pinned requirements*.txt to audit as data (a building project-audit would execute PR code under pull_request_target)"
     fi
   else
-    miss "python manifest present but pip-audit not installed (pipx install pip-audit)"
+    miss "python manifest present but pip-audit not installed (pip install pip-audit — not pipx, which isn't preinstalled on this Forgejo runner image)"
   fi
 fi
 
