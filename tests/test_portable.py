@@ -50,4 +50,4 @@ def test_a_permanent_lock_error_surfaces_instead_of_spinning(tmp_path, monkeypat
 
 def test_o_nonblock_is_a_flag_everywhere() -> None:
     assert isinstance(portable.O_NONBLOCK, int)
-    assert portable.O_NONBLOCK == getattr(os, "O_NONBLOCK", 0)
+    assert getattr(os, "O_NONBLOCK", 0) == portable.O_NONBLOCK
