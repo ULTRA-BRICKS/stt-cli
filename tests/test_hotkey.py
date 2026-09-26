@@ -573,6 +573,105 @@ async def test_the_daemon_idles_then_dictates_on_the_hotkey_toggle_and_returns_t
     assert watcher.stopped, "the tap is released when the daemon exits"
 
 
+async def test_a_key_press_reaches_the_live_session_but_not_a_dead_one(
+    monkeypatch,
+) -> None:
+    """`_watch_daemon.arrived` reads `active.stopper` on the tap thread and forwards a key
+    press into it while a burst is open — the correction-interrupt this daemon exists to
+    give. `_burst`'s `finally` clears it (via `_Active.close`) once the burst ends, so the
+    SAME key pressed a moment later, idle, must be silently dropped instead of reaching a
+    `Session` nothing is listening to anymore. Proves both directions: a key reaches the
+    live session mid-burst (the positive control — a stubbed-out `arrived` that never calls
+    `stopper` would fail here), and is dropped once `close()` has run (the negative control;
+    `test_active_close_clears_session_and_stopper_together` isolates the `_Active` half of
+    that guarantee directly)."""
+    from stt_cli.live import capture as capture_mod
+    from stt_cli.live import dictation
+    from stt_cli.live import hotkey as hotkey_mod
+    from stt_cli.live.session import Session
+
+    typed, watchers = _wire_fakes(monkeypatch)
+    interrupted: list[Session] = []
+    monkeypatch.setattr(Session, "interrupt", lambda self: interrupted.append(self))
+    models = dictation.Models(settled=_Answering("Привет!"), draft=None)
+    settings = config.Settings(dictionary=False)
+    device = capture_mod.Device(index=0, name="fake mic")
+    combo = hotkey_mod.parse("cmd+shift+space")
+    args = argparse.Namespace(quiet=True, idle_minutes=None)
+
+    task = asyncio.create_task(
+        dictation._idle_loop(args, device, models, settings, combo, "toggle")
+    )
+    await asyncio.sleep(0)
+    watcher = watchers[0]
+
+    watcher.on_hotkey(True)  # first press: start dictating
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if typed:
+            break
+    assert typed == ["Привет!"]
+
+    watcher.on_key(0)  # mid-burst: must reach the live session
+    assert len(interrupted) == 1, "a key pressed during the burst never reached the session"
+
+    watcher.on_hotkey(True)  # second press (toggle mode): stop this burst
+    await asyncio.sleep(0.05)
+
+    watcher.on_key(0)  # a key pressed once idle again — must be dropped, not forwarded
+    assert len(interrupted) == 1, "a key pressed after the burst ended reached a dead session"
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+def test_active_close_clears_session_and_stopper_together() -> None:
+    """`_Active.open`/`close` exist to pair `session` and `stopper` so neither call site has
+    to remember to touch two attributes by hand. Isolates that guarantee directly: deleting
+    EITHER clear in `close()` fails one of the two asserts below."""
+    from stt_cli.live.dictation import _Active
+
+    active = _Active()
+    assert active.session is None
+    assert active.stopper is None
+
+    stand_in = object()
+    active.open(stand_in)  # type: ignore[arg-type]
+    assert active.session is stand_in
+    assert active.stopper is not None
+
+    active.close()
+    assert active.session is None, "close() left session set"
+    assert active.stopper is None, "close() left stopper set"
+
+
+def test_active_open_asserts_when_a_burst_is_already_active() -> None:
+    """`open`'s assert is the documented one-burst-at-a-time guarantee, not just belt and
+    braces `_idle_loop` happens to uphold by awaiting each burst to completion — pin it
+    directly so a future caller that opens a second burst without closing the first fails
+    loudly instead of silently overwriting the first burst's `session`/`stopper`."""
+    from stt_cli.live.dictation import _Active
+
+    active = _Active()
+    active.open(object())  # type: ignore[arg-type]
+    with pytest.raises(AssertionError):
+        active.open(object())  # type: ignore[arg-type]
+
+
+def test_active_session_and_stopper_cannot_be_assigned_directly() -> None:
+    """The class docstring's third claim: `session`/`stopper` are read-only properties, so
+    bypassing `open`/`close` isn't just a mypy error, it's a runtime `AttributeError` — pin
+    that so a future change back to plain attributes fails here, not just under mypy."""
+    from stt_cli.live.dictation import _Active
+
+    active = _Active()
+    with pytest.raises(AttributeError):
+        active.session = None  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        active.stopper = None  # type: ignore[misc]
+
+
 async def test_a_burst_that_fails_returns_to_idle_instead_of_ending_the_daemon(
     monkeypatch,
 ) -> None:

@@ -457,12 +457,52 @@ class _Toggle:
         self._loop.call_soon_threadsafe(self.events.put_nowait, pressed)
 
 
-@dataclass
 class _Active:
-    """The one burst currently open, if any — so a signal or the tap can reach it."""
+    """The one burst currently open, if any — so a signal or the tap can reach it.
 
-    stopper: _Stopper | None = None
-    session: Session | None = None
+    `session` and `stopper` are only ever meaningful together: `stopper` is a `_Stopper`
+    wrapping the exact `Session` `session` points at, one built from the other in the same
+    breath. Deliberately not a `@dataclass`: that annotation style generates a positional
+    constructor, which would let two unrelated values be paired into one `_Active` with no
+    relationship between them — exactly the unpaired state this class exists to make
+    unreachable. `open` (which also asserts at most one burst is active at a time) and
+    `close` are the ONLY way either field changes — outside this class, `active.stopper =
+    ...`/`active.session = ...` raises `AttributeError` at runtime (a property with no
+    setter), not just a mypy error.
+    """
+
+    def __init__(self) -> None:
+        self._stopper: _Stopper | None = None
+        self._session: Session | None = None
+
+    def __repr__(self) -> str:
+        return f"_Active(open={self._session is not None})"
+
+    @property
+    def stopper(self) -> _Stopper | None:
+        return self._stopper
+
+    @property
+    def session(self) -> Session | None:
+        return self._session
+
+    def open(self, session: Session) -> None:
+        assert self._session is None, "a burst opened while another was still active"
+        # Built before either field is published: `_Stopper(session)` cannot raise today,
+        # but if it ever grew work that could, raising between the two assignments below
+        # would leave `_session` set and `_stopper` None — the exact unpaired state this
+        # class exists to make unreachable.
+        stopper = _Stopper(session)
+        self._session = session
+        self._stopper = stopper
+
+    def close(self) -> None:
+        # `stopper` first: `arrived` (the tap thread) reads only `stopper`, so clearing it
+        # first shrinks that cross-thread reader's window as early as possible. `session`
+        # second: `_stop_everything` (the loop thread, no race to shrink) only reads
+        # `session`, so there is nothing to gain — and something to lose — clearing it first.
+        self._stopper = None
+        self._session = None
 
 
 @dataclass
@@ -609,8 +649,7 @@ async def _burst(ctx: _BurstContext) -> str:
         report=lambda progress: line.show(_paint(progress)),
         gate=gate_for(ctx.settings),
     )
-    ctx.active.session = dictating
-    ctx.active.stopper = _Stopper(dictating)
+    ctx.active.open(dictating)
     try:
         status.note(f"listening on {ctx.device.name} — {_off_hint(ctx.mode)}", quiet=ctx.args.quiet)
         burst = asyncio.create_task(
@@ -626,8 +665,7 @@ async def _burst(ctx: _BurstContext) -> str:
             off.cancel()
         return await burst
     finally:
-        ctx.active.session = None
-        ctx.active.stopper = None
+        ctx.active.close()
         line.clear()
         await status.closed(said=dictating.transcript, quiet=ctx.args.quiet)
 
