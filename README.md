@@ -33,6 +33,7 @@ git clone https://git.hyperide.ai/ultrabricks/stt-cli && cd stt-cli && ./install
 - After **1** or **2**, run `stt install-skill` once so coding agents discover `stt` (3 and 4 do it for you).
 - **Unreleased `main`:** `uv tool install git+https://git.hyperide.ai/ultrabricks/stt-cli` (or the same with `pipx install`).
 - **Update:** `uv tool upgrade hyper-stt` · `pipx upgrade hyper-stt` · re-run the one-liner · `git pull`.
+- **Installed before the rename** (as `stt-cli`, from git)? Remove that first — `uv tool uninstall stt-cli` or `pipx uninstall stt-cli` — or two installs both claim `stt`.
 - **Via rig:** clone into `~/xp/stt-cli` and list `stt` under `tools.items` in `~/.config/rig/config.yaml` — `rig apply commit` runs its `install.sh` and keeps the clone fresh.
 
 > **On PyPI as `hyper-stt`** (the command is still `stt`). The canonical repo is
