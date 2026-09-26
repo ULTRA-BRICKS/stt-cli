@@ -32,6 +32,7 @@ fi
 # as a substring: an origin that merely contains "hyperide.ai" (git.hyperide.ai.evil.example,
 # evil.example/git.hyperide.ai/…) must not pass for the canonical repo and get pulled + installed.
 _url_host_path() {  # https / ssh / scp-style git URL -> "host path" (user@, :port, .git, trailing / dropped)
+  local _u _hp _path _host
   _u=${1%/}; _u=${_u%.git}
   case "$_u" in
     https://*|ssh://*) _u=${_u#*://}; _hp=${_u%%/*}; _path=${_u#*/} ;;
@@ -92,12 +93,12 @@ INSTALL_MODE=""
 if command -v uv >/dev/null 2>&1; then
   INSTALL_MODE="uv"
   say "stt: installing via uv tool (isolated environment)"
-  uv tool install --force "$SRC"
+  uv tool install --force --editable "$SRC"
   STT_BIN="$(command -v "$TOOL" 2>/dev/null || echo "$HOME/.local/bin/$TOOL")"
 elif command -v pipx >/dev/null 2>&1; then
   INSTALL_MODE="pipx"
   say "stt: installing via pipx (isolated environment)"
-  pipx install --force "$SRC"
+  pipx install --force --editable "$SRC"
   STT_BIN="$(command -v "$TOOL" 2>/dev/null || echo "$BIN/$TOOL")"
 else
   INSTALL_MODE="symlink"
