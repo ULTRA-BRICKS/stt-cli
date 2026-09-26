@@ -13,6 +13,7 @@ hanging the command. Windows has no FIFOs in the filesystem and no such flag, so
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 from typing import IO, Any, TypeAlias
@@ -40,8 +41,13 @@ if sys.platform == "win32":
             try:
                 msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
                 return
-            except OSError:
-                continue
+            except OSError as exc:
+                if exc.errno not in _LOCK_HELD:  # a bad fd, a filesystem without locks: surface it
+                    raise
+
+    # What msvcrt.locking raises while another process holds the byte: EDEADLOCK once LK_LOCK's
+    # retries run out, EACCES for LK_NBLCK.
+    _LOCK_HELD = {errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
 
     def unlock(target: Lockable) -> None:
         fd = _fd(target)

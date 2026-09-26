@@ -47,10 +47,12 @@ def run(argv: list[str]) -> int:
     )
     if want_tui:
         try:
-            from ._configtui import launch
-        except ImportError:  # no curses (Windows Python): the same list the TUI would show
+            import curses  # noqa: F401 — probe only: Windows Python ships without it
+        except ImportError:
             print("stt config: this Python has no curses, so here is `stt config list` instead")
             return list_settings()
+        from ._configtui import launch
+
         return launch()
     if args.action is None or args.action == "list":
         return list_settings()
@@ -65,7 +67,7 @@ def run(argv: list[str]) -> int:
 
 
 def list_settings() -> int:
-    """`stt config list`, and the plain-text fallback `configtui.launch` prints when the
+    """`stt config list`, and the plain-text fallback `_configtui.launch` prints when the
     screen can't run (a terminal too small, or one with no TUI support at all) — public so
     that fallback imports a real function, not another module's private one."""
     settings = config.load_settings()
@@ -120,7 +122,7 @@ def validate_extra(key: str, value: object) -> None:
     already refuse a bad type with, instead of surfacing later as a raw crash inside
     whatever actually tries to use the value.
 
-    Public — imported by ``configtui.apply_edit`` so the TUI's edit path shares this exact
+    Public — imported by ``_configtui.apply_edit`` so the TUI's edit path shares this exact
     check instead of re-implementing it against a private name (`list_settings`, just above,
     was made public for the identical reason: the TUI reuses this module's logic, not just
     its own copy of it).

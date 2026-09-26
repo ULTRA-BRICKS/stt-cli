@@ -77,7 +77,10 @@ else
       exit 1
     fi
     say "stt: updating existing clone at $CLONE_DIR"
-    git -C "$CLONE_DIR" pull --ff-only origin HEAD  # the remote just validated, not branch.*.remote
+    # The validated origin (not whatever branch.*.remote names) and the branch that is checked out
+    # (a clone kept on a feature branch updates that branch; a detached HEAD takes origin HEAD).
+    _branch="$(git -C "$CLONE_DIR" symbolic-ref --quiet --short HEAD || echo HEAD)"
+    git -C "$CLONE_DIR" pull --ff-only origin "$_branch"
   else
     say "stt: cloning $EXPECT_URL into $CLONE_DIR"
     git clone "$EXPECT_URL" "$CLONE_DIR"
