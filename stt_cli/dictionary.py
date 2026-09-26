@@ -26,7 +26,6 @@ THREE PLACES THE DICTIONARY IS USED, ON PURPOSE
 
 from __future__ import annotations
 
-import fcntl
 import json
 import re
 import unicodedata
@@ -36,7 +35,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import fuzzy
+from . import fuzzy, portable
 from ._errors import UsageError
 from .jsonio import ABSENT, JsonDict, in_units, read_json
 from .models import Segment, Variant
@@ -565,13 +564,13 @@ def editing() -> Iterator[Dictionary]:
     config.ensure_dirs()
     lock = path().with_name(FILENAME + ".lock")
     with lock.open("a") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        portable.lock(handle)
         try:
             dictionary = load()
             yield dictionary
             save(dictionary)
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            portable.unlock(handle)
 
 
 # ── applying it to a transcript ───────────────────────────────────────────────────────

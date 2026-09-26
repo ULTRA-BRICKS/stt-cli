@@ -399,7 +399,7 @@ def test_setting_a_bad_hotkey_through_the_cli_is_refused_not_stored(tmp_path, mo
 
 
 def test_setting_a_bad_hotkey_through_the_tui_is_refused_not_stored(tmp_path, monkeypatch) -> None:
-    from stt_cli.commands.configtui import apply_edit
+    from stt_cli.commands._configtui import apply_edit
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
     ok, message = apply_edit("hotkey", "shift+a")

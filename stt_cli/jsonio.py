@@ -31,6 +31,7 @@ import stat
 from pathlib import Path
 from typing import Any, Final
 
+from . import portable
 from ._errors import UsageError
 
 # A decoded JSON object. `Any` is correct and honest here: this IS untyped data from
@@ -169,7 +170,7 @@ def read_text(path: Path, *, how: str, limit: int, too_big: str) -> str | None:
     descriptor that was actually opened rather than on whatever the name pointed at.
     """
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = os.open(path, os.O_RDONLY | portable.O_NONBLOCK)
     except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError as exc:

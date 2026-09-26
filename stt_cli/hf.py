@@ -21,7 +21,6 @@ NO CREDENTIALS ARE EVER PRINTED
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import stat
@@ -32,6 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import portable
 from ._errors import NetworkError, PermissionDeniedError
 
 HOST = "https://huggingface.co"
@@ -178,7 +178,7 @@ def _read_through_a_descriptor(path: Path, limit: int, *, cap_size: bool = False
     at by now. The same shape as the glossary import's read.
     """
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = os.open(path, os.O_RDONLY | portable.O_NONBLOCK)
         with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as handle:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode):
@@ -264,11 +264,11 @@ def _sole_writer(path: Path) -> Iterator[None]:
             how="point HF_TOKEN_PATH at a writable location, or unset it to use the default",
         ) from exc
     with handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        portable.lock(handle)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            portable.unlock(handle)
 
 
 def _refuse_to_clobber(path: Path) -> None:

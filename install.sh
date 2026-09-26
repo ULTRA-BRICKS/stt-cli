@@ -12,9 +12,10 @@ set -euo pipefail
 
 TOOL="stt"
 REPO="stt-cli"
-FORGE_OWNER="ultrabricks"
+FORGE="https://git.hyperide.ai/ultrabricks"   # canonical home; github.com/alex-mextner is an archived mirror
 ENTRY="bin/stt"
 CLONE_BASE="${XDG_DATA_HOME:-$HOME/.local/share}"
+EXPECT_URL="$FORGE/$REPO.git"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -25,6 +26,33 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   warn "Metal acceleration and the file-creation-time handling are all Apple-specific."
   warn "Continuing anyway; expect rough edges."
 fi
+
+# Origins that are the same repo: the canonical Forgejo one and the pre-migration GitHub ones (a
+# GitHub origin is re-pointed at Forgejo — the GitHub copy is frozen). Compared as HOST + PATH, never
+# as a substring: an origin that merely contains "hyperide.ai" (git.hyperide.ai.evil.example,
+# evil.example/git.hyperide.ai/…) must not pass for the canonical repo and get pulled + installed.
+_url_host_path() {  # https / ssh / scp-style git URL -> "host path" (user@, :port, .git, trailing / dropped)
+  local _u _hp _path _host
+  _u=${1%/}; _u=${_u%.git}
+  case "$_u" in
+    https://*|ssh://*) _u=${_u#*://}; _hp=${_u%%/*}; _path=${_u#*/} ;;
+    *@*:*) _hp=${_u%%:*}; _path=${_u#*:} ;;
+    *) return 1 ;;
+  esac
+  [ "$_path" != "$_u" ] || return 1
+  case "$_hp" in *[!A-Za-z0-9._:@%~-]*) return 1 ;; esac  # e.g. `\` (a host separator to some parsers)
+  _host=${_hp##*@}; _host=${_host%%:*}
+  printf '%s %s\n' "$_host" "$_path"
+}
+_origin_is_canonical() {
+  [ "$(_url_host_path "$1")" = "git.hyperide.ai ultrabricks/$REPO" ]
+}
+_origin_is_legacy() {
+  case "$(_url_host_path "$1")" in
+    "github.com alex-mextner/$REPO"|"github.com ultrabricks/$REPO") return 0 ;;
+  esac
+  return 1
+}
 
 # ── locate the source ─────────────────────────────────────────────────────────
 _script_dir=""
@@ -38,16 +66,21 @@ if [[ -n "$_script_dir" && -f "$_script_dir/$ENTRY" ]]; then
 else
   mkdir -p "$CLONE_BASE"
   CLONE_DIR="$CLONE_BASE/$REPO"
-  EXPECT_URL="https://git.hyperide.ai/$FORGE_OWNER/$REPO.git"
   if [[ -d "$CLONE_DIR/.git" ]]; then
     actual_url="$(git -C "$CLONE_DIR" remote get-url origin 2>/dev/null || echo "")"
-    if [[ "$actual_url" != "$EXPECT_URL" ]]; then
+    if _origin_is_legacy "$actual_url"; then
+      say "stt: $REPO moved to $FORGE — re-pointing origin ($actual_url -> $EXPECT_URL)"
+      git -C "$CLONE_DIR" remote set-url origin "$EXPECT_URL"
+    elif ! _origin_is_canonical "$actual_url"; then
       warn "ERROR: $CLONE_DIR exists but its origin is '$actual_url', not $EXPECT_URL."
       warn "       Remove that directory or fix its remote, then re-run."
       exit 1
     fi
     say "stt: updating existing clone at $CLONE_DIR"
-    git -C "$CLONE_DIR" pull --ff-only
+    # The validated origin (not whatever branch.*.remote names) and the branch that is checked out
+    # (a clone kept on a feature branch updates that branch; a detached HEAD takes origin HEAD).
+    _branch="$(git -C "$CLONE_DIR" symbolic-ref --quiet --short HEAD || echo HEAD)"
+    git -C "$CLONE_DIR" pull --ff-only origin "$_branch"
   else
     say "stt: cloning $EXPECT_URL into $CLONE_DIR"
     git clone "$EXPECT_URL" "$CLONE_DIR"
@@ -64,12 +97,12 @@ INSTALL_MODE=""
 if command -v uv >/dev/null 2>&1; then
   INSTALL_MODE="uv"
   say "stt: installing via uv tool (isolated environment)"
-  uv tool install --force "$SRC"
+  uv tool install --force --editable "$SRC"
   STT_BIN="$(command -v "$TOOL" 2>/dev/null || echo "$HOME/.local/bin/$TOOL")"
 elif command -v pipx >/dev/null 2>&1; then
   INSTALL_MODE="pipx"
   say "stt: installing via pipx (isolated environment)"
-  pipx install --force "$SRC"
+  pipx install --force --editable "$SRC"
   STT_BIN="$(command -v "$TOOL" 2>/dev/null || echo "$BIN/$TOOL")"
 else
   INSTALL_MODE="symlink"

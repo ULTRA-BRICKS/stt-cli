@@ -15,7 +15,6 @@ WHERE THINGS LIVE
 
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
@@ -27,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import portable
 from .dictionary import DEFAULT_SIMILARITY
 from .jsonio import ABSENT, read_json
 
@@ -484,7 +484,7 @@ def _editing_the_settings(target: Path) -> Iterator[None]:
         # Owner only. The file holds nothing — it exists to be flocked — but there is no
         # reason for anything else on the machine to be able to open it, and a mode that
         # says "world readable" invites the question of what is in it.
-        descriptor = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NONBLOCK, 0o600)
+        descriptor = os.open(lock, os.O_CREAT | os.O_RDWR | portable.O_NONBLOCK, 0o600)
     except OSError as exc:
         raise UsageError(
             what=f"could not lock {target}",
@@ -500,11 +500,11 @@ def _editing_the_settings(target: Path) -> Iterator[None]:
                 why=f"{lock} is not a regular file",
                 how="move it out of the way",
             )
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        portable.lock(descriptor)
         try:
             yield
         finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            portable.unlock(descriptor)
     finally:
         os.close(descriptor)
 

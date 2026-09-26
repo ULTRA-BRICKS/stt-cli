@@ -16,7 +16,7 @@ import os
 import stat
 from pathlib import Path
 
-from .. import dictionary
+from .. import dictionary, portable
 from .._errors import EXIT_OK, EXIT_UNKNOWN_ITEM, UsageError
 
 # How far below the flagging threshold `stt dict check` still reports a resemblance.
@@ -168,7 +168,7 @@ def _readable_lines(source: Path) -> list[str]:
         # and opening one waits for a writer that never comes — forever, with no message.
         # `os.open` with O_NONBLOCK returns instead of waiting, and the check then asks the
         # file that was actually opened rather than whatever the name points at now.
-        fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK)
+        fd = os.open(source, os.O_RDONLY | portable.O_NONBLOCK)
         with os.fdopen(fd, "r", encoding="utf-8") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise UsageError(

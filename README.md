@@ -14,10 +14,32 @@ stt meeting.m4a --diarize -f speakers            # split into speaker turns
 
 ## Install
 
+Pick one — each ends with `stt` on your PATH:
+
 ```bash
+# 1. uv — recommended; macOS, Linux and Windows (incl. Cygwin / Git Bash)
+uv tool install hyper-stt
+
+# 2. pipx
+pipx install hyper-stt
+
+# 3. one-liner — clones to ~/.local/share/stt-cli, links stt into ~/.local/bin, registers the agent skill
 curl -fsSL https://git.hyperide.ai/ultrabricks/stt-cli/raw/branch/main/install.sh | bash
-stt setup       # detects what you already have, explains the options, picks an engine
+
+# 4. from a clone — to hack on it; `git pull` updates the installed tool
+git clone https://git.hyperide.ai/ultrabricks/stt-cli && cd stt-cli && ./install.sh
 ```
+
+- After **1** or **2**, run `stt install-skill` once so coding agents discover `stt` (3 and 4 do it for you).
+- **Unreleased `main`:** `uv tool install git+https://git.hyperide.ai/ultrabricks/stt-cli` (or the same with `pipx install`).
+- **Update:** `uv tool upgrade hyper-stt` · `pipx upgrade hyper-stt` · re-run the one-liner · `git pull`.
+- **Installed before the rename** (as `stt-cli`, from git)? Remove that first — `uv tool uninstall stt-cli` or `pipx uninstall stt-cli` — or two installs both claim `stt`.
+- **Via rig:** clone into `~/xp/stt-cli` and list `stt` under `tools.items` in `~/.config/rig/config.yaml` — `rig apply commit` runs its `install.sh` and keeps the clone fresh.
+
+> **On PyPI as `hyper-stt`** (the command is still `stt`). The canonical repo is
+> **git.hyperide.ai/ultrabricks/stt-cli**; `github.com/alex-mextner/stt-cli` is a frozen, archived mirror.
+
+stt is **macOS-only**. Then run `stt setup` — it detects what you already have, explains the options and picks an engine.
 
 The installer adds `ffmpeg` and a speech engine if they are missing, and registers `stt`
 as an agent skill so coding agents find it on their own. `stt doctor` reports every

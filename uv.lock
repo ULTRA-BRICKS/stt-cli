@@ -3423,7 +3423,7 @@ wheels = [
 ]
 
 [[package]]
-name = "stt-cli"
+name = "hyper-stt"
 source = { editable = "." }
 
 [package.optional-dependencies]

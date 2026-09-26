@@ -1,9 +1,9 @@
-"""_keycodes — named curses input codes shared across `configtui`'s handlers.
+"""_keycodes — named curses input codes shared across `_configtui`'s handlers.
 
 WHY THIS EXISTS
     A terminal has more than one way to send "Escape", "Enter" or "Backspace", and curses
     hands `getch()` back a bare ``int`` for all of them. `_handle`, `_handle_search` and
-    `_prompt` in ``configtui.py`` each re-typed the same six literals (27, 10, 13, 9, 127, 8)
+    `_prompt` in ``_configtui.py`` each re-typed the same six literals (27, 10, 13, 9, 127, 8)
     with nothing to say which control code any of them meant, or to keep three separate
     copies from drifting if a fourth handler needed the same check. One shared module, named
     once, so the next handler this screen grows imports a name instead of re-guessing.
@@ -12,7 +12,7 @@ CONTRACT
     Every raw literal these handlers compare against lives here, grouped as the tuple a
     call site actually needs (``ENTER_KEYS``, ``BACKSPACE_KEYS``, ...) rather than as loose
     single constants a call site would have to re-assemble — that grouping is what keeps
-    ``configtui.py`` itself free of the bare integers this module exists to name.
+    ``_configtui.py`` itself free of the bare integers this module exists to name.
 """
 
 from __future__ import annotations
