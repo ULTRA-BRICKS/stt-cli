@@ -40,6 +40,7 @@ _url_host_path() {  # https / ssh / scp-style git URL -> "host path" (user@, :po
     *) return 1 ;;
   esac
   [ "$_path" != "$_u" ] || return 1
+  case "$_hp" in *[!A-Za-z0-9._:@%~-]*) return 1 ;; esac  # e.g. `\` (a host separator to some parsers)
   _host=${_hp##*@}; _host=${_host%%:*}
   printf '%s %s\n' "$_host" "$_path"
 }
@@ -76,7 +77,7 @@ else
       exit 1
     fi
     say "stt: updating existing clone at $CLONE_DIR"
-    git -C "$CLONE_DIR" pull --ff-only
+    git -C "$CLONE_DIR" pull --ff-only origin HEAD  # the remote just validated, not branch.*.remote
   else
     say "stt: cloning $EXPECT_URL into $CLONE_DIR"
     git clone "$EXPECT_URL" "$CLONE_DIR"
