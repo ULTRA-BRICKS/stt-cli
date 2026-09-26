@@ -297,7 +297,18 @@ jobs:
       - name: Upload SARIF artifact
         # Publish the raw SARIF even on a gate failure, so it's downloadable
         # (`gh run download`) for triage. Skipped when the language wasn't analyzed.
+        # continue-on-error (stt-cli#55): this Forgejo instance's Actions runner rejects
+        # the actions/artifact v2.0.0+ protocol upload-artifact@v4 speaks ("GHESNotSupportedError:
+        # ...v2.0.0+...are not currently supported on GHES"), unconditionally, on every run,
+        # regardless of the SARIF content -- reproduced live on stt-cli#73: the CodeQL
+        # analysis and the real gate below it both genuinely ran and passed (0 gated
+        # findings for python/javascript-typescript, 4 correctly in-source-suppressed
+        # findings for actions) but the job still reported failed solely because this
+        # best-effort archival step errored. The actual security gate is the next step,
+        # not this one -- a triage convenience that can't work on this host must not fail
+        # the gate it has nothing to do with.
         if: always() && steps.detect.outputs.has_source == 'true'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: codeql-sarif-${{ matrix.language }}
