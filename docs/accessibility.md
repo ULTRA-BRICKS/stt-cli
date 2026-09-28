@@ -99,3 +99,36 @@ deliberately honest that this is a *request*, not a completion.
 That one guided click — attributed to the actual application asking — is the ceiling this
 tool, or any comparable tool, can reach without help from the user or their organization's
 MDM.
+
+## When a working grant goes stale
+
+The espanso row above is not a hazard unique to a different tool: `bin/stt`'s shebang
+(`#!/usr/bin/env python3`) resolves to the exact same ad-hoc/Homebrew-signed shape. On a
+Homebrew-managed Mac that resolves to something like
+`/opt/homebrew/Cellar/python@3.14/<version>/Frameworks/Python.framework/Versions/3.14/bin/python3.14`
+— an ad-hoc-signed binary whose TCC identity is tied to that exact content hash, not a
+stable Team ID. Any future rebuild of that binary (a `brew upgrade`/`reinstall` that
+repours the bottle) makes macOS treat the post-rebuild `python3.14` as a brand-new,
+never-before-granted principal at the same file path — even though nothing about how you
+invoke `stt` changed.
+
+This is not theoretical. A user reported granting Accessibility, seeing `stt mic --check`
+succeed, and later finding it silently denied again with no warning. The system `TCC.db`
+(`/Library/Application Support/com.apple.TCC/TCC.db`) held exactly one Accessibility row
+for the resolved `python3.14` path: `auth_value=0` (denied), `auth_reason=4` ("System
+Set" — not `2`/User Consent or `3`/User Set, i.e. produced by `tccd` itself, not an
+explicit click), `last_modified` matching the moment the regression was noticed.
+Investigating whether a Homebrew rebuild caused *that specific* incident found that it did
+not: the Cellar held a single `python@3.14` build, installed seven months before the
+reset, with no `brew upgrade`/`reinstall` of it anywhere in shell history and no macOS
+reboot or software update recorded on the day in question — so that incident's exact
+trigger stayed unconfirmed. What stayed confirmed either way: the rebuild-changes-identity
+mechanism above is real, this machine's `python@3.14` was already stale and overdue for
+one, and `stt doctor`/`stt mic status` print the identical "Accessibility NOT granted"
+message for "never granted" and "was granted, then silently revoked" — nothing today tells
+a user which one they are looking at. Re-granting Accessibility (the same one guided
+toggle described above) is the fix either way; see
+[ticket #80](https://git.hyperide.ai/ultrabricks/stt-cli/issues/80) for the tracked
+follow-up to make `stt doctor` distinguish the two cases where that is technically
+possible.
+
