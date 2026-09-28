@@ -52,7 +52,7 @@ from ._keycodes import (
 GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("engine", ("backend", "model", "language", "threads", "whispercpp_root")),
     ("context", ("context", "context_compare")),
-    ("push-to-talk", ("hotkey_press", "hotkey_hold", "mic_threshold")),
+    ("push-to-talk", ("hotkey_press", "hotkey_hold", "mic_threshold", "mic_daemon_autostart")),
     (
         "voice detection",
         ("vad", "vad_threshold", "vad_min_silence_ms", "vad_speech_pad_ms", "vad_min_speech_ms"),
@@ -77,6 +77,7 @@ HELP: dict[str, str] = {
     "hotkey_press": "press-style chord for the `stt mic` daemon (press again to stop)",
     "hotkey_hold": "hold-style chord for push-to-talk; unset disables it (no default)",
     "mic_threshold": "how loud a frame must be to count as speech; 0 uses the built-in bar",
+    "mic_daemon_autostart": "record only: use `stt mic enable`/`disable` to change the daemon",
     "vad": "which voice activity detector finds speech in the audio",
     "vad_threshold": "silero's speech-probability cutoff, 0.0 to 1.0",
     "vad_min_silence_ms": "milliseconds of quiet before a speech span is considered over",

@@ -1488,16 +1488,29 @@ def test_probe_launchd_is_none_off_macos(monkeypatch) -> None:
     assert mic_service.probe_launchd("com.agenttools.stt.mic") is None
 
 
-def _fake_service_lib(monkeypatch, *, run_action):
-    """A minimal `agenttools_service` stand-in exposing only what `_status` reads
-    (`run_action`) — `_manager` itself is monkeypatched separately in each test, so nothing
-    here needs to build a real `Service`/`ServiceManager`."""
+def _fake_service_lib(monkeypatch, *, run_action, dispatch=None, add_service_subcommands=None):
+    """A minimal `agenttools_service` stand-in. `run_action` is what `_status` reads;
+    `dispatch`/`add_service_subcommands` are only needed by tests that drive `_lifecycle`
+    through an action OTHER than `status` (`_manager` itself is monkeypatched separately in
+    each test, so nothing here needs to build a real `Service`/`ServiceManager`)."""
     import sys
     import types
 
     fake = types.ModuleType("agenttools_service")
     fake.run_action = run_action
+    if dispatch is not None:
+        fake.dispatch = dispatch
+    if add_service_subcommands is not None:
+        fake.add_service_subcommands = add_service_subcommands
     monkeypatch.setitem(sys.modules, "agenttools_service", fake)
+
+
+def _fake_add_subcommands(subs, *, manager_factory, service_name):
+    """A minimal `add_service_subcommands` stand-in: just enough subparsers for
+    `_daemon_parser().parse_args` to set `ns.action` correctly — the real routing/dispatch
+    is faked separately via `_fake_service_lib`'s `dispatch`."""
+    for name in ("run", "start", "status", "stop", "enable", "disable"):
+        subs.add_parser(name)
 
 
 def test_status_falls_through_to_the_shared_lib_for_a_pidfile_tracked_instance(
@@ -1640,3 +1653,1024 @@ def test_status_names_down_between_restarts_for_an_undiagnosed_crash(monkeypatch
     assert "not running" in out
     assert "Accessibility" not in out
     assert "/fake/mic.log" in out
+
+
+# ── bare invocation: a literal alias for `stt mic --help` (#85) ─────────────────
+
+
+def test_a_bare_invocation_is_a_literal_alias_for_help(capsys) -> None:
+    """`stt mic` with zero arguments must produce EXACTLY the same output and exit code as
+    `stt mic --help` — argparse's own, unchanged mechanism, not a custom screen replacing
+    it (#85)."""
+    from stt_cli.commands import mic
+
+    with pytest.raises(SystemExit) as bare:
+        mic.run([])
+    bare_out = capsys.readouterr()
+
+    with pytest.raises(SystemExit) as explicit:
+        mic.run(["--help"])
+    explicit_out = capsys.readouterr()
+
+    assert bare.value.code == explicit.value.code == 0
+    assert bare_out.out == explicit_out.out
+    assert "run/start/status/stop/enable/disable" in bare_out.out
+
+
+def test_an_explicit_flag_still_dictates_ad_hoc_exactly_as_before(monkeypatch) -> None:
+    """Only the truly bare invocation changes meaning — any flag at all (`--device 1`,
+    `--check`, ...) must still reach dictation exactly as it always has (#85)."""
+    from stt_cli.commands import mic
+    from stt_cli.live import dictation as dictation_mod
+
+    called: list[object] = []
+
+    async def fake_dictate(args):
+        called.append(args)
+        return 0
+
+    monkeypatch.setattr(mic, "_adhoc_banner", lambda **_: None)
+    monkeypatch.setattr(mic, "_maybe_autostart_daemon", lambda **_: None)
+    monkeypatch.setattr(dictation_mod, "dictate", fake_dictate)
+
+    assert mic.run(["--device", "1"]) == 0
+    assert len(called) == 1
+    assert called[0].device == "1"
+
+
+# ── ad-hoc (non-daemon) dictation: the daemon-status/hotkey banner (#85) ────────
+
+
+def test_ad_hoc_dictation_prints_the_check_banner_before_opening_the_microphone(
+    monkeypatch, capsys
+) -> None:
+    """The daemon-status/hotkey screen the prior review caught wired to the WRONG trigger
+    (bare invocation) belongs here instead: right before an ad-hoc, non-daemon dictation
+    opens the microphone — Alex: "при запуске не в виде демона нужно запускать
+    проверочное окно" (#85)."""
+    from stt_cli.commands import mic
+    from stt_cli.live import dictation as dictation_mod
+
+    monkeypatch.setattr(mic, "_daemon_status_line", lambda: "daemon:  not running")
+    monkeypatch.setattr(mic, "_hotkey_lines", lambda: "hotkey:  cmd+shift+space (toggle)")
+    monkeypatch.setattr(mic, "_maybe_autostart_daemon", lambda **_: None)
+
+    async def fake_dictate(args):
+        return 0
+
+    monkeypatch.setattr(dictation_mod, "dictate", fake_dictate)
+
+    assert mic.run(["--device", "1"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "", "the banner belongs on stderr, not mixed into stdout"
+    assert "daemon:  not running" in captured.err
+    assert "hotkey:  cmd+shift+space (toggle)" in captured.err
+
+
+def test_check_flag_also_prints_the_ad_hoc_banner_but_never_triggers_autostart(
+    monkeypatch, capsys
+) -> None:
+    """`--check` opens the microphone exactly like ad-hoc dictation does — the SAME banner
+    (#85), printed before `_check` runs, same as the plain-dictation path above. But
+    `--check` is a DIAGNOSTIC, not a real dictation: `run()` only calls
+    `_maybe_autostart_daemon` after `dictation.dictate` itself returns `EXIT_OK` — `--check`
+    returns through `_check` instead and must never reach that trigger, unlike a genuine
+    dictation completing (#87). Required coverage: the diff adds the `--check` banner path
+    with no test proving it independently of a real dictation."""
+    from stt_cli.commands import mic
+
+    monkeypatch.setattr(mic, "_daemon_status_line", lambda: "daemon:  not running")
+    monkeypatch.setattr(mic, "_hotkey_lines", lambda: "hotkey:  cmd+shift+space (toggle)")
+
+    def boom(**_: object) -> None:
+        raise AssertionError("--check must never trigger the autostart decision")
+
+    monkeypatch.setattr(mic, "_maybe_autostart_daemon", boom)
+
+    async def fake_check(args: object) -> int:
+        return 0
+
+    monkeypatch.setattr(mic, "_check", fake_check)
+
+    assert mic.run(["--check"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "", "the banner belongs on stderr, not mixed into stdout"
+    assert "daemon:  not running" in captured.err
+    assert "hotkey:  cmd+shift+space (toggle)" in captured.err
+
+
+def test_quiet_suppresses_the_ad_hoc_check_banner(monkeypatch, capsys) -> None:
+    from stt_cli.commands import mic
+    from stt_cli.live import dictation as dictation_mod
+
+    def boom() -> str:
+        raise AssertionError("--quiet must skip the daemon probe entirely")
+
+    monkeypatch.setattr(mic, "_daemon_status_line", boom)
+    monkeypatch.setattr(mic, "_maybe_autostart_daemon", lambda **_: None)
+
+    async def fake_dictate(args):
+        return 0
+
+    monkeypatch.setattr(dictation_mod, "dictate", fake_dictate)
+
+    assert mic.run(["--device", "1", "--quiet"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_list_devices_never_shows_the_ad_hoc_banner(monkeypatch, capsys) -> None:
+    """`--list-devices` never opens the microphone — a pure query, not a "launched not as
+    the daemon" dictation — so it skips the banner entirely (#85)."""
+    from stt_cli.commands import mic
+
+    def boom() -> str:
+        raise AssertionError("--list-devices must never touch the daemon probe")
+
+    monkeypatch.setattr(mic, "_daemon_status_line", boom)
+
+    async def fake_list_devices() -> int:
+        return 0
+
+    monkeypatch.setattr(mic, "_list_devices", fake_list_devices)
+
+    assert mic.run(["--list-devices"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_daemon_status_line_reports_not_running(monkeypatch) -> None:
+    from stt_cli.commands import mic
+
+    class _FakeManager:
+        def status(self) -> object:
+            return argparse.Namespace(state="stopped", running=False, pid=None)
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    assert mic._daemon_status_line() == "daemon:  not running"
+
+
+def test_daemon_status_line_reports_a_live_pidfile_tracked_instance(monkeypatch) -> None:
+    from stt_cli.commands import mic
+
+    class _FakeManager:
+        def status(self) -> object:
+            return argparse.Namespace(state="running", running=True, pid=4242)
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    assert mic._daemon_status_line() == "daemon:  running (pid 4242)"
+
+
+def test_daemon_status_line_names_a_crash_loop_via_launchd(monkeypatch) -> None:
+    """The same real-state distinction #54 gave `stt mic status` (a genuinely alive daemon
+    versus a launchd job registered but currently down between restarts) has to reach the
+    ad-hoc dictation banner too, not just `stt mic status` itself."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(state="autostart", running=True, pid=None)
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=False, pid=None, last_exit_code=8),
+    )
+    line = mic._daemon_status_line()
+    assert "not currently running" in line
+    assert "last exit code 8" in line
+
+
+def test_daemon_status_line_says_unavailable_without_the_shared_lib(monkeypatch) -> None:
+    import sys
+
+    from stt_cli.commands import mic
+
+    monkeypatch.setitem(sys.modules, "agenttools_service", None)
+    assert "not available" in mic._daemon_status_line()
+
+
+def test_daemon_status_line_reports_a_live_autostart_managed_instance(monkeypatch) -> None:
+    """The branch every already-enabled machine actually hits day to day — a live process
+    reported through the launchd probe, not the pidfile fall-through — had no coverage."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(state="autostart", running=True, pid=None)
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=777, last_exit_code=None),
+    )
+    assert mic._daemon_status_line() == "daemon:  running (pid 777) [autostart on]"
+
+
+def test_daemon_status_line_degrades_on_an_unexpected_probe_failure(monkeypatch) -> None:
+    """`_adhoc_banner` runs ahead of every ad-hoc dictation — a launchctl subprocess error
+    or a malformed pidfile must degrade to a plain line here, not crash the banner (or the
+    dictation behind it) the way an `except ImportError`-only guard would. Caught in review
+    before merge; this is the regression test."""
+    from stt_cli.commands import mic
+
+    class _FakeManager:
+        def status(self) -> object:
+            raise OSError("launchctl: no such process")
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    line = mic._daemon_status_line()
+    assert "status unavailable" in line
+    assert "stt mic status" in line
+
+
+def test_hotkey_lines_shows_the_configured_chord_and_how_to_change_it(
+    tmp_path, monkeypatch
+) -> None:
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    config.save_setting("hotkey_press", "ctrl+opt+d")
+    config.save_setting("hotkey_hold", "cmd+shift+d")
+
+    lines = mic._hotkey_lines()
+    assert "ctrl+opt+d" in lines
+    assert "toggle" in lines
+    assert "cmd+shift+d" in lines
+    assert "hold" in lines
+    assert "configured" in lines
+    assert "stt config set hotkey_press" in lines
+    assert "stt config set hotkey_hold" in lines
+
+
+def test_hotkey_lines_names_the_built_in_default_when_unconfigured(tmp_path, monkeypatch) -> None:
+    """`hotkey_press` falls back to the built-in default when unset; `hotkey_hold` has no
+    built-in default at all (see its own doc comment) — unset means disabled, not "use
+    some default hold chord"."""
+    from stt_cli.commands import mic
+    from stt_cli.live import hotkey as hotkey_mod
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    lines = mic._hotkey_lines()
+    assert hotkey_mod.DEFAULT_PRESS_HOTKEY in lines
+    assert "not yet configured" in lines
+    assert "hold disabled" in lines
+
+
+def test_hotkey_lines_degrades_on_a_hand_edited_unusable_chord(tmp_path, monkeypatch) -> None:
+    """A hand-edited config.json can hold a syntactically-fine (type: str) but semantically
+    unusable chord — `config._validate` only checks the TYPE, `hotkey.validate` only runs at
+    `stt config set`/TUI time. `HotkeyError` is a `ValueError`, not the `SttError` the CLI's
+    top-level `guard` recognises — left uncaught this would raw-traceback the bare-invocation
+    screen, the one path meant to be safe to run blind. Caught in review before merge; this
+    is the regression test."""
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    config.save_setting("hotkey_press", "banana")  # bypasses stt config set's own validation
+
+    lines = mic._hotkey_lines()
+    assert "invalid stored hotkey_press" in lines
+    assert "stt config set hotkey_press" in lines
+
+
+# ── daemon default-on after the first successful ad-hoc dictation (#87) ─────────
+
+
+def test_run_triggers_the_autostart_check_only_after_a_successful_dictation(
+    tmp_path, monkeypatch
+) -> None:
+    from stt_cli.commands import mic
+    from stt_cli.live import dictation as dictation_mod
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setattr(mic, "_adhoc_banner", lambda **_: None)
+
+    calls: list[int] = []
+    monkeypatch.setattr(mic, "_maybe_autostart_daemon", lambda **_: calls.append(1))
+
+    async def ok(args):
+        return 0
+
+    monkeypatch.setattr(dictation_mod, "dictate", ok)
+    assert mic.run(["--device", "1"]) == 0
+    assert calls == [1]
+
+    calls.clear()
+
+    async def failed(args):
+        return 8
+
+    monkeypatch.setattr(dictation_mod, "dictate", failed)
+    assert mic.run(["--device", "1"]) == 8
+    assert calls == [], "a failed/denied dictation is not proof anything works here"
+
+
+def test_a_successful_ad_hoc_dictation_enables_the_daemon_when_undecided(
+    tmp_path, monkeypatch
+) -> None:
+    """The first ad-hoc dictation that actually completes is proof Accessibility and the
+    microphone both work here — the trigger `_maybe_autostart_daemon` turns into "enable
+    the daemon", exactly once, but ONLY once the daemon it installed is verified genuinely
+    alive (#87/#54)."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    assert config.load_settings().mic_daemon_autostart is None
+
+    enabled: list[bool] = []
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(running=False, enabled=False)
+
+        def enable(self) -> None:
+            enabled.append(True)
+
+        def autostart_active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=4242, last_exit_code=None),
+    )
+    mic._maybe_autostart_daemon(quiet=True)
+
+    assert enabled == [True]
+    assert config.load_settings().mic_daemon_autostart is True
+
+
+def test_autostart_still_installs_when_something_is_already_running_but_not_enabled(
+    tmp_path, monkeypatch
+) -> None:
+    """A manager-spawned or foreign process already being ALIVE is not the same fact as
+    autostart being CONFIGURED — the whole point of this trigger. Keying the guard off
+    `running` instead of `enabled` let an already-running-but-never-enabled daemon record
+    `mic_daemon_autostart = True` without `enable()` ever being called, permanently
+    skipping the one thing this function exists to do (the flag then blocks every future
+    check). Caught in review before merge; this is the regression test."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    enabled: list[bool] = []
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(running=True, enabled=False)
+
+        def enable(self) -> None:
+            enabled.append(True)
+
+        def autostart_active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=4242, last_exit_code=None),
+    )
+    mic._maybe_autostart_daemon(quiet=True)
+
+    assert enabled == [True], "enable() must still run: something running is not autostart"
+    assert config.load_settings().mic_daemon_autostart is True
+
+
+def test_autostart_never_fires_twice_or_after_an_explicit_decision(tmp_path, monkeypatch) -> None:
+    """Once `mic_daemon_autostart` is set — by this same auto-enable OR by an explicit
+    `stt mic enable`/`disable` — a later successful dictation must never touch the daemon
+    again (#87).
+
+    Asserts on an OBSERVED call list rather than on `status()` raising: an earlier version
+    of this test raised `AssertionError` from `status()` instead, which the caller's own
+    broad `except Exception` (a deliberate, separate contract: never break a dictation that
+    just worked) swallowed right along with a real bug — deleting the early-return this test
+    is supposed to guard left `status()` genuinely called, `AssertionError` raised, and
+    silently caught, and the test still passed. Caught in review; this is the fix."""
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    config.save_setting("mic_daemon_autostart", False)
+
+    calls: list[str] = []
+
+    class _FakeManager:
+        def status(self) -> object:
+            calls.append("status")
+            return argparse.Namespace(enabled=False, running=False)
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    mic._maybe_autostart_daemon(quiet=True)  # must not raise
+
+    assert calls == [], "must not even ask the daemon's status once already decided"
+    assert config.load_settings().mic_daemon_autostart is False
+
+
+def test_the_daemon_lock_prevents_an_explicit_disable_from_interleaving_with_auto_enable(
+    tmp_path, monkeypatch
+) -> None:
+    """The deeper race #2 identifies: `manager.enable()` (the automatic path) and
+    `dispatch()` (an explicit `stt mic disable`) both used to run with NO lock around the
+    real daemon-control call itself — only the final config WRITE was atomic
+    (`save_setting_if_unset`). A concurrent disable's real launchd-off could land in the gap
+    between the automatic path's own status check and its `enable()` call, re-installing
+    autostart the user had just removed, even though the config record afterward correctly
+    read `False`. Both paths now share `config.locked_for_daemon_decision()` around their
+    WHOLE control-then-persist sequence — this proves it with two REAL OS threads, not a
+    single-threaded simulation: the explicit disable must genuinely block (not merely be
+    scheduled after) until the automatic path's `enable()` call has released the lock."""
+    import threading
+    import time
+
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    order_lock = threading.Lock()
+    order: list[str] = []
+
+    def record(tag: str) -> None:
+        with order_lock:
+            order.append(tag)
+
+    entered_enable = threading.Event()
+    release_enable = threading.Event()
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(enabled=False, running=False)
+
+        def enable(self) -> None:
+            record("auto_enter")
+            entered_enable.set()
+            # Held open long enough that a concurrent disable, if the lock genuinely did
+            # not cover this call, would have every opportunity to land here.
+            release_enable.wait(timeout=2.0)
+            record("auto_exit")
+
+        def autostart_active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=4242, last_exit_code=None),
+    )
+
+    auto_thread = threading.Thread(target=lambda: mic._maybe_autostart_daemon(quiet=True))
+    auto_thread.start()
+    assert entered_enable.wait(timeout=2.0), "the automatic path never reached enable()"
+
+    def fake_dispatch(ns, on_no_subcommand=None) -> int:
+        record("disable_enter")
+        record("disable_exit")
+        return 0
+
+    _fake_service_lib(
+        monkeypatch,
+        run_action=lambda manager, action: 0,
+        dispatch=fake_dispatch,
+        add_service_subcommands=_fake_add_subcommands,
+    )
+    disable_result: dict[str, int] = {}
+    disable_thread = threading.Thread(
+        target=lambda: disable_result.update(exit_code=mic._lifecycle(["disable"]))
+    )
+    disable_thread.start()
+    time.sleep(0.2)  # a real chance to race in, if the lock did not actually stop it
+    assert order == ["auto_enter"], "the disable must still be blocked on the lock"
+
+    release_enable.set()
+    auto_thread.join(timeout=2.0)
+    disable_thread.join(timeout=2.0)
+    assert not auto_thread.is_alive() and not disable_thread.is_alive()
+
+    assert order == ["auto_enter", "auto_exit", "disable_enter", "disable_exit"], (
+        "the two critical sections must never interleave"
+    )
+    assert disable_result["exit_code"] == 0
+    assert config.load_settings().mic_daemon_autostart is False, (
+        "the explicit disable ran second and must be the decision that is recorded"
+    )
+
+
+def test_autostart_is_a_no_op_without_the_shared_service_lib(tmp_path, monkeypatch) -> None:
+    """A machine without `agenttools_service` completes ad-hoc dictation exactly as before —
+    no traceback, no attempted daemon control — and the flag stays undecided so this can try
+    again once the lib is installed (#87)."""
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    def boom(ns):
+        raise ImportError("no agenttools_service")
+
+    monkeypatch.setattr(mic, "_manager", boom)
+    mic._maybe_autostart_daemon(quiet=True)  # must not raise
+
+    assert config.load_settings().mic_daemon_autostart is None
+
+
+def test_a_hand_edited_null_decision_still_persists_and_notifies_on_autostart(
+    tmp_path, monkeypatch
+) -> None:
+    """A hand-edited `{"mic_daemon_autostart": null}` is documented as a valid, explicit
+    "undecided" — but `save_setting_if_unset` used to test presence (`key in raw`) while
+    the gate above it tested value (`is not None`): the gate let the decision proceed, the
+    real `enable()` ran, and the persist step then refused to write over the merely-PRESENT
+    key — no confirmation note, and the record stayed `null` forever. Caught in review
+    before merge; this is the regression test."""
+    import json
+
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    config.ensure_dirs()
+    config.config_path().write_text(json.dumps({"mic_daemon_autostart": None}), "utf-8")
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(enabled=False, running=False)
+
+        def enable(self) -> None:
+            pass
+
+        def autostart_active(self) -> bool:
+            return True
+
+    notes: list[str] = []
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=4242, last_exit_code=None),
+    )
+    monkeypatch.setattr("stt_cli.live.status.note", lambda message, **_: notes.append(message))
+    mic._maybe_autostart_daemon(quiet=True)
+
+    assert config.load_settings().mic_daemon_autostart is True, "the decision must persist"
+    assert notes, "the user must be told the daemon is now on"
+
+
+def test_the_shared_service_libs_attribute_surface_still_matches_what_mic_py_reads() -> None:
+    """`_maybe_autostart_daemon`/`_status` read `st.enabled`, `st.running`, `st.pid`,
+    `st.state` off `manager.status()`, and call `manager.autostart_active()` — none of that
+    is checked by mypy (`agenttools_service` is `ignore_missing_imports` for this repo), so
+    a silent rename upstream would permanently and silently disable feature #87 on every
+    machine with no test anywhere catching it. Gated: only runs where the real lib is
+    actually installed (a documented follow-up where it is not, e.g. this environment
+    today). Read-only: `status()`/`autostart_active()` are queries; this never calls
+    `enable()`/`disable()`, which have real launchd/systemd side effects."""
+    pytest.importorskip("agenttools_service")
+    from stt_cli.commands import mic
+
+    manager = mic._default_manager()
+    for method in ("autostart_active", "enable", "disable"):
+        assert callable(getattr(manager, method, None)), f"ServiceManager.{method} is gone"
+
+    st = manager.status()
+    for attr in ("enabled", "running", "pid", "state"):
+        assert hasattr(st, attr), f"ServiceManager.status() no longer exposes {attr!r}"
+
+
+def test_a_failure_enabling_the_daemon_never_breaks_the_dictation_that_just_worked(
+    tmp_path, monkeypatch
+) -> None:
+    """`enable()` can fail for its own reasons (launchd unreachable, ...) — that must never
+    surface as an exception from a function called after dictation already succeeded, and
+    must leave the flag undecided so a later run can retry (#87)."""
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    class _FakeManager:
+        def status(self) -> object:
+            return argparse.Namespace(running=False, enabled=False)
+
+        def enable(self) -> None:
+            raise RuntimeError("launchctl exploded")
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    mic._maybe_autostart_daemon(quiet=True)  # must not raise
+
+    assert config.load_settings().mic_daemon_autostart is None
+
+
+def test_a_failure_persisting_the_decision_never_breaks_the_dictation_that_just_worked(
+    tmp_path, monkeypatch
+) -> None:
+    """The promise is "never breaks the dictation that just succeeded", not "never breaks
+    it unless the failure happens to be in config.save_setting_if_unset" — a config.json
+    write can itself raise (a lock file that cannot be opened, the file grown past the
+    size guard), and that must be caught exactly like a daemon-manager failure. Caught in
+    review before merge; this is the regression test."""
+    from stt_cli import config as config_mod
+    from stt_cli._errors import UsageError
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(running=False, enabled=False)
+
+        def enable(self) -> None:
+            pass
+
+        def autostart_active(self) -> bool:
+            return True
+
+    def boom(key: str, value: object, *, unset: tuple = (None,)) -> bool:
+        raise UsageError(what="config.json is broken", why="test", how="test")
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=4242, last_exit_code=None),
+    )
+    monkeypatch.setattr(config_mod, "save_setting_if_unset", boom)
+    mic._maybe_autostart_daemon(quiet=True)  # must not raise
+
+
+def test_autostart_never_reverses_an_explicit_disable_recorded_while_it_was_deciding(
+    tmp_path, monkeypatch
+) -> None:
+    """A `stt mic disable` in another terminal can complete WHILE this function is between
+    reading the (undecided) flag and writing its own decision — `manager.enable()` is the
+    slow daemon-control call that window sits around. `save_setting_if_unset` does the
+    check-and-write as ONE lock acquisition, so the race is closed no matter how it lands,
+    not merely narrowed. Caught in review before merge; this is the regression test."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(running=False, enabled=False)
+
+        def enable(self) -> None:
+            # Simulates a concurrent `stt mic disable` completing while THIS `enable()`
+            # call (the slow, real daemon-control step) is still in flight.
+            config.save_setting("mic_daemon_autostart", False)
+
+        def autostart_active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=4242, last_exit_code=None),
+    )
+    mic._maybe_autostart_daemon(quiet=True)
+
+    assert config.load_settings().mic_daemon_autostart is False, (
+        "the explicit disable that landed mid-decision must win, not be overwritten"
+    )
+
+
+def test_a_crash_looping_daemon_after_autostart_is_never_recorded_as_confirmed(
+    tmp_path, monkeypatch
+) -> None:
+    """End-to-end regression for the correctness blocker review caught: `enable()`
+    succeeding only proves the AD-HOC process's own TCC identity works, never the
+    separately-spawned launchd daemon's (#54's own investigation, this session's TCC-scope
+    investigation). Runs the REAL `stt mic` entry point — `run()` -> a genuinely successful
+    dictation -> the real `_maybe_autostart_daemon`, faking only `_manager` (no real
+    launchd) and `mic_service.probe_launchd` (the daemon's own liveness/exit-code probe,
+    diagnosing the exact #54 crash-loop: registered, no live pid, last exit code
+    `EXIT_PERMISSION`). Must NOT persist `True` (that would silently claim a permanently
+    crash-looping daemon is confirmed working, never retrying, never telling the user
+    anything is wrong — exactly the failure this session kept hitting) and must NOT
+    persist `False` either (nobody explicitly declined) — only the dedicated retryable
+    state, with the real permission principal named in the user-facing message, not a
+    generic 'grant Accessibility' hint."""
+    from stt_cli._errors import EXIT_PERMISSION
+    from stt_cli.commands import mic
+    from stt_cli.live import dictation as dictation_mod
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    assert config.load_settings().mic_daemon_autostart is None
+
+    enabled: list[bool] = []
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(running=False, enabled=False, state="stopped", pid=None)
+
+        def enable(self) -> None:
+            enabled.append(True)
+
+        def autostart_active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(mic, "_adhoc_banner", lambda **_: None)
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(
+            alive=False, pid=None, last_exit_code=EXIT_PERMISSION
+        ),
+    )
+    notes: list[str] = []
+    monkeypatch.setattr("stt_cli.live.status.note", lambda message, **_: notes.append(message))
+
+    async def fake_dictate(args: object) -> int:
+        return 0
+
+    monkeypatch.setattr(dictation_mod, "dictate", fake_dictate)
+
+    assert mic.run(["--device", "1"]) == 0
+
+    assert enabled == [True], "enable() must still have run: the OS control itself succeeded"
+    settled = config.load_settings().mic_daemon_autostart
+    assert settled == config.MIC_AUTOSTART_RETRY, (
+        f"a crash-looping daemon must record the retryable state, got {settled!r}"
+    )
+    assert settled is not True and settled is not False
+    assert notes, "the user must be told immediately, not left to discover this later"
+    message = notes[0]
+    assert "Accessibility" in message
+    assert "python interpreter" in message or "bin/stt" in message, (
+        "must name the real permission principal (the launchd-spawned process), not a "
+        "generic hint about the terminal"
+    )
+    assert "launchd-spawned process" in message
+
+
+def test_a_crash_looping_daemon_can_be_retried_by_a_later_successful_dictation(
+    tmp_path, monkeypatch
+) -> None:
+    """The retryable state left by a previous crash-loop must not permanently wedge the
+    trigger — once the daemon comes up genuinely alive (Accessibility was granted since),
+    the very next successful ad-hoc dictation confirms it for real (#87/#54)."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    config.save_setting("mic_daemon_autostart", config.MIC_AUTOSTART_RETRY)
+
+    enabled: list[bool] = []
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            # The OS install from the earlier attempt is still there — only the LIVENESS
+            # was never confirmed, so `enable()` must not be called a second time.
+            return argparse.Namespace(running=False, enabled=True)
+
+        def enable(self) -> None:
+            enabled.append(True)
+
+        def autostart_active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(
+        mic_service,
+        "probe_launchd",
+        lambda label: mic_service.LaunchdProbe(alive=True, pid=4242, last_exit_code=None),
+    )
+    mic._maybe_autostart_daemon(quiet=True)
+
+    assert enabled == [], "already-enabled OS autostart must not be re-installed"
+    assert config.load_settings().mic_daemon_autostart is True
+
+
+def test_a_daemon_that_never_resolves_within_the_probe_budget_stays_retryable(
+    tmp_path, monkeypatch
+) -> None:
+    """`probe_launchd` answering (registered, but neither alive nor with a diagnosed exit
+    code yet — genuinely still starting, or stuck) for the WHOLE bounded probe budget must
+    still refuse to persist `True`: "the OS accepted the control command" is not "verified
+    alive", and running out of patience is not evidence of success either (#87/#54)."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setattr(mic.time, "sleep", lambda _seconds: None)
+
+    probes: list[str] = []
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(running=False, enabled=False)
+
+        def enable(self) -> None:
+            pass
+
+        def autostart_active(self) -> bool:
+            return True
+
+    def probe_launchd(label: str) -> mic_service.LaunchdProbe:
+        probes.append(label)
+        return mic_service.LaunchdProbe(alive=False, pid=None, last_exit_code=None)
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(mic_service, "probe_launchd", probe_launchd)
+    mic._maybe_autostart_daemon(quiet=True)
+
+    assert len(probes) == mic._AUTOSTART_PROBE_ATTEMPTS, "must poll the full bounded budget"
+    assert config.load_settings().mic_daemon_autostart == config.MIC_AUTOSTART_RETRY
+
+
+def test_launchctl_never_answering_on_macos_never_falsely_confirms_autostart(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression for the correctness bug review caught: `probe_launchd` returning `None`
+    on EVERY attempt (launchctl unreachable, timed out, or an unrecognized output shape)
+    is NO evidence the daemon is alive — but it is also not "off macOS", where a bare
+    `None` is the ONLY answer `probe_launchd` can ever give and is correctly trusted
+    (see the sibling test below). On macOS specifically, #87 requires VERIFIED liveness
+    before persisting `True`; silently trusting an unanswered probe would let a genuinely
+    crash-looping daemon get marked confirmed forever, exactly the failure this whole
+    fix exists to prevent."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setattr(mic.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mic.sys, "platform", "darwin")
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(running=False, enabled=False)
+
+        def enable(self) -> None:
+            pass
+
+        def autostart_active(self) -> bool:
+            return True
+
+    notes: list[str] = []
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(mic_service, "probe_launchd", lambda label: None)
+    monkeypatch.setattr("stt_cli.live.status.note", lambda message, **_: notes.append(message))
+    mic._maybe_autostart_daemon(quiet=True)
+
+    settled = config.load_settings().mic_daemon_autostart
+    assert settled == config.MIC_AUTOSTART_RETRY, (
+        f"an unanswered probe on macOS must not be trusted as confirmed, got {settled!r}"
+    )
+    assert notes and "could not be verified" in notes[0]
+
+
+def test_an_unanswerable_probe_off_macos_still_confirms_via_autostart_active(
+    tmp_path, monkeypatch
+) -> None:
+    """Off macOS, `probe_launchd` returns `None` by design — there is no launchd to ask —
+    the ONLY answer it can ever give, not a failure to diagnose. That must keep trusting
+    `autostart_active()` exactly as it did before #87's liveness verification was added,
+    so this launchd-specific check never regresses a platform with no launchd at all."""
+    from stt_cli.commands import mic
+    from stt_cli.live import mic_service
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setattr(mic.sys, "platform", "linux")
+
+    class _FakeManager:
+        service = argparse.Namespace(label="com.agenttools.stt.mic")
+
+        def status(self) -> object:
+            return argparse.Namespace(running=False, enabled=False)
+
+        def enable(self) -> None:
+            pass
+
+        def autostart_active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
+    monkeypatch.setattr(mic_service, "probe_launchd", lambda label: None)
+    mic._maybe_autostart_daemon(quiet=True)
+
+    assert config.load_settings().mic_daemon_autostart is True
+
+
+def test_explicit_enable_records_the_same_flag_autostart_reads(tmp_path, monkeypatch) -> None:
+    """`stt mic enable` is an explicit decision — it must record the SAME flag
+    `_maybe_autostart_daemon` reads, so a later ad-hoc dictation never second-guesses it
+    (#87)."""
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    _fake_service_lib(
+        monkeypatch,
+        run_action=lambda manager, action: 0,
+        add_service_subcommands=_fake_add_subcommands,
+        dispatch=lambda ns, on_no_subcommand: 0,
+    )
+
+    assert mic._lifecycle(["enable"]) == 0
+    assert config.load_settings().mic_daemon_autostart is True
+
+
+def test_explicit_disable_records_the_flag_too(tmp_path, monkeypatch) -> None:
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    config.save_setting("mic_daemon_autostart", True)  # as if enable ran earlier
+
+    _fake_service_lib(
+        monkeypatch,
+        run_action=lambda manager, action: 0,
+        add_service_subcommands=_fake_add_subcommands,
+        dispatch=lambda ns, on_no_subcommand: 0,
+    )
+
+    assert mic._lifecycle(["disable"]) == 0
+    assert config.load_settings().mic_daemon_autostart is False
+
+
+def test_a_failed_enable_does_not_falsely_record_success(tmp_path, monkeypatch) -> None:
+    """`dispatch` returning a nonzero exit code (the OS control command failed) must not be
+    recorded as a successful opt-in — the flag would then lie about the daemon's real state
+    (#87)."""
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    _fake_service_lib(
+        monkeypatch,
+        run_action=lambda manager, action: 0,
+        add_service_subcommands=_fake_add_subcommands,
+        dispatch=lambda ns, on_no_subcommand: 4,
+    )
+
+    assert mic._lifecycle(["enable"]) == 4
+    assert config.load_settings().mic_daemon_autostart is None
+
+
+def test_a_successful_enable_that_fails_to_persist_still_reports_ok_but_warns(
+    tmp_path, monkeypatch
+) -> None:
+    """The daemon action itself already succeeded (`dispatch` returned `EXIT_OK`) by the
+    time `_lifecycle` tries to persist that decision — a lock file that cannot be opened,
+    config.json grown past the size guard, or an `OSError` out of the write itself
+    (`ENOSPC` and friends are not `SttError`s) must not turn a real, successful `stt mic
+    enable` into a reported failure. But it must not go unnoticed either: an un-persisted
+    `enable` leaves `mic_daemon_autostart` at whatever it was before, so a later ad-hoc
+    dictation could re-decide this on its own — the user is told immediately instead."""
+    from stt_cli import config as config_mod
+    from stt_cli._errors import UsageError
+    from stt_cli.commands import mic
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    _fake_service_lib(
+        monkeypatch,
+        run_action=lambda manager, action: 0,
+        add_service_subcommands=_fake_add_subcommands,
+        dispatch=lambda ns, on_no_subcommand: 0,
+    )
+
+    def boom(key: str, value: object) -> None:
+        raise UsageError(what="config.json is broken", why="test", how="test")
+
+    monkeypatch.setattr(config_mod, "save_setting", boom)
+    notes: list[str] = []
+    monkeypatch.setattr("stt_cli.live.status.note", lambda message, **_: notes.append(message))
+
+    assert mic._lifecycle(["enable"]) == 0, "the OS control command itself succeeded"
+    assert config.load_settings().mic_daemon_autostart is None, "the write genuinely failed"
+    assert notes, "a failed persist must not pass silently"
+    assert "enable" in notes[0] and "recording that decision failed" in notes[0]

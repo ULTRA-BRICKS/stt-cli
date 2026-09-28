@@ -240,6 +240,37 @@ def test_a_hand_edited_config_with_a_bad_type_is_diagnosed_on_load() -> None:
         config.load_settings()
 
 
+def test_a_hand_edited_null_for_a_tristate_bool_field_is_accepted() -> None:
+    """`mic_daemon_autostart: bool | None` documents `None` as a real, meaningful third
+    state — nobody has decided yet, see its own comment in `config.py` — but `_validate`'s
+    bool branch rejected `None` outright, so a hand-edited `{"mic_daemon_autostart": null}`
+    (exactly the tri-state the field's own default already starts at) locked `stt config`
+    itself out with a self-contradicting "wrong type" error (#87)."""
+    import json
+
+    from stt_cli import config
+
+    config.ensure_dirs()
+    config.config_path().write_text(json.dumps({"mic_daemon_autostart": None}), "utf-8")
+    assert config.load_settings().mic_daemon_autostart is None
+
+
+def test_a_hand_edited_null_for_an_int_or_none_field_is_also_accepted() -> None:
+    """The same `None`-before-type-check gate that fixed `mic_daemon_autostart` (above) is
+    a single, shared line in `_validate` covering EVERY nullable field, not a special case
+    written just for that one — `speakers: int | None` exercises a completely different
+    per-type branch (`isinstance(value, int)`, which `None` always failed before this gate
+    existed) than the `bool` branch `mic_daemon_autostart` exercises, so only pinning the
+    bool case would leave this branch's own widening unverified."""
+    import json
+
+    from stt_cli import config
+
+    config.ensure_dirs()
+    config.config_path().write_text(json.dumps({"speakers": None}), "utf-8")
+    assert config.load_settings().speakers is None
+
+
 def test_an_extensionless_file_is_not_mistaken_for_a_command(tmp_path: Path, monkeypatch) -> None:
     """`stt Interview` must transcribe the file, not offer a did-you-mean for a command."""
     from stt_cli.cli import _looks_like_a_command

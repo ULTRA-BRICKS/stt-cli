@@ -976,11 +976,107 @@ def test_the_status_line_says_what_is_provisional() -> None:
     from a settled sentence — that distinction is the thing an underline would have carried."""
     from stt_cli.live import status
 
-    assert "listening" in status.render(listening=True, text="", settled=False)
+    # Idle (no speech yet this utterance): the inviting wording (#91), not the old
+    # "listening" — that word is reserved for once real speech is actually in progress.
+    assert "start speaking" in status.render(listening=True, text="", settled=False)
     draft = status.render(listening=True, text="привет", settled=False)
     final = status.render(listening=True, text="Привет!", settled=True)
+    # Unchanged once real speech starts: the same "listening" prefix as before this ticket.
+    assert "listening" in draft and "listening" in final
     assert draft != final
     assert "привет" in draft and "Привет!" in final
+
+
+def test_the_idle_status_line_blinks_a_cursor_and_shows_a_hint() -> None:
+    """The idle frame carries an alternating caret and one example phrase (#91) — the
+    with-text frames must stay completely unaffected by either argument."""
+    from stt_cli.live import status
+
+    on = status.render(listening=True, text="", settled=False, cursor=True, hint="try this")
+    off = status.render(listening=True, text="", settled=False, cursor=False, hint="try this")
+    assert on != off, "the caret actually alternates"
+    assert "try this" in on and "try this" in off
+    no_hint = status.render(listening=True, text="", settled=False, cursor=True, hint=None)
+    assert "try this" not in no_hint
+    with_text = status.render(
+        listening=True, text="привет", settled=False, cursor=True, hint="try this"
+    )
+    assert "try this" not in with_text, "a hint must never bleed into a real draft"
+
+
+def test_a_paused_line_still_shows_whatever_sentence_was_in_progress() -> None:
+    """`render(listening=False, ...)` used to keep the in-progress sentence beside the
+    paused head; a rewrite of this function briefly returned a bare '○ paused' for ANY
+    paused frame, discarding `text` outright. Caught in review before merge; this pins the
+    original contract so a caller that reports a paused `Progress` with residual text
+    (nothing in this codebase does today, but the field shape allows it) is not silently
+    dropped."""
+    from stt_cli.live import status
+
+    empty = status.render(listening=False, text="", settled=False)
+    assert empty == "\N{WHITE CIRCLE} paused"
+    draft = status.render(listening=False, text="привет", settled=False)
+    final = status.render(listening=False, text="Привет!", settled=True)
+    assert "paused" in draft and "привет" in draft
+    assert "paused" in final and "Привет!" in final
+    assert draft != final, "settled vs draft still distinguishable while paused"
+
+
+def test_the_example_hint_prefers_the_users_own_dictionary(tmp_path, monkeypatch) -> None:
+    """A dictionary term is a concrete, personal example — the whole point of writing terms
+    down — so it must win over the built-in fallback whenever one exists."""
+    from stt_cli import dictionary
+    from stt_cli.live import status
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path / "home"))
+    empty_hint = status.example_hint(dictionary_enabled=True)
+    assert any(sample in empty_hint for sample in status._BUILTIN_EXAMPLES)
+
+    dictionary.save(dictionary.Dictionary(terms=[dictionary.Term(term="HyperIDE")]))
+    own_hint = status.example_hint(dictionary_enabled=True)
+    assert "HyperIDE" in own_hint
+    assert not any(sample in own_hint for sample in status._BUILTIN_EXAMPLES)
+
+
+def test_a_malformed_dictionary_json_does_not_crash_the_idle_hint(tmp_path, monkeypatch) -> None:
+    """`dictionary.load()` deliberately RAISES on a malformed dictionary.json — every other
+    call site gates it behind `settings.dictionary` (see `dictation.py`), but
+    `example_hint()` used to call it unguarded. Concretely: a user with a stray broken
+    dictionary.json on disk (even one they never turned on) used to get `stt mic` crashing
+    mid-session, 30-45s into model loading, the instant the idle invitation tried to compute
+    a hint. Must fall back to a built-in example instead."""
+    from stt_cli import dictionary
+    from stt_cli._errors import UsageError
+    from stt_cli.live import status
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path / "home"))
+    dictionary.path().parent.mkdir(parents=True, exist_ok=True)
+    dictionary.path().write_text('{"terms": "not-a-list"}', encoding="utf-8")
+
+    with pytest.raises(UsageError):
+        dictionary.load()  # sanity: this really is the malformed file that used to crash
+
+    hint = status.example_hint(dictionary_enabled=True)  # must not raise
+    assert any(sample in hint for sample in status._BUILTIN_EXAMPLES)
+
+
+def test_the_example_hint_does_not_touch_the_dictionary_when_it_is_turned_off(
+    tmp_path, monkeypatch
+) -> None:
+    """`example_hint()` mirrors every other call site's `settings.dictionary` gate (see
+    `dictation.py`): a user who turned the dictionary off must get no disk read here
+    either, not just no crash. A dictionary.json that would raise on load proves the point
+    — if it were read at all, this would raise; `dictionary_enabled=False` must skip the
+    read outright and fall back to a built-in example."""
+    from stt_cli import dictionary
+    from stt_cli.live import status
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path / "home"))
+    dictionary.path().parent.mkdir(parents=True, exist_ok=True)
+    dictionary.path().write_text('{"terms": "not-a-list"}', encoding="utf-8")
+
+    hint = status.example_hint(dictionary_enabled=False)
+    assert any(sample in hint for sample in status._BUILTIN_EXAMPLES)
 
 
 def test_a_status_line_that_is_not_a_terminal_says_nothing_at_all() -> None:
@@ -2488,3 +2584,192 @@ async def test_race_burst_signals_cancels_the_losing_signal() -> None:
 
     assert result == "done already"
     assert losing_signal.cancelled(), "the still-pending signal was cancelled, not leaked"
+
+
+# ── idle-invitation blink loop: `_reporting` / `_Idle` / `_blink_while_idle` (#91) ──────
+
+
+def test_reporting_wires_idle_state_from_every_progress_update() -> None:
+    """`_reporting`'s wrapper is the only thing that keeps `_Idle` in sync with what
+    `Session.report` actually sends — untested before, deleting the wrapper's body would
+    have left the whole suite green."""
+    from stt_cli.live import dictation
+    from stt_cli.live import status as status_mod
+    from stt_cli.live.session import Progress
+
+    shown: list[str] = []
+    line = status_mod.Line(enabled=True)
+    line.show = shown.append  # type: ignore[method-assign]
+
+    report, idle = dictation._reporting(line)
+    assert idle.listening is True and idle.text == "", "starts optimistic: nothing heard yet"
+
+    report(Progress(listening=True, text="привет", settled=False))
+    assert idle.listening is True
+    assert idle.text == "привет"
+    assert shown and "привет" in shown[-1], "still paints the line, same as before #91"
+
+    report(Progress(listening=False))
+    assert idle.listening is False
+
+
+async def test_blink_while_idle_alternates_the_cursor_across_ticks(monkeypatch) -> None:
+    """The behavioral core of the blink feature: the loop actually redraws, and
+    consecutive frames actually differ (the cursor toggling on/off) — deleting the loop
+    body left every render-level test green, since those only exercise `status.render`
+    directly."""
+    from stt_cli.live import dictation
+    from stt_cli.live import status as status_mod
+
+    monkeypatch.setattr(dictation, "_BLINK_SECONDS", 0)
+    shown: list[str] = []
+    line = status_mod.Line(enabled=True)
+    line.show = shown.append  # type: ignore[method-assign]
+    idle = dictation._Idle(listening=True, text="")
+
+    task = asyncio.create_task(dictation._blink_while_idle(line, idle, "try this"))
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if len(shown) >= 4:
+            break
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert len(shown) >= 4, "the loop actually redrew more than once"
+    assert all(shown[i] != shown[i + 1] for i in range(len(shown) - 1)), (
+        "the cursor alternates every tick, not a frozen repaint"
+    )
+    assert all("try this" in frame for frame in shown)
+
+
+async def test_blink_while_idle_stops_drawing_once_real_text_arrives_and_resumes_after(
+    monkeypatch,
+) -> None:
+    """The instant a real draft arrives the blink must stop overwriting it — and once the
+    sentence ends and the line goes idle again (between utterances in the same burst),
+    blinking resumes on its own. No cancellation race to get right: the loop just reads
+    `idle` fresh every tick."""
+    from stt_cli.live import dictation
+    from stt_cli.live import status as status_mod
+
+    monkeypatch.setattr(dictation, "_BLINK_SECONDS", 0)
+    shown: list[str] = []
+    line = status_mod.Line(enabled=True)
+    line.show = shown.append  # type: ignore[method-assign]
+    idle = dictation._Idle(listening=True, text="")
+
+    task = asyncio.create_task(dictation._blink_while_idle(line, idle, "try this"))
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if len(shown) >= 2:
+            break
+    before = len(shown)
+    assert before >= 2, "blinking before any speech arrived"
+
+    idle.text = "привет"  # `Session.report` already painted this frame directly
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert len(shown) == before, "no blink frame drawn over a live draft"
+
+    idle.text = ""  # the sentence settled; idle again until the next one
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if len(shown) > before:
+            break
+    assert len(shown) > before, "blinking resumes once idle again, same burst"
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_blink_while_idle_returns_once_listening_goes_false(monkeypatch) -> None:
+    """The second line of defence against outliving the burst: even if the caller somehow
+    never cancels it, the loop exits on its own the first tick after `listening` goes
+    false."""
+    from stt_cli.live import dictation
+    from stt_cli.live import status as status_mod
+
+    monkeypatch.setattr(dictation, "_BLINK_SECONDS", 0)
+    line = status_mod.Line(enabled=True)
+    line.show = lambda _text: None  # type: ignore[method-assign]
+    idle = dictation._Idle(listening=True, text="")
+
+    task = asyncio.create_task(dictation._blink_while_idle(line, idle, "try this"))
+    await asyncio.sleep(0)
+    idle.listening = False
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if task.done():
+            break
+    assert task.done(), "the loop returns on its own instead of running forever"
+
+
+async def test_a_settled_sentence_followed_by_a_pause_resumes_the_idle_blink() -> None:
+    """The gap `_blink_while_idle`'s OWN docstring already claimed was closed ("resumes
+    between sentences within the same burst") was not: `Session.report` never sent another
+    `Progress` once a sentence settled, so `_Idle.text` stayed pinned to that settled
+    sentence until the NEXT utterance's `_begin()` — which, mid-burst, only fires once
+    somebody starts speaking again. One sentence followed by a pause left the line frozen
+    instead of blinking again to invite more speech. Exercised through the REAL `Session` ->
+    `dictation._reporting` path, not by poking `_Idle` by hand — the existing blink tests
+    already mutate `idle.text` directly and would stay green even if `Session` itself never
+    cleared it."""
+    from stt_cli.live import dictation
+    from stt_cli.live import status as status_mod
+
+    line = status_mod.Line(enabled=False)
+    report, idle = dictation._reporting(line)
+    keys = FakeKeyboard()
+    dictating = live.Session(
+        typist=Typist(keys=keys), draft=None, settled=FakeModel("Привет!"), report=report
+    )
+
+    assert await dictating.run(feed(SPEECH, SILENCE)) == "Привет!"
+    assert idle.text == "", (
+        "the idle invitation must be free to blink again once the sentence has settled "
+        "and nothing else is queued behind it"
+    )
+    assert idle.listening is True
+
+
+async def test_a_retracted_noise_guess_also_resumes_the_idle_blink() -> None:
+    """The settle path is not the only way a sentence's text can hit the status line and
+    then never report again. A click opens the gate, the fast model reads a word into it,
+    and `_show`'s own `report` paints that guess — but the gate then discards the click for
+    holding no real speech, so no accurate pass ever runs and `_settle_each`'s re-arm (the
+    fix directly above this test) never sees it either. Before this fix,
+    `_take_back_a_guess_at_nothing` removed the guess from the KEYBOARD but reported
+    nothing, so `_Idle.text` stayed pinned to the just-retracted guess for the rest of the
+    burst — the identical frozen-line symptom, through the second route review found."""
+    from stt_cli.live import dictation
+    from stt_cli.live import status as status_mod
+
+    line = status_mod.Line(enabled=False)
+    report, idle = dictation._reporting(line)
+    keys = FakeKeyboard()
+    dictating = live.Session(
+        typist=Typist(keys=keys),
+        draft=FakeModel("так"),
+        settled=FakeModel("never asked"),
+        draft_every=0.0,
+        report=report,
+    )
+
+    async def one_click():
+        yield tone(400, 15)
+        yield tone(100, 6000)  # opens the gate, too short to be speech
+        for _ in range(12):
+            yield tone(100, 15)
+            await asyncio.sleep(0)
+
+    said = await dictating.run(one_click())
+
+    assert keys.line == "", f"the guess was taken back: {keys.line!r}"
+    assert said == ""
+    assert idle.text == "", (
+        "the idle invitation must be free to blink again once the false guess was taken "
+        "back, not stay pinned to text that is no longer even on screen"
+    )
+    assert idle.listening is True
