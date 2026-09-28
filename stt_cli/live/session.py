@@ -337,7 +337,32 @@ class Session:
                 # next `get()` is the same gap, one loop iteration wide.
                 self._settling = not self._queue.empty()
                 self.typist.settle()
+                # `task_done()` FIRST, unconditionally, before the cosmetic re-arm report
+                # below: this method's own contract is "nothing raises out of here" (see
+                # the comment above `except Exception` on why) — before this idle-blink
+                # re-arm existed, nothing past this point could plausibly raise, so putting
+                # `task_done()` last was safe. `report()` calls into `Line.show()`, a real
+                # `sys.stderr.write` (status.py) that CAN raise (`BrokenPipeError`/`OSError`
+                # if stderr has died — a closed pipe, a dropped SSH pty). If that write ran
+                # BEFORE `task_done()`, a failure here would skip `task_done()` entirely:
+                # `run`'s `_queue.join()` then never returns, the exact hang this module's
+                # own docstring exists to prevent, now for a purely cosmetic re-paint.
+                # `task_done()` itself cannot raise, so calling it unconditionally first
+                # closes that window; `suppress` on the report call below is a second,
+                # independent guard for the same "must never hang" contract.
                 self._queue.task_done()
+                if not self._settling:
+                    # Nothing else reports again until the NEXT utterance's `_begin()` —
+                    # which, mid-burst, only fires once somebody actually starts speaking
+                    # again. Without this, the idle invitation (`dictation._blink_while_idle`,
+                    # #91) kept reading the settled sentence's text off `_Idle` forever and
+                    # never resumed drawing over it, so one sentence followed by a pause left
+                    # the status line frozen on that sentence instead of blinking again to
+                    # invite more speech. An empty, still-listening `Progress` is the same
+                    # shape `_begin` reports, and is exactly what tells the caller's idle
+                    # tracking the line is free to blink again.
+                    with contextlib.suppress(Exception):
+                        self.report(Progress(listening=True))
             if self._failure is not None:
                 self._abandon_what_is_left()
                 return

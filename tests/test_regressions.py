@@ -240,6 +240,21 @@ def test_a_hand_edited_config_with_a_bad_type_is_diagnosed_on_load() -> None:
         config.load_settings()
 
 
+def test_a_hand_edited_null_for_a_tristate_bool_field_is_accepted() -> None:
+    """`mic_daemon_autostart: bool | None` documents `None` as a real, meaningful third
+    state — nobody has decided yet, see its own comment in `config.py` — but `_validate`'s
+    bool branch rejected `None` outright, so a hand-edited `{"mic_daemon_autostart": null}`
+    (exactly the tri-state the field's own default already starts at) locked `stt config`
+    itself out with a self-contradicting "wrong type" error (#87)."""
+    import json
+
+    from stt_cli import config
+
+    config.ensure_dirs()
+    config.config_path().write_text(json.dumps({"mic_daemon_autostart": None}), "utf-8")
+    assert config.load_settings().mic_daemon_autostart is None
+
+
 def test_an_extensionless_file_is_not_mistaken_for_a_command(tmp_path: Path, monkeypatch) -> None:
     """`stt Interview` must transcribe the file, not offer a did-you-mean for a command."""
     from stt_cli.cli import _looks_like_a_command

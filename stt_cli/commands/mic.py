@@ -9,11 +9,13 @@ dictionary reaches both, so a project name comes out spelled the way you wrote i
 Press any key yourself and stt stops correcting the sentence in flight and leaves it alone —
 it will never delete a character it did not type. Escape twice ends the session.
 
-A bare `stt mic` (no subcommand) is the ad-hoc path above: dictate right now, in this shell,
-until you stop it. `run`/`start`/`status`/`stop`/`enable`/`disable` are a SEPARATE, newer way
-to use the same dictation: a background daemon that loads both models once and then idles
-with the microphone CLOSED until a global hotkey opens it for one burst at a time — see
-`stt mic --help` for the ad-hoc flags and `stt mic run --help` for the daemon's.
+A bare `stt mic` (no arguments at all) is a literal alias for `stt mic --help` — see below
+for every flag, including `run`/`start`/`status`/`stop`/`enable`/`disable`, which manage a
+background daemon: it loads both models once and then idles with the microphone CLOSED
+until a global hotkey opens it for one burst at a time — `stt mic run` keeps it in THIS
+shell instead of detaching. Any dictation flag (e.g. `--device 1`, `--check`) dictates
+ad-hoc, right now, with no daemon involved — printing the daemon's state and the
+configured hotkey first, then opening the microphone.
 
 WHAT IT NEEDS THAT NOTHING ELSE IN STT NEEDS
     Accessibility and Microphone, both granted to the terminal application rather than to
@@ -35,6 +37,7 @@ import argparse
 import asyncio
 import math
 import sys
+import time
 from typing import TYPE_CHECKING
 
 from .._errors import EXIT_ENGINE, EXIT_MISSING_DEP, EXIT_OK, EXIT_PERMISSION, SttError
@@ -43,6 +46,8 @@ from ..live.mic_service import SERVE_TOKEN
 
 if TYPE_CHECKING:
     from agenttools_service import ServiceManager
+
+    from ..live.mic_service import LaunchdProbe
 
 NAME = "mic"
 SUMMARY = "dictate into the focused window, corrected live"
@@ -61,23 +66,384 @@ _LIFECYCLE = ("run", "start", "stop", "status", "enable", "disable")
 # way, not a different number depending on which code path answered.
 _EXIT_NOT_RUNNING = 3
 
+# The daemon's own Accessibility remediation, shared verbatim by `_status` (#54) and
+# `_maybe_autostart_daemon` (#87) — both diagnose the SAME fact (a launchd-spawned process
+# denied Accessibility, `probe.last_exit_code == EXIT_PERMISSION`) and must name the SAME
+# fix, not two texts that drift. This is deliberately NOT `quartz.ACCESSIBILITY_HINT`
+# (that one names "the terminal application running stt" — the ad-hoc CLI's own TCC
+# identity): a launchd job execs a different binary under a different TCC identity than
+# whatever terminal is asking, so the terminal's own grant is not evidence about the
+# daemon's, and telling the user to re-check the terminal's grant would send them to
+# check the wrong principal entirely.
+_DAEMON_ACCESSIBILITY_FIX = (
+    "grant Accessibility to the process launchd runs for the daemon (its python "
+    "interpreter, or bin/stt — add it manually in System Settings > Privacy & Security > "
+    "Accessibility if not listed; the terminal this ran in does not cover this separate, "
+    "launchd-spawned process)"
+)
+
+
+def _exit_note(probe: LaunchdProbe) -> str:
+    """ " (last exit code N)" or "" — the launchd-diagnosed exit code, formatted the SAME
+    way everywhere a `LaunchdProbe` gets reported (`_daemon_status_line`, `_status` (#54),
+    `_autostart_crash_loop_message` (#87)): one owner for the format instead of three
+    copies that could drift on the next edit."""
+    return "" if probe.last_exit_code is None else f" (last exit code {probe.last_exit_code})"
+
 
 def run(argv: list[str]) -> int:
     if argv and argv[0] == SERVE_TOKEN:
         return _serve(argv[1:])
     if argv and argv[0] in _LIFECYCLE:
         return _lifecycle(argv)
+    if not argv:
+        # A bare `stt mic` is a literal alias for `stt mic --help` — argparse's own,
+        # unchanged mechanism, not a custom screen. Alex, this session: "stt mic должен
+        # открывать stt mic --help (как алиас)". See #85.
+        argv = ["--help"]
     args = _parse(argv)
     # Listing first. `--check` was tested first and `--list-devices` is handled further in,
     # so `stt mic --check --list-devices` spent six seconds listening instead of printing the
     # list — the cheaper and more certain of the two answers losing to the slower one.
     if args.list_devices:
         return asyncio.run(_list_devices())
+    _adhoc_banner(quiet=args.quiet)
     if args.check:
         return asyncio.run(_check(args))
     from ..live import dictation
 
-    return asyncio.run(dictation.dictate(args))
+    exit_code = asyncio.run(dictation.dictate(args))
+    if exit_code == EXIT_OK:
+        # A dictation that actually completed is proof Accessibility and the microphone
+        # both work on this machine — see `_maybe_autostart_daemon` (#87).
+        _maybe_autostart_daemon(quiet=args.quiet)
+    return exit_code
+
+
+def _adhoc_banner(*, quiet: bool) -> None:
+    """Printed once, right before an ad-hoc (non-daemon) `stt mic` opens the microphone —
+    the background daemon's real state and the configured hotkey, so whoever is dictating
+    by hand right now also knows whether the hotkey they could rely on instead is armed.
+
+    Alex, this session: "при запуске не в виде демона нужно запускать проверочное окно" —
+    launched NOT as the daemon, THIS is where that check/preview screen belongs. A bare
+    `stt mic` (no arguments at all) is a literal alias for `stt mic --help` instead —
+    argparse's own, unchanged mechanism, not this screen; see #85. `--list-devices` never
+    opens the microphone, so `run` skips this call for it entirely; `--check` and a real
+    dictation both open the microphone, so both get the banner. Written to stderr, like
+    every other status line/sound/notification this path has — and silenced by the same
+    `--quiet`.
+    """
+    if quiet:
+        return
+    print(_daemon_status_line(), file=sys.stderr)
+    print(_hotkey_lines(), file=sys.stderr)
+
+
+def _default_manager() -> ServiceManager:
+    """The `ServiceManager` for the daemon's OWN default flags — what `_daemon_status_line`
+    and `_maybe_autostart_daemon` both need, and neither has any per-invocation daemon flag
+    of its own to pass through. One place builds it instead of two."""
+    return _manager(_daemon_parser().parse_args([]))
+
+
+def _daemon_status_line() -> str:
+    """One line: is the background daemon running, for `_adhoc_banner`. Reuses the same
+    real-state distinction `_status` gives `stt mic status` (#54) — a genuinely alive
+    daemon versus a launchd job registered but currently crash-looping — without
+    `_status`'s own exit-code and multi-line diagnostic contract, because this is a summary
+    line on a banner, not the `status` subcommand itself. Broad `except Exception`,
+    deliberately: `_adhoc_banner` runs ahead of every ad-hoc dictation, and a launchctl
+    subprocess error, a malformed pidfile, or any other probe failure must degrade to a
+    plain line here rather than crash the banner (or the dictation behind it) — `stt mic
+    status` is where the full diagnostic belongs.
+    """
+    try:
+        from ..live import mic_service
+
+        manager = _default_manager()
+        st = manager.status()
+        if st.state != "autostart":
+            pid_note = f" (pid {st.pid})" if st.pid else ""
+            return f"daemon:  running{pid_note}" if st.running else "daemon:  not running"
+        probe = mic_service.probe_launchd(manager.service.label)
+        if probe is not None and not probe.alive:
+            exit_note = _exit_note(probe)
+            return f"daemon:  enabled, but not currently running{exit_note} — see `stt mic status`"
+        pid_note = f" (pid {probe.pid})" if probe is not None and probe.pid else ""
+        return f"daemon:  running{pid_note} [autostart on]"
+    except ImportError:
+        return "daemon:  not available (agenttools_service is not installed)"
+    except Exception:
+        return "daemon:  status unavailable — see `stt mic status` for the full diagnostic"
+
+
+def _hotkey_lines() -> str:
+    """The configured hotkey chord and mode, and one command to change them.
+
+    NOTE for the next reader: if/when the hotkey redesign (two independent toggle/hold
+    bindings instead of one mode-switched binding) lands, this has to change with it — kept
+    to this one small function so that rebase stays contained here.
+    """
+    from .. import config
+
+    try:
+        settings = config.load_settings()
+    except SttError as broken:
+        # A hand-corrupted config.json (bad JSON, an unknown key, a wrong-typed value, ...)
+        # must degrade to a plain line here too, the same as `_daemon_status_line` already
+        # does for any probe failure — this is the one screen meant to be safe to run
+        # blind, and `stt config` diagnoses the real cause in full.
+        return f"hotkey:  config unreadable — {broken}\n         run `stt config` to diagnose it"
+    try:
+        combo = hotkey_mod.resolve(settings.hotkey)
+    except hotkey_mod.HotkeyError as broken:
+        # A hand-edited config.json can hold a syntactically-fine-but-unusable chord —
+        # `config._validate` only checks the stored TYPE is `str`; `hotkey.validate` only
+        # runs at `stt config set`/TUI time (`commands/config_cmd.py::validate_extra`).
+        # `HotkeyError` is a `ValueError`, not the `SttError` the CLI's top-level `guard`
+        # recognises — left uncaught here it would raw-traceback the one screen meant to be
+        # safe to run blind.
+        return (
+            f"hotkey:  invalid stored chord — {broken}\n"
+            "         fix it with `stt config set hotkey ...` / `stt config` for the "
+            "interactive screen"
+        )
+    try:
+        mode = hotkey_mod.resolve_mode(settings.hotkey_mode)
+    except hotkey_mod.HotkeyError as broken:
+        # Same guard, separately, for `hotkey_mode` — a single combined `except` around
+        # both `resolve` calls named this "invalid stored chord" even when the CHORD was
+        # fine and only the mode was broken, pointing at the wrong fix command.
+        return (
+            f"hotkey:  invalid stored mode — {broken}\n"
+            "         fix it with `stt config set hotkey_mode ...` / `stt config` for the "
+            "interactive screen"
+        )
+    configured = "configured" if settings.hotkey else "the built-in default, not yet configured"
+    return (
+        f"hotkey:  {combo.spec} ({mode}) — {configured}\n"
+        "         change it with `stt config set hotkey ...` / `stt config set "
+        "hotkey_mode ...`, or `stt config` for the interactive screen"
+    )
+
+
+# Bounded: launchd takes a moment to actually spawn what `enable()` just told it to
+# install, and a permission-denied daemon takes a moment to crash once spawned — probing
+# once, immediately, would as often as not catch it mid-launch, neither alive yet nor
+# diagnosably dead. ~3s worst case (6 * 0.5s) — long enough for either to happen, short
+# enough that a successful ad-hoc dictation that just finished isn't left waiting on the
+# daemon's own unrelated startup. See `_wait_for_daemon_liveness` (#87/#54).
+_AUTOSTART_PROBE_ATTEMPTS = 6
+_AUTOSTART_PROBE_INTERVAL = 0.5
+
+
+def _wait_for_daemon_liveness(label: str) -> LaunchdProbe | None:
+    """Poll `mic_service.probe_launchd` for a few seconds after `enable()`, sleeping only
+    BETWEEN checks (same shape as `doctor._wait_for_trust`) — not a new liveness signal,
+    the exact OS-authoritative probe `stt mic status` already uses to tell a genuinely
+    alive daemon from one that is merely registered and crash-looping (#54). Returns as
+    soon as the daemon is either alive OR has a diagnosed exit code to show for itself —
+    once either is known there is nothing more useful to learn by waiting out the rest of
+    the budget. Returns the LAST probe (possibly `None`, possibly alive=False with no
+    diagnosed exit code yet) if the daemon never resolves either way inside the budget.
+    """
+    from ..live import mic_service
+
+    probe: LaunchdProbe | None = None
+    for attempt in range(_AUTOSTART_PROBE_ATTEMPTS):
+        probe = mic_service.probe_launchd(label)
+        if probe is not None and (probe.alive or probe.last_exit_code is not None):
+            return probe
+        if attempt < _AUTOSTART_PROBE_ATTEMPTS - 1:
+            time.sleep(_AUTOSTART_PROBE_INTERVAL)
+    return probe
+
+
+def _autostart_crash_loop_message(probe: LaunchdProbe | None, *, freshly_enabled: bool) -> str:
+    """What to tell the user the moment auto-enable's own liveness check finds the daemon
+    it just installed is NOT verified up — naming the real permission principal (per this
+    session's TCC-scope investigation: the launchd-spawned process, not the ad-hoc one that
+    just proved its OWN Accessibility/microphone access) rather than a generic "grant
+    Accessibility" hint, and the same `_DAEMON_ACCESSIBILITY_FIX` wording `stt mic status`
+    already gives for the identical diagnosis (#54), not a second text that could drift.
+    `probe is None` means macOS itself never answered within the probe budget (`launchctl`
+    unreachable/timed out/unrecognized output) — no exit-code evidence either way, so this
+    says so plainly instead of guessing at a cause it does not have.
+
+    `freshly_enabled` distinguishes "this call itself just ran `enable()`" from "the daemon
+    was already enabled before this call" (autostart left on from a prior crash-loop this
+    call is retrying, or an explicit `stt mic enable` from before this feature shipped) —
+    `_maybe_autostart_daemon` only calls `manager.enable()` when `st.enabled` was false, so
+    saying "was just enabled" in the already-enabled case would state something that never
+    happened this call.
+    """
+    verb = "was just enabled" if freshly_enabled else "is enabled"
+    if probe is None:
+        return (
+            f"the background daemon {verb}, but its liveness could not be "
+            "verified (launchctl did not answer) — autostart is NOT confirmed working; "
+            "`stt mic status` has the full diagnostic, and the next successful ad-hoc "
+            "dictation checks again automatically."
+        )
+    exit_note = _exit_note(probe)
+    if probe.last_exit_code == EXIT_PERMISSION:
+        return (
+            f"the background daemon {verb}, but it is crash-looping{exit_note}: "
+            f"it exited denied Accessibility — {_DAEMON_ACCESSIBILITY_FIX}. autostart is "
+            "NOT confirmed working yet; the next successful ad-hoc dictation retries this "
+            "check automatically once that is granted, or run `stt mic disable && stt mic "
+            "enable` yourself after granting it — `stt mic status` has the full diagnostic."
+        )
+    return (
+        f"the background daemon {verb}, but has not come up yet{exit_note} — "
+        "autostart is NOT confirmed working; `stt mic status` has the full diagnostic, and "
+        "the next successful ad-hoc dictation checks again automatically."
+    )
+
+
+def _maybe_autostart_daemon(*, quiet: bool) -> None:
+    """First successful ad-hoc dictation on THIS machine is proof Accessibility and the
+    microphone both actually work here — the exact permission surface the background daemon
+    needs (`quartz.require_accessibility()` is the first line of both `dictation.dictate`
+    and `dictation.dictate_daemon`). That is the trigger this repurposes as "turn the daemon
+    on", instead of requiring the user to separately remember `stt mic enable` — see #87.
+
+    That proof is about the AD-HOC process's own TCC identity, never about the separately
+    spawned launchd daemon's — #54 (and this session's own TCC-scope investigation) already
+    established those two can genuinely differ, which is exactly how #54's crash-loop
+    happens: `enable()` succeeding (the OS accepted the control command) is proof the OS
+    autostart mechanism itself works, NOT that the daemon it just installed can actually
+    run. So `enable()` succeeding is never enough by itself to call this DECIDED:
+    `_wait_for_daemon_liveness` gives the daemon a brief, bounded chance to actually come up
+    and reuses `mic_service.probe_launchd` (#54) — the same OS-authoritative liveness/
+    exit-code probe `stt mic status` already uses — to find out for real. Only a VERIFIED
+    alive daemon persists `True`; a daemon that comes up NOT alive (most commonly
+    crash-looping on `EXIT_PERMISSION`) persists `config.MIC_AUTOSTART_RETRY` instead —
+    distinct from both `True` (falsely claiming confirmed-working) and `False` (falsely
+    claiming the user explicitly declined) — and the user is told the real cause and the
+    real principal to fix immediately, not left to discover a silently crash-looping daemon
+    later. `MIC_AUTOSTART_RETRY` is treated the SAME as `None` by the gate below, so the
+    next successful ad-hoc dictation retries the whole sequence automatically.
+
+    Fires until a real, verified decision lands: `mic_daemon_autostart` records that
+    decision so a later run never overrides an explicit `stt mic enable`/`disable`, and
+    never re-decides a CONFIRMED auto-enable either. EVERYTHING that can fail — the config
+    read, the daemon calls, the liveness probe, AND the config write — is inside the one
+    guarded region: a config.json write can itself raise (a lock file that cannot be
+    opened, a file that grew past the size guard), and this promises to never break the
+    dictation that just succeeded, not merely the daemon half of it.
+
+    The whole check-then-enable-then-probe-then-persist sequence runs under
+    `config.locked_for_daemon_decision()`, not just the final write: a status check followed
+    by `manager.enable()` with no lock around either left a real window for a concurrent
+    explicit `stt mic disable` to turn launchd off in between them — `save_setting_if_unset`
+    alone stopped that from being recorded as a lie, but the daemon itself stayed re-enabled
+    despite the config correctly reading `False` afterward. `_lifecycle` takes the SAME lock
+    around its own enable/disable, so the two can no longer interleave.
+    """
+    from .. import config
+
+    outcome: str | None = None
+    crash: LaunchdProbe | None = None
+    freshly_enabled = False
+    try:
+        with config.locked_for_daemon_decision():
+            if config.load_settings().mic_daemon_autostart not in (
+                None,
+                config.MIC_AUTOSTART_RETRY,
+            ):
+                return
+            manager = _default_manager()
+            st = manager.status()
+            # `st.enabled` — OS autostart actually installed — not `st.running`: a manager-
+            # spawned or foreign process already being alive is not the same fact as autostart
+            # being configured, and the whole point here is the LATTER. Keying this off
+            # `running` let an already-running-but-never-enabled daemon record
+            # `mic_daemon_autostart = True` without `enable()` ever being called — permanently
+            # skipping the one thing this function exists to do, since the flag then blocks
+            # every future check. Also remembered for the user-facing message below: a
+            # daemon whose autostart was already on before this call (left running from a
+            # prior crash-loop retry, or `stt mic enable` from before this feature shipped)
+            # never had `enable()` called on it HERE, so telling the user it "was just
+            # enabled" would state something that did not happen this call.
+            freshly_enabled = not st.enabled
+            if freshly_enabled:
+                manager.enable()
+            if not manager.autostart_active():
+                # `enable()` itself never raises for a rejected OS control command (a sandboxed
+                # launchctl, a missing binary, ...) — it silently falls back to a manager-owned
+                # process instead and reports the real outcome through `autostart_active()`,
+                # the SAME same-process signal the shared lib's own `run_action` checks before
+                # it will print "enabled" (agenttools_service core.py: "Don't claim 'enabled'
+                # when the OS rejected it"). Recording `True` here anyway would be a durable
+                # lie, AND — because the flag then reads "decided" — would permanently skip
+                # every future retry. Leave it unset so the next successful ad-hoc dictation
+                # tries again.
+                return
+            probe = _wait_for_daemon_liveness(manager.service.label)
+            # Verified genuinely alive, OR the one platform `probe_launchd` has nothing to
+            # ask at all (`mic_service.probe_launchd` short-circuits to `None` off macOS by
+            # design — a DIFFERENT fact from "macOS asked and got no usable answer" below,
+            # even though both are a bare `None`). This is the SAME "no evidence, not
+            # evidence of failure" fallback `_status`/`_daemon_status_line` already give
+            # this exact platform gap elsewhere: `autostart_active()` already true is the
+            # best liveness signal this platform has ever had, and #87's launchd-specific
+            # verification is not a new bar a platform with no launchd has to clear. Both
+            # cases persist the SAME confirmed-working state through the SAME call below —
+            # two genuinely different reasons to trust it, not two different outcomes.
+            confirmed = (probe is not None and probe.alive) or (
+                probe is None and sys.platform != "darwin"
+            )
+            if confirmed:
+                # Still the atomic check-and-set, on top of the outer lock above: the outer
+                # lock keeps this whole function's daemon control exclusive with
+                # `_lifecycle`'s; this is what actually performs the write and is what a
+                # test can monkeypatch in isolation without needing to know the outer lock
+                # exists at all.
+                if config.save_setting_if_unset(
+                    "mic_daemon_autostart", True, unset=(None, config.MIC_AUTOSTART_RETRY)
+                ):
+                    outcome = "enabled"
+            else:
+                # Either a diagnosed NOT-alive daemon on macOS, or macOS itself failed to
+                # answer within the probe budget (`launchctl` unreachable, timed out, or an
+                # unrecognized output shape — `probe_launchd`'s own docstring: "no evidence
+                # ... must not be read as ... confirmed absent" — but by the SAME logic it
+                # must not be read as confirmed ALIVE either). #87 requires the daemon be
+                # VERIFIED alive before this can be called confirmed, and neither case is a
+                # verification — silently trusting a probe that never answered would leave
+                # a genuinely crash-looping daemon marked confirmed forever, exactly the
+                # failure this function exists to prevent. NOT `True` (that would durably
+                # claim a possibly-permanently-broken daemon is confirmed working) —
+                # `MIC_AUTOSTART_RETRY` instead, so this is retried automatically rather
+                # than silently wedged. Falls through to the notify code below the lock
+                # (not an early `return`) so the user is told, the same as a confirmed
+                # `True` is.
+                if config.save_setting_if_unset(
+                    "mic_daemon_autostart",
+                    config.MIC_AUTOSTART_RETRY,
+                    unset=(None, config.MIC_AUTOSTART_RETRY),
+                ):
+                    outcome, crash = "retry", probe
+    except ImportError:
+        return
+    except Exception:  # best-effort; never break a dictation that just worked
+        return
+    from ..live import status
+
+    if outcome == "enabled":
+        verb = "is now on" if freshly_enabled else "is confirmed on"
+        status.note(
+            f"the background dictation daemon {verb} (autostart) — press the hotkey from "
+            "any application to dictate without a terminal open; `stt mic disable` turns "
+            "this off.",
+            quiet=quiet,
+        )
+    elif outcome == "retry":
+        status.note(
+            _autostart_crash_loop_message(crash, freshly_enabled=freshly_enabled), quiet=quiet
+        )
 
 
 def _add_dictation_flags(parser: argparse.ArgumentParser, *, daemon: bool) -> None:
@@ -157,8 +523,10 @@ _MISSING_LIB_MSG = (
     "use — instead of a per-tool copy.\n"
     "  fix:  pip install -e <agent-tools>/lib/agenttools_daemon "
     "-e <agent-tools>/lib/agenttools_service\n"
-    "  note: `stt mic run` still works without it, and a bare `stt mic` (ad-hoc, no "
-    "subcommand) was never affected."
+    "  note: `stt mic run` still works without it; a bare `stt mic` still shows help "
+    "(unaffected — argparse never needs this lib), and an explicit dictation flag "
+    "(`stt mic --device 1`, `stt mic --check`) still dictates/checks ad-hoc, its banner "
+    "just naming the daemon 'not available' instead of a real state."
 )
 
 
@@ -215,10 +583,12 @@ def _lifecycle(argv: list[str]) -> int:
       enable   install OS autostart (launchd / systemd --user) AND start now.
       disable  remove OS autostart AND stop.
 
-    A bare `stt mic` (no lifecycle word) is UNCHANGED by any of this: it still dictates
-    immediately in this shell, ad-hoc, the way it always has. Everything here (the shared
-    service lib, the daemon's own flags) is imported lazily, so the ad-hoc path never pays
-    for it.
+    A truly bare `stt mic` (no lifecycle word, no flags at all) is UNCHANGED by any of
+    this: it is a literal alias for `stt mic --help`, never a lifecycle action. An
+    explicit dictation flag (`stt mic --device 1`, `stt mic --check`) is also unchanged: it
+    still dictates/checks ad-hoc immediately (printing `_adhoc_banner` first — see #85).
+    Everything here (the shared service lib, the daemon's own flags) is imported lazily,
+    so neither of those paths ever pays for it.
     """
     try:
         from agenttools_service import add_service_subcommands, dispatch
@@ -245,7 +615,41 @@ def _lifecycle(argv: list[str]) -> int:
         # The one action the shared lib cannot answer correctly for an OS-managed
         # (`enable`d) daemon — see `_status` and ticket #54.
         return _status(ns)
-    return int(dispatch(ns, on_no_subcommand=_print_help_ok))
+    if ns.action not in ("enable", "disable"):
+        return int(dispatch(ns, on_no_subcommand=_print_help_ok))
+    # `enable`/`disable` are the two actions `_maybe_autostart_daemon` (#87) can also take
+    # on its own — both the real daemon-control call (`dispatch`, here) AND the config
+    # write below run under the SAME lock that function holds around its own check-then-
+    # enable-then-persist sequence, so an explicit decision here and an automatic one
+    # there can never interleave: whichever gets the lock first finishes turning the
+    # daemon on/off AND recording it before the other is allowed to start. Without this,
+    # a `stt mic disable` landing between that function's own status check and its
+    # `enable()` call could really re-enable the daemon the user had just turned off, even
+    # though `save_setting_if_unset` kept the CONFIG record from lying about it.
+    from .. import config
+
+    with config.locked_for_daemon_decision():
+        exit_code = int(dispatch(ns, on_no_subcommand=_print_help_ok))
+        if exit_code == EXIT_OK:
+            # An EXPLICIT decision always wins and is always recorded, whichever way it goes.
+            # The daemon action ITSELF already succeeded (`exit_code == EXIT_OK`); a failure
+            # only PERSISTING the record (a lock file that cannot be opened, config.json
+            # grown past the size guard, an `OSError` out of the write itself — `ENOSPC` and
+            # friends are not `SttError`s — ...) must not make this whole command look like
+            # it failed — but it must not go unnoticed either: an un-persisted `disable`
+            # leaves `mic_daemon_autostart` at `None`, so the very next successful ad-hoc
+            # dictation would silently re-enable the daemon this command just turned off.
+            try:
+                config.save_setting("mic_daemon_autostart", ns.action == "enable")
+            except (SttError, OSError) as broken:
+                from ..live import status
+
+                status.note(
+                    f"`stt mic {ns.action}` succeeded, but recording that decision failed: "
+                    f"{broken} — a later ad-hoc dictation may re-decide this on its own",
+                    quiet=False,
+                )
+    return exit_code
 
 
 def _reordered_for_argparse(argv: list[str]) -> list[str]:
@@ -332,18 +736,12 @@ def _status(ns: argparse.Namespace) -> int:
     # entirely. `require_accessibility` (`live/quartz.py`) is the only place anywhere
     # `dictate_daemon` can reach that raises `PermissionDeniedError`, so the daemon's own
     # `last exit code == EXIT_PERMISSION` is unambiguous evidence about THAT process.
-    exit_note = "" if probe.last_exit_code is None else f" (last exit code {probe.last_exit_code})"
+    exit_note = _exit_note(probe)
     if probe.last_exit_code == EXIT_PERMISSION:
         print(
             f"mic: not running — crash-looping{exit_note}: the daemon exited denied Accessibility"
         )
-        print(
-            "     fix: grant Accessibility to the process launchd runs for the daemon "
-            "(its python interpreter, or bin/stt — add it manually in System Settings > "
-            "Privacy & Security > Accessibility if not listed; the terminal `stt mic "
-            "status` runs in does not cover this separate, launchd-spawned process), "
-            "then `stt mic disable && stt mic enable`"
-        )
+        print(f"     fix: {_DAEMON_ACCESSIBILITY_FIX}, then `stt mic disable && stt mic enable`")
         return EXIT_PERMISSION
     print(f"mic: not running — enabled, but currently down between restarts{exit_note}")
     print(f"     check the log: {manager.service.logfile}")

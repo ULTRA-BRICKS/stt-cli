@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import random
 import shutil
 import subprocess
 import sys
@@ -67,12 +68,35 @@ _AMPLITUDE = 3_000
 _CHIME_RATE = 44_100
 
 _LISTENING = "\N{BLACK CIRCLE} listening"
+# The idle head (no speech heard yet this utterance): an invitation, not a state
+# announcement — "listening" was accurate but read as a passive system label, easy to
+# mistake for frozen since nothing else on the line moved either (see the caret/example
+# additions to `render` below). Left as a SEPARATE constant from `_LISTENING` rather than
+# reusing/renaming it, because `_LISTENING` also prefixes an in-progress draft/settled
+# sentence ("listening ... privet") where "start speaking" would read backwards — only the
+# genuinely-idle head changes.
+_INVITATION = "\N{BLACK CIRCLE} start speaking"
 _SETTLED = "\N{CHECK MARK} "
 _DRAFT = "\N{HORIZONTAL ELLIPSIS} "
+_CURSOR_ON = "_"
+_CURSOR_OFF = " "
+# Shown beside the idle invitation before any dictionary term exists. Short, spoken
+# sentences rather than commands — the one thing every language stt supports has in common
+# is that dictation is spoken, not typed, so an example has to read as something SAID.
+_BUILTIN_EXAMPLES = (
+    'try saying "remind me to call them back tomorrow"',
+    'try saying "send me the notes from yesterday\'s meeting"',
+)
 
 
 class Line:
-    """One line of terminal, rewritten in place. Silent when it is not a terminal."""
+    """One line of terminal, rewritten in place. Silent when it is not a terminal.
+
+    The redraw is a bare `\\r` before each repaint — never a `\\n` — which reads as a stacked,
+    NEW-line-per-update artefact through anything that is not a real terminal (a `\\r`-to-`\\n`
+    text-mode reader, `subprocess.Popen(text=True)`, most log/capture tooling). That is a
+    property of the reader, not a bug here — see ticket #89 for the full live reproduction.
+    """
 
     def __init__(self, *, enabled: bool = True) -> None:
         self.enabled = enabled and sys.stderr.isatty()
@@ -141,12 +165,62 @@ def note(message: str, *, quiet: bool = False) -> None:
     print(f"stt: {message}", file=sys.stderr)
 
 
-def render(*, listening: bool, text: str, settled: bool) -> str:
-    """The status line: whether the microphone is open, and the sentence in progress."""
-    head = _LISTENING if listening else "\N{WHITE CIRCLE} paused"
+def render(
+    *, listening: bool, text: str, settled: bool, cursor: bool = True, hint: str | None = None
+) -> str:
+    """The status line: whether the microphone is open, and the sentence in progress.
+
+    ``cursor``/``hint`` matter only for the genuinely-idle frame (``listening`` and no
+    ``text`` yet): an alternating on/off caret and one example phrase, so a line that has
+    not heard anything yet reads as waiting rather than frozen — see
+    `dictation._blink_while_idle`, the only caller that ever passes them. The instant real
+    speech arrives (``text`` non-empty) the line reverts to exactly its pre-existing
+    rendering, unaffected by either argument.
+    """
+    if not listening:
+        # `paused` still carries whatever sentence was in progress — a caller CAN report a
+        # paused Progress with residual text (the field shape allows it even though nothing
+        # in this codebase currently constructs one), and silently dropping that text here
+        # would be a landmine for the next caller that does, not a simplification.
+        if not text:
+            return "\N{WHITE CIRCLE} paused"
+        return f"\N{WHITE CIRCLE} paused  {_SETTLED if settled else _DRAFT}{text}"
     if not text:
-        return head
-    return f"{head}  {_SETTLED if settled else _DRAFT}{text}"
+        glyph = _CURSOR_ON if cursor else _CURSOR_OFF
+        suffix = f"  {hint}" if hint else ""
+        return f"{_INVITATION} {glyph}{suffix}"
+    return f"{_LISTENING}  {_SETTLED if settled else _DRAFT}{text}"
+
+
+def example_hint(*, dictionary_enabled: bool) -> str:
+    """One example phrase for the idle status line, meant to be computed ONCE per burst by
+    the caller and reused across every blink frame — re-reading the dictionary on every
+    redraw would mean disk I/O twice a second for no benefit (`Line.show` itself stays pure
+    stdlib; this is the one place status.py touches something heavier, and only ever once
+    per burst). A term from the user's own terminology dictionary when they have one — a
+    concrete, PERSONAL example is the whole point of a dictionary the user wrote down
+    themselves — a built-in one otherwise.
+
+    `dictionary_enabled` mirrors every other call site's `settings.dictionary` gate (see
+    `live/dictation.py`): a user who turned the dictionary off gets no disk read here
+    either, not just no crash. `dictionary.load()` also deliberately RAISES (`SttError`) on
+    a malformed or oversized dictionary.json; this is the one caller with no `settings`
+    object in reach and nothing at stake worth a crash over, so even when the dictionary IS
+    enabled, a stray broken dictionary.json must fall back to a built-in example instead of
+    taking the session down mid-burst.
+    """
+    terms: list[str] = []
+    if dictionary_enabled:
+        from .. import dictionary
+        from .._errors import SttError
+
+        try:
+            terms = [t.term for t in dictionary.load().terms if t.term]
+        except SttError:
+            terms = []
+    if terms:
+        return f'try saying "{random.choice(terms)}"'
+    return random.choice(_BUILTIN_EXAMPLES)
 
 
 async def opened(device: str, *, quiet: bool = False) -> None:

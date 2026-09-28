@@ -235,7 +235,8 @@ against and collapsing them would serve one for the other.
 ## Dictating live
 
 ```bash
-stt mic                          # speak; the words appear where you are already typing
+stt mic                          # alias for `stt mic --help`
+stt mic --device 0               # speak now, ad-hoc, right in this terminal
 stt mic --check                  # is it hearing you? levels, the bar, and the verdict
 stt mic --list-devices           # which microphone is which
 stt mic --no-draft               # nothing is typed until it is final
@@ -243,11 +244,17 @@ stt mic --model medium           # settle faster, at some cost in accuracy
 stt mic --draft-model small      # a better first guess, if the machine can afford it
 ```
 
-`stt mic` opens the microphone and types what you say into whatever window has focus. Two
-models run at once, and what you actually see is this: the first words appear about a second
-and a half after you start talking and keep up with you from there, and one to three seconds
-after you stop they are replaced by a better version of the same sentence — the one with the
-proper nouns, the capitals and the punctuation right.
+A bare `stt mic` — no arguments at all — is a literal alias for `stt mic --help`: it prints
+help and opens nothing. Add any dictation flag — `--device`, `--model`, `--no-draft`, ... —
+and it dictates ad-hoc, right now: first a short banner (is the background daemon running,
+what hotkey fires it, how to change it — so you know the hotkey you could rely on instead
+is armed), then the microphone opens and types what you say into whatever window has focus.
+`--check` shows the same banner but runs the microphone level/verdict diagnostic instead of
+dictating; `--list-devices` never opens the microphone at all, so it skips the banner.
+Two models run at once, and what you actually see is this: the first words appear about a
+second and a half after you start talking and keep up with you from there, and one to three
+seconds after you stop they are replaced by a better version of the same sentence — the one
+with the proper nouns, the capitals and the punctuation right.
 
 Underneath, the small model decodes the sentence so far in about forty milliseconds and is
 asked again every six-tenths of a second; the wait is the pause the sentence has to end with
@@ -315,10 +322,22 @@ one burst. `hold` mode is push-to-talk in the literal, radio sense: dictate exac
 chord is held, stop the instant you release it. `toggle` mode is press-once-to-start,
 press-again-to-stop, for a sentence you don't want to hold a key through. Either way, because
 both models are already loaded, the delay between the hotkey and the microphone being live is
-under a second — a cold ad-hoc `stt mic` spends 30-45 seconds loading them first.
+under a second — a cold ad-hoc dictation (`stt mic --device 0`, or any other flag) spends
+30-45 seconds loading them first.
 
 `enable` also installs OS autostart (a launchd `LaunchAgent`) so the daemon comes back after
-a restart; `disable` removes it. These six lifecycle subcommands come from the same
+a restart; `disable` removes it and must be run explicitly to turn it back off — the first
+ad-hoc dictation that actually completes (proof Accessibility and the microphone both work
+for THAT process) enables it automatically from then on, unless you already ran `disable`
+yourself. That automatic enable is only confirmed once the daemon it just installed is
+verified genuinely alive, not merely once the OS accepted the install: a launchd-spawned
+process runs under a separate permission identity from the ad-hoc one that just proved
+Accessibility/the microphone work, and the two can genuinely disagree (see `stt mic
+status` below). If it comes up crash-looping instead — most commonly denied Accessibility
+for that separate process — stt says so immediately, names the exact process to grant it
+to, and leaves the decision retryable rather than either falsely confirmed or silently
+abandoned; the next successful ad-hoc dictation tries again automatically once that is
+granted. These six lifecycle subcommands come from the same
 `agenttools_service` library every other long-running agent-tools server uses (the review-cli
 dashboard, spec-web) — not reimplemented here — so it needs a small additional install:
 
@@ -329,8 +348,11 @@ pip install -e <agent-tools>/lib/agenttools_daemon -e <agent-tools>/lib/agenttoo
 Without it, `stt mic run` still works (an ad-hoc foreground daemon, Ctrl-C to stop); only
 `start`/`status`/`stop`/`enable`/`disable` need the library, and say so if it's missing.
 
-A bare `stt mic` — no subcommand — is completely unaffected by any of this: it still dictates
-immediately in the current terminal, exactly as it always has.
+A bare `stt mic` — no arguments at all — is completely unaffected by any of this: it is a
+literal alias for `stt mic --help` regardless of whether the library is installed. Any
+dictation flag still opens the microphone ad-hoc exactly as it always has, its pre-flight
+banner just naming the daemon "not available" instead of showing a real state without the
+library.
 
 ## Archive
 

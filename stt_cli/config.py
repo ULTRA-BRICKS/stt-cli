@@ -19,6 +19,7 @@ import json
 import math
 import os
 import stat
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -35,6 +36,22 @@ from .jsonio import ABSENT, read_json
 MAX_CONFIG_BYTES = 1024 * 1024
 
 APP_NAME = "stt-cli"
+
+# `mic_daemon_autostart`'s third state, beside `True`/`False`/`None` — see the field's own
+# doc comment. Recorded by `commands/mic.py::_maybe_autostart_daemon` when `enable()`
+# succeeded and the OS accepted the autostart install (`autostart_active()`), but the
+# daemon it just installed has NOT been verified genuinely alive yet (`mic_service.
+# probe_launchd`, #54) — most often a permission-flavored crash-loop (`EXIT_PERMISSION`):
+# the ad-hoc dictation that triggered this proved ACCESSIBILITY/MICROPHONE work for THAT
+# process's own identity, never for the separately-spawned launchd daemon (#54 exists
+# because those two can genuinely differ). Deliberately not `True` (that would durably
+# claim a daemon that may be crash-looping forever is confirmed working) and not `False`
+# (nothing here was ever DECLINED — a real user `stt mic disable` is the only thing that
+# means that). Treated the SAME as `None` by the trigger's own gate — "eligible to try
+# again on the next successful ad-hoc dictation" — so it is retried automatically, not
+# stuck, while still being distinguishable in the stored record from "nothing was ever
+# attempted here at all". See #87.
+MIC_AUTOSTART_RETRY = "retry"
 
 # Formats the renderers can produce. `all` expands to this list minus the JSON-ish debug
 # ones a human never asks for by name.
@@ -124,6 +141,32 @@ class Settings:
     # None resolves through `hotkey.resolve_mode` the same way `hotkey` resolves through
     # `hotkey.resolve` — one place owns the actual default word.
     hotkey_mode: str | None = None
+    # A DECISION RECORD, not a direct control — `stt config set mic_daemon_autostart true`
+    # stores the record without touching the daemon itself (use `stt mic enable`/`disable`
+    # for that); this only ever affects what `commands/mic.py::_maybe_autostart_daemon`
+    # decides on a LATER successful dictation, which is why the TUI/help text below says so
+    # explicitly rather than implying a live toggle. FOUR states, not three:
+    #   None   — nobody has decided yet (the same None-means-undecided convention as
+    #            `hotkey`/`hotkey_mode` above); `_maybe_autostart_daemon` reads this as
+    #            "eligible to turn the background daemon on the first time an ad-hoc
+    #            dictation actually completes on this machine" — that success is proof
+    #            Accessibility and the microphone are really granted to THAT process, the
+    #            same permission surface the daemon needs.
+    #   MIC_AUTOSTART_RETRY ("retry") — that trigger fired, `enable()` succeeded and the OS
+    #            accepted the autostart install, but the SEPARATELY-SPAWNED launchd daemon
+    #            was not then verified genuinely alive (`mic_service.probe_launchd`, #54):
+    #            an ad-hoc process's own TCC identity is not proof of the daemon's — see
+    #            `MIC_AUTOSTART_RETRY`'s own comment. Treated the SAME as `None` by the
+    #            trigger's gate (tries again next time), but distinguishable in the record
+    #            from "never even attempted".
+    #   True   — confirmed on: the daemon was verified genuinely alive after auto-enable,
+    #            or an explicit `stt mic enable` was run (that one is trusted without a
+    #            liveness probe — a human just watched it and can watch `stt mic status`).
+    #   False  — an explicit `stt mic disable` opted out, and it must never be silently
+    #            turned back on.
+    # Unsetting it (`stt config unset mic_daemon_autostart`) re-arms the automatic decision
+    # from scratch (back to `None`). See #87.
+    mic_daemon_autostart: bool | str | None = None
 
     # voice activity detection
     vad: str = "auto"  # auto | silero | ffmpeg | none
@@ -356,28 +399,84 @@ def _a_real_number(value: Any) -> bool:
     return math.isfinite(value)
 
 
+# The declared type of a field can be `bool | str | None` (only `mic_daemon_autostart`,
+# today) when a plain `bool | None` tri-state is not enough — see that field's own doc
+# comment. `_validate` cannot infer which STRINGS such a field accepts from the type alone
+# (unlike an ordinary `str` field, which accepts any string), so each one names its own
+# closed set here; a hand-edited value outside that set is rejected exactly like a wrong
+# TYPE would be, not silently accepted as some fourth, undocumented state.
+_STRING_ENUM_VALUES: dict[str, frozenset[str]] = {
+    "mic_daemon_autostart": frozenset({MIC_AUTOSTART_RETRY}),
+}
+
+# A `bool | str` field with no entry above would fail CLOSED, not loudly: `_stored_value_ok`
+# falls back to `_STRING_ENUM_VALUES.get(key, ())`, an EMPTY set, so every string for that
+# field would be rejected as a type error rather than validated against whatever the field
+# actually allows — the bug would look like the field itself was broken, not like a missing
+# registration here. Checked at IMPORT time, against the dataclass's own declared types
+# (not a hand-maintained list of field names that could drift from it independently), so a
+# future `bool | str` field ships with this satisfied or the module fails to import at all.
+_BOOL_STR_FIELDS = frozenset(
+    name for name, declared in _TYPES.items() if "bool" in declared and "str" in declared
+)
+assert _STRING_ENUM_VALUES.keys() >= _BOOL_STR_FIELDS, (
+    "_STRING_ENUM_VALUES is missing an entry for: "
+    f"{sorted(_BOOL_STR_FIELDS - _STRING_ENUM_VALUES.keys())}"
+)
+
+
+def _stored_value_ok(key: str, value: Any, declared: str) -> bool:
+    """Whether `value` can genuinely be `key`'s declared type — pulled out of `_validate`
+    itself because a five-way nested ternary reads like a puzzle, not a type check. `bool`
+    is checked before `int` (not the other way around) because `bool` IS an `int` in
+    Python: `isinstance(True, int)` is true, so an `int`-only field would silently accept
+    `True`/`False` unless the `bool` branch runs first and the `int` branch explicitly
+    excludes it.
+    """
+    if "bool" in declared and "str" in declared:
+        return isinstance(value, bool) or (
+            isinstance(value, str) and value in _STRING_ENUM_VALUES.get(key, ())
+        )
+    if "bool" in declared:
+        return isinstance(value, bool)
+    if "list" in declared:
+        return isinstance(value, list)
+    if "int" in declared:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if "float" in declared:
+        return _a_real_number(value)
+    return value is None or isinstance(value, str)
+
+
 def _validate(raw: dict[str, Any]) -> None:
     """Reject a stored value whose type cannot work, before it reaches the pipeline.
 
     A hand-edited (or older) config.json can hold ``"variants": "abc"``. Left alone that
     string flows into a numeric comparison and into the cache fingerprint, so every run is
     subtly wrong in a way whose cause is nowhere near the symptom.
+
+    ``None`` is accepted up front whenever the field's OWN annotation says so (``"... |
+    None"``), whatever the other half of that union is. ``mic_daemon_autostart: bool | str
+    | None`` documents ``None`` as a real, meaningful third state — nobody has decided yet,
+    see its own comment above — and the per-type checks below only ever special-cased
+    ``None`` for the ``str`` branch, so a hand-edited ``{"mic_daemon_autostart": null}``
+    (restoring exactly the tri-state the field's own default already starts at) was
+    rejected with a "wrong type" error that contradicted the field's documented contract,
+    locking `stt config` itself out until the key was deleted by hand. The SAME field's
+    fourth state (``MIC_AUTOSTART_RETRY``) is a ``str``, not a ``bool`` — declared
+    ``"bool | str | None"``, checked against its own closed set in
+    ``_STRING_ENUM_VALUES`` rather than accepting an arbitrary string, which the bare
+    ``"str" in declared`` branch below would otherwise do for ANY field that mixed ``bool``
+    and ``str``. The actual per-type check lives in `_stored_value_ok`, decomposed out of
+    here because a five-way nested ternary reads like a puzzle, not a type check.
     """
     from ._errors import UsageError
 
     for key, value in raw.items():
         declared = _TYPES.get(key, "str")
-        ok = (
-            isinstance(value, bool)
-            if "bool" in declared
-            else isinstance(value, list)
-            if "list" in declared
-            else isinstance(value, int) and not isinstance(value, bool)
-            if "int" in declared
-            else _a_real_number(value)
-            if "float" in declared
-            else value is None or isinstance(value, str)
-        )
+        if value is None and "None" in declared:
+            continue
+        ok = _stored_value_ok(key, value, declared)
         if not ok:
             # A non-finite float is not a type error, and saying "expected float, found
             # float (nan)" contradicts itself. It is a real number that is not a real
@@ -398,20 +497,31 @@ def _validate(raw: dict[str, Any]) -> None:
             )
 
 
+def _resolved_target() -> Path:
+    """The real, refused-if-strange path a settings-file write locks and operates on.
+
+    ``config.json`` may be a symlink into a dotfiles checkout — an ordinary thing to do —
+    so the link is resolved once here and everything after (the lock, the read, the write)
+    happens on the resolved target. Resolving it a second time later would leave a gap for
+    the link to be repointed in between, turning "write my config" into "rename a file over
+    whatever that points at now"; and locking beside the link rather than beside the target
+    would let two ``STT_HOME``s pointing at one file take two different locks that never
+    exclude each other. Shared by `_settings_transaction` (an ordinary read-modify-write)
+    and `locked_for_daemon_decision` (a lock held with no read/write of its own) so the
+    symlink/refuse policy lives in exactly one place.
+    """
+    ensure_dirs()
+    target = Path(os.path.realpath(config_path()))
+    _refuse_a_strange_target(target)
+    return target
+
+
 @contextmanager
 def _settings_transaction(key: str) -> Iterator[tuple[dict[str, Any], Path, Path]]:
     """Resolve, validate and lock ``config.json`` for one read-modify-write.
 
     ``save_setting`` and ``unset_setting`` used to repeat this in full: the whole of it is
     one transaction over ONE file, and both halves of that sentence had to be argued for.
-
-    One file: `config.json` may be a symlink into a dotfiles checkout, which is an ordinary
-    thing to do, so the link is resolved once at the top and everything after — the check,
-    the lock, the read and the write — happens on the resolved target. Resolving it a second
-    time later left a gap in between for the link to be repointed, which turns "write my
-    config" into "rename a file over whatever that points at now"; and locking beside the
-    link rather than beside the target meant two `STT_HOME`s pointing at one file took two
-    different locks and did not exclude each other at all.
 
     One transaction: reading the whole file, changing one key and writing the whole file back
     is three operations, and two terminals doing it at once both read the old object — then
@@ -427,16 +537,13 @@ def _settings_transaction(key: str) -> Iterator[tuple[dict[str, Any], Path, Path
 
     if key not in _CONFIGURABLE:
         raise unknown_item("setting", key, sorted(_CONFIGURABLE))
-    ensure_dirs()
-    named = config_path()
-    target = Path(os.path.realpath(named))
-    _refuse_a_strange_target(target)
+    target = _resolved_target()
     with _editing_the_settings(target):
         # Through the same guarded loader as everything else: a corrupt config must produce
         # the diagnosed error, not a traceback out of json or the codec — and not, as an
         # earlier version of this line did through `as_dict`, a silent `{}` written back
         # over whatever was really in the file.
-        yield _settings_object(target), named, target
+        yield _settings_object(target), config_path(), target
 
 
 def save_setting(key: str, value: Any) -> None:
@@ -448,6 +555,48 @@ def save_setting(key: str, value: Any) -> None:
     with _settings_transaction(key) as (raw, named, target):
         raw[key] = value
         write_atomic(target, _serialized(raw, named))
+
+
+def save_setting_if_unset(key: str, value: Any, *, unset: tuple[Any, ...] = (None,)) -> bool:
+    """Persist ``value`` for ``key`` ONLY if nothing has DECIDED a value there yet —
+    the atomic version of "read, see it is still unset, then write", for a decision that
+    must never silently clobber a concurrent explicit choice.
+
+    A separate `load_settings()` read followed by a separate `save_setting()` write (the
+    shape `commands/mic.py::_maybe_autostart_daemon` used before this) leaves a real gap
+    between the two: a concurrent writer can land in between them and get overwritten. This
+    does the check and the write inside ONE `_settings_transaction` lock acquisition, so
+    there is no gap left to land in. Returns whether it actually wrote — ``False`` means
+    someone else's decision was already there and this left it alone.
+
+    "Already there" means ``raw.get(key) not in unset``, not merely ``key in raw``: a
+    hand-edited ``{"mic_daemon_autostart": null}`` is a valid, explicit "undecided" (see
+    `_validate` and the field's own doc comment — the SAME None-means-unset convention the
+    caller's own gate (`load_settings().mic_daemon_autostart is not None`) already tests
+    by value, not by presence. Testing presence here disagreed with that gate: the gate let
+    a decision proceed (value was `None`), the real daemon control ran, and THIS function
+    then silently refused to persist it (the key was merely present) — no confirmation
+    note, and the record stayed `null` forever, so every later dictation re-entered and
+    re-probed the daemon's status. Caught in review before merge.
+
+    ``unset`` defaults to just ``(None,)`` but ``_maybe_autostart_daemon`` (#87) passes
+    ``(None, MIC_AUTOSTART_RETRY)`` for `mic_daemon_autostart`: `MIC_AUTOSTART_RETRY` ITSELF
+    counts as "not yet decided" — it records "tried, the daemon was not verified alive",
+    not a real decision either way — so a LATER successful dictation must still be able to
+    overwrite it (with a confirmed `True`, or with another `MIC_AUTOSTART_RETRY` while the
+    daemon keeps failing to come up), the same as it could overwrite a bare `None`. Without
+    broadening this check, the first crash-looping attempt would permanently wedge the
+    field at `MIC_AUTOSTART_RETRY` — retryable in name only, since nothing would ever be
+    allowed to write over it again.
+    """
+    from .archive import write_atomic
+
+    with _settings_transaction(key) as (raw, named, target):
+        if raw.get(key) not in unset:
+            return False
+        raw[key] = value
+        write_atomic(target, _serialized(raw, named))
+        return True
 
 
 def unset_setting(key: str) -> None:
@@ -467,6 +616,9 @@ def unset_setting(key: str) -> None:
         write_atomic(target, _serialized(raw, named))
 
 
+_held_locks = threading.local()
+
+
 @contextmanager
 def _editing_the_settings(target: Path) -> Iterator[None]:
     """An exclusive lock over one read-modify-write of the settings file.
@@ -476,9 +628,25 @@ def _editing_the_settings(target: Path) -> Iterator[None]:
     with the descriptor asked what it is — because a lock file is a file like any other, and
     a named pipe sitting where it goes would have hung `stt config set` forever on the very
     line that was added to make the command safe.
+
+    Reentrant within one thread: `locked_for_daemon_decision` holds this same lock around a
+    whole check-then-control-then-persist sequence (`commands/mic.py::_maybe_autostart_daemon`
+    / `_lifecycle`, #87), and the persist step at the end of that sequence is an ordinary
+    `save_setting`/`save_setting_if_unset` call, which reaches here a SECOND time. Plain
+    `flock` has no idea the two calls share an owner — it locks the OPEN FILE DESCRIPTION,
+    not the process, so a second `os.open` of the same path blocks on the first's lock even
+    from the very same thread — so the outer call is tracked here and an inner one skips
+    locking again instead of deadlocking against itself.
     """
     from ._errors import UsageError
 
+    held = getattr(_held_locks, "targets", None)
+    if held is None:
+        held = set()
+        _held_locks.targets = held
+    if target in held:
+        yield
+        return
     lock = target.with_name(target.name + ".lock")
     try:
         # Owner only. The file holds nothing — it exists to be flocked — but there is no
@@ -501,12 +669,37 @@ def _editing_the_settings(target: Path) -> Iterator[None]:
                 how="move it out of the way",
             )
         portable.lock(descriptor)
+        held.add(target)
         try:
             yield
         finally:
+            held.discard(target)
             portable.unlock(descriptor)
     finally:
         os.close(descriptor)
+
+
+@contextmanager
+def locked_for_daemon_decision() -> Iterator[None]:
+    """One lock, held for the WHOLE check-then-control-then-persist sequence around
+    `mic_daemon_autostart` — see `commands/mic.py::_maybe_autostart_daemon` and `_lifecycle`
+    (#87).
+
+    The per-write lock an ordinary `save_setting` call takes is not enough by itself: it
+    only serializes the CONFIG record, while the actual OS-level daemon control
+    (`manager.enable()` for the automatic path, `dispatch()` for an explicit `stt mic
+    enable`/`disable`) used to happen outside any lock at all. That left a real gap: a
+    concurrent explicit `disable` could turn launchd off in the window between the automatic
+    path's own status check and its `enable()` call, re-installing autostart the user had
+    just removed — `save_setting_if_unset` alone stopped that from being recorded as a lie,
+    but the daemon itself stayed re-enabled despite the config correctly reading `False`
+    afterward. Holding this lock around the daemon-control call AND the config write, on
+    BOTH the automatic and the explicit path, closes that: the two decisions can no longer
+    interleave, only run one fully before the other is allowed to start, so the config
+    record and the real daemon state can never disagree about which decision won.
+    """
+    with _editing_the_settings(_resolved_target()):
+        yield
 
 
 def _refuse_a_strange_target(path: Path) -> None:

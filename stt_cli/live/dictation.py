@@ -211,6 +211,7 @@ async def _dictate_until_stopped(
     """Open the keyboard watcher and the microphone, and run until one of them stops."""
     line = status.Line(enabled=not args.quiet)
     marker = tap.new_marker()
+    report, idle = _reporting(line)
     dictating = Session(
         typist=Typist(keys=_Keys(marker=marker)),
         settled=models.settled,
@@ -225,13 +226,15 @@ async def _dictate_until_stopped(
         # was watching stt type it into their window.
         refuse=phrases.compile_all(phrases.load_user_patterns(config.app_home()))[0],
         idle_after=_idle_seconds(args),
-        report=lambda progress: line.show(_paint(progress)),
+        report=report,
         gate=gate_for(settings),
     )
     watcher = _watch(dictating, marker)
     try:
         status.note(f"listening on {device.name} — press Escape twice to finish", quiet=args.quiet)
-        return await _through_the_microphone(device, dictating, line, quiet=args.quiet)
+        return await _through_the_microphone(
+            device, dictating, line, idle, quiet=args.quiet, dictionary_enabled=settings.dictionary
+        )
     finally:
         watcher.stop()
         line.clear()
@@ -254,12 +257,70 @@ def gate_for(settings: config.Settings) -> Gate:
     return Gate()
 
 
+# Twice a second — the conventional blink rate of a text-input caret, chosen so the idle
+# invitation reads as "waiting for you" the same way any other text field on the machine
+# does, without being fast enough to be distracting.
+_BLINK_SECONDS = 0.5
+
+
+@dataclass
+class _Idle:
+    """What `_blink_while_idle` needs to know about the CURRENT `Progress`, kept up to date
+    by `_reporting`'s wrapper — not a second subscription, just one more thing the one
+    `Session.report` callback already does on every call. `hint` is set once by
+    `_through_the_microphone` right after it computes it, not by `report` — the hint never
+    changes mid-burst, only whether it should currently be SHOWN does."""
+
+    listening: bool = True
+    text: str = ""
+    hint: str | None = None
+
+
+def _reporting(line: status.Line) -> tuple[Callable[[Progress], None], _Idle]:
+    """Build the `Session.report` callback AND the `_Idle` state `_blink_while_idle` reads,
+    so both call sites (the ad-hoc path and the daemon's `_burst`) wire the same tracking
+    once instead of by hand twice."""
+    idle = _Idle()
+
+    def report(progress: Progress) -> None:
+        idle.listening = progress.listening
+        idle.text = progress.text
+        line.show(_paint(progress, idle.hint))
+
+    return report, idle
+
+
+async def _blink_while_idle(line: status.Line, idle: _Idle, hint: str) -> None:
+    """Redraw the idle invitation on a fixed interval, alternating the cursor — the one
+    place `stt mic` genuinely needs a periodic redraw instead of an event-driven one:
+    nothing else reports anything while nobody has spoken yet (`Session._begin` is the next
+    report, and only speech triggers it), so the line would otherwise sit frozen from the
+    moment the microphone opens until the first word. Reads `idle` fresh every tick instead
+    of a snapshot: the instant a real `Progress` with text arrives this simply stops
+    drawing over it on its own, and resumes between sentences within the same burst — no
+    cancellation race with `Session.report` to get right, only a read of a plain attribute.
+    Cancelled by the caller when the burst ends; ``return``s on its own once `listening`
+    goes false first, as a second line of defence.
+    """
+    on = True
+    while True:
+        await asyncio.sleep(_BLINK_SECONDS)
+        if not idle.listening:
+            return
+        if idle.text:
+            continue
+        on = not on
+        line.show(status.render(listening=True, text="", settled=False, cursor=on, hint=hint))
+
+
 async def _through_the_microphone(
     device: capture.Device,
     dictating: Session,
     line: status.Line,
+    idle: _Idle,
     *,
     quiet: bool,
+    dictionary_enabled: bool,
     interruptible: bool = True,
 ) -> str:
     """The microphone stays open for exactly as long as this block runs.
@@ -274,15 +335,28 @@ async def _through_the_microphone(
     async with capture.listening(device) as audio:
         ctx = _interruptible(dictating) if interruptible else contextlib.nullcontext()
         with ctx:
-            line.show(status.render(listening=True, text="", settled=False))
+            # Computed once per burst, not per redraw: `example_hint()` reads the user's
+            # dictionary from disk, and the blink below repaints twice a second. Skipped
+            # entirely when the line is disabled (quiet, or no real terminal) — there is
+            # nothing for either to draw.
+            hint = (
+                status.example_hint(dictionary_enabled=dictionary_enabled) if line.enabled else None
+            )
+            idle.hint = hint
+            line.show(status.render(listening=True, text="", settled=False, hint=hint))
             # Announced beside the session, not in front of it. The sound and the banner
             # are each a subprocess, and `afplay` alone takes a second and a half to play a
             # noise a fifth of that long — waited on, that is a second and a half of somebody
             # talking into a microphone that is open but not being read yet.
             saying = asyncio.create_task(status.opened(device.name, quiet=quiet))
+            blink = asyncio.create_task(_blink_while_idle(line, idle, hint)) if hint else None
             try:
                 return await dictating.run(audio)
             finally:
+                if blink is not None:
+                    blink.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await blink
                 await saying
 
 
@@ -316,7 +390,15 @@ def _idle_seconds(args: argparse.Namespace) -> float:
     return max(0.0, float(minutes)) * 60
 
 
-def _paint(progress: Progress) -> str:
+def _paint(progress: Progress, hint: str | None = None) -> str:
+    """`Session.report`'s frame, through `status.render` — the idle frame (no draft yet,
+    still listening) carries `hint` too, the same as the burst-opening frame and every
+    blink tick: without this, the settle-then-pause `Progress` `Session._settle_each` sends
+    (see its own comment) painted the idle head with no hint at all, and the example phrase
+    visibly blinked OUT the instant a sentence settled before the next blink tick redrew it
+    back in. Caught in review before merge."""
+    if progress.listening and not progress.text:
+        return status.render(listening=True, text="", settled=False, hint=hint)
     return status.render(listening=progress.listening, text=progress.text, settled=progress.settled)
 
 
@@ -637,6 +719,7 @@ async def _next_hotkey_edge(toggle: _Toggle, shutdown: asyncio.Event) -> bool:
 async def _burst(ctx: _BurstContext) -> str:
     """One activation: open the microphone, dictate, close it, and hand control back to idle."""
     line = status.Line(enabled=not ctx.args.quiet)
+    report, idle = _reporting(line)
     dictating = Session(
         typist=Typist(keys=_Keys(marker=ctx.marker)),
         settled=ctx.models.settled,
@@ -645,7 +728,7 @@ async def _burst(ctx: _BurstContext) -> str:
         bias=bool(ctx.settings.dictionary and ctx.settings.dict_bias),
         refuse=phrases.compile_all(phrases.load_user_patterns(config.app_home()))[0],
         idle_after=_idle_seconds(ctx.args),
-        report=lambda progress: line.show(_paint(progress)),
+        report=report,
         gate=gate_for(ctx.settings),
     )
     ctx.active.open(dictating)
@@ -653,7 +736,13 @@ async def _burst(ctx: _BurstContext) -> str:
         status.note(f"listening on {ctx.device.name} — {_off_hint(ctx.mode)}", quiet=ctx.args.quiet)
         burst = asyncio.create_task(
             _through_the_microphone(
-                ctx.device, dictating, line, quiet=ctx.args.quiet, interruptible=False
+                ctx.device,
+                dictating,
+                line,
+                idle,
+                quiet=ctx.args.quiet,
+                dictionary_enabled=ctx.settings.dictionary,
+                interruptible=False,
             )
         )
         off = asyncio.create_task(_await_release(ctx.toggle, ctx.mode))
