@@ -1214,9 +1214,16 @@ def test_the_audio_reaches_the_model_as_a_wav_it_can_read() -> None:
         assert read_back.getnframes() == RATE // 2
 
 
-def test_one_escape_lets_go_of_the_sentence_and_two_end_the_session() -> None:
-    """A single Escape is something people press in other applications all day, so it cannot
-    mean "stop". Two in half a second is not something anybody does by accident."""
+def test_any_key_interrupts_correction_but_never_ends_the_session() -> None:
+    """A single Escape is something people press in other applications all day for reasons
+    that have nothing to do with dictation (closing a dropdown, cancelling a browser
+    action). An earlier version of `_Stopper` ended the WHOLE session on two of them inside
+    half a second — removed for ticket #79: two Escapes landing in that window by pure
+    coincidence used to silently kill dictation with no warning, and could ALSO cancel
+    whatever unrelated thing the user was doing elsewhere with that same Escape (backing out
+    of a half-filled browser form). Now any key, pressed any number of times in any rhythm,
+    only ever interrupts the correction in flight — ending a burst is exclusively the
+    hotkey firing again / being released, or the stop notification's button."""
     from stt_cli.live import tap
     from stt_cli.live.dictation import _Stopper
 
@@ -1229,22 +1236,25 @@ def test_one_escape_lets_go_of_the_sentence_and_two_end_the_session() -> None:
     assert dictating.typist.abandoned, "one press lets go of what is on screen"
     assert not dictating._stopped, "and does not end the session"
 
-    stopper(tap.ESCAPE)
-    assert dictating._stopped, "two in quick succession do"
+    stopper(tap.ESCAPE)  # immediately after — used to end the session
+    assert not dictating._stopped, "two in quick succession no longer end it either"
 
-
-def test_two_escapes_far_apart_are_two_separate_presses() -> None:
-    from stt_cli.live import tap
-    from stt_cli.live.dictation import DOUBLE_PRESS, _Stopper
-
-    keys = FakeKeyboard()
-    dictating = live.Session(typist=Typist(keys=keys), draft=None, settled=FakeModel())
-    stopper = _Stopper(dictating)
-
-    stopper(tap.ESCAPE)
-    stopper._last_escape -= DOUBLE_PRESS * 2  # as if the second came much later
-    stopper(tap.ESCAPE)
+    stopper(tap.ESCAPE)  # nor a third, nor any number more
     assert not dictating._stopped
+
+
+def test_stopper_no_longer_tracks_timing_between_presses() -> None:
+    """Ticket #79's own acceptance criterion: `_Stopper` has no double-press timing logic
+    left at all — pinned directly (not just behaviourally, above) so a future regression
+    that reintroduces it is caught here even if it were reintroduced with different timing
+    that happened not to trip the behavioural test."""
+    from stt_cli.live import dictation
+    from stt_cli.live.dictation import _Stopper
+
+    dictating = live.Session(typist=Typist(keys=FakeKeyboard()), draft=None, settled=FakeModel())
+    stopper = _Stopper(dictating)
+    assert not hasattr(stopper, "_last_escape")
+    assert not hasattr(dictation, "DOUBLE_PRESS")
 
 
 def test_any_other_key_lets_go_without_ending_anything() -> None:
@@ -2262,3 +2272,219 @@ async def test_a_stop_that_never_reached_the_tap_still_types_nothing() -> None:
 
     assert said == "Последнее слово.", "the transcript keeps it, exactly as with Ctrl-C"
     assert keys.line == "", "and nothing was typed into the focused window"
+
+
+# ── ticket #79: the notification Stop button, and the guaranteed keyboard fallback ──
+
+
+class _FakeNotifierProcess:
+    """Stands in for the `Process` object `asyncio.create_subprocess_exec` returns — the
+    AppleScript/terminal-notifier subprocess boundary is what gets mocked for
+    `status.stop_notification`/`close_stop_notification`, never the logic that reads it."""
+
+    def __init__(self, *, stdout: bytes = b"") -> None:
+        self._stdout = stdout
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, b""
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_notifier_available_reflects_whether_terminal_notifier_is_on_path(monkeypatch) -> None:
+    from stt_cli.live import status
+
+    monkeypatch.setattr(status.shutil, "which", lambda name: "/opt/homebrew/bin/terminal-notifier")
+    assert status.notifier_available() is True
+    monkeypatch.setattr(status.shutil, "which", lambda name: None)
+    assert status.notifier_available() is False
+
+
+async def test_stop_notification_is_true_only_when_stop_was_the_button_clicked(monkeypatch) -> None:
+    from stt_cli.live import status
+
+    monkeypatch.setattr(status, "notifier_available", lambda: True)
+    seen: list[tuple] = []
+
+    async def fake_exec(*args, **kwargs):
+        seen.append(args)
+        return _FakeNotifierProcess(stdout=b"Stop\n")
+
+    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
+    assert await status.stop_notification("listening — click Stop", quiet=False) is True
+    assert seen[0][0] == "terminal-notifier"
+    assert "-actions" in seen[0]
+
+
+async def test_stop_notification_is_false_when_dismissed_or_closed_instead_of_clicked(
+    monkeypatch,
+) -> None:
+    from stt_cli.live import status
+
+    monkeypatch.setattr(status, "notifier_available", lambda: True)
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeNotifierProcess(stdout=b"@CLOSED\n")
+
+    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
+    assert await status.stop_notification("listening", quiet=False) is False
+
+
+async def test_stop_notification_never_spawns_a_process_when_quiet_or_unavailable(
+    monkeypatch,
+) -> None:
+    """`quiet` and "terminal-notifier not installed" must not even try to launch a process —
+    a real spawn attempt on a machine without the binary would be a confusing `OSError`
+    every burst, not the one clean, once-at-startup fact `stt doctor`/the daemon banner
+    already report."""
+    from stt_cli.live import status
+
+    calls = 0
+
+    async def fake_exec(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _FakeNotifierProcess()
+
+    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
+
+    monkeypatch.setattr(status, "notifier_available", lambda: True)
+    assert await status.stop_notification("x", quiet=True) is False
+
+    monkeypatch.setattr(status, "notifier_available", lambda: False)
+    assert await status.stop_notification("x", quiet=False) is False
+
+    assert calls == 0
+
+
+async def test_stop_notification_kills_the_subprocess_when_cancelled(monkeypatch) -> None:
+    """The caller (`_race_burst_signals`) cancels whichever signal did not win the race —
+    the still-waiting `terminal-notifier` process must be killed here, not left running
+    (and potentially showing a Stop button for the NEXT burst)."""
+    from stt_cli.live import status
+
+    monkeypatch.setattr(status, "notifier_available", lambda: True)
+    process = _FakeNotifierProcess()
+
+    async def hanging_communicate() -> tuple[bytes, bytes]:
+        await asyncio.sleep(10)
+        return b"", b""  # pragma: no cover - cancelled before this would ever return
+
+    process.communicate = hanging_communicate  # type: ignore[method-assign]
+
+    async def fake_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
+    task = asyncio.create_task(status.stop_notification("x", quiet=False))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.killed
+
+
+async def test_close_stop_notification_does_nothing_when_unavailable(monkeypatch) -> None:
+    from stt_cli.live import status
+
+    calls = 0
+
+    async def fake_exec(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _FakeNotifierProcess()
+
+    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(status, "notifier_available", lambda: False)
+    await status.close_stop_notification(quiet=False)
+    assert calls == 0
+
+
+def test_stop_hint_names_the_notification_when_available_and_the_fallback_when_not(
+    monkeypatch,
+) -> None:
+    """The exact wording ticket #79 needs: when `terminal-notifier` is missing, "a
+    notification with a Stop button is always available" is never left silently untrue —
+    the sentence says so and names the one thing that always works regardless."""
+    from stt_cli.live import status
+
+    monkeypatch.setattr(status, "notifier_available", lambda: True)
+    available = status.stop_hint("Ctrl-C")
+    assert "Ctrl-C" in available and "notification" in available
+
+    monkeypatch.setattr(status, "notifier_available", lambda: False)
+    missing = status.stop_hint("Ctrl-C")
+    assert "Ctrl-C" in missing
+    assert status.INSTALL_HINT in missing
+    assert "no notification" in missing
+
+
+async def test_race_burst_signals_stops_the_mic_on_a_true_signal_and_ignores_false() -> None:
+    """`status.stop_notification` can resolve `False` (dismissed, closed, not installed) —
+    none of those mean stop, and a version of this that treated ANY signal completing as a
+    stop request would end a burst the instant a notification was merely dismissed."""
+    from stt_cli.live.dictation import _race_burst_signals
+
+    mic_should_stop = asyncio.Event()
+
+    class _FakeDictating:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+            mic_should_stop.set()
+
+    dictating = _FakeDictating()
+
+    async def mic_loop() -> str:
+        await mic_should_stop.wait()
+        return "the transcript"
+
+    async def dismissed() -> bool:
+        return False  # the notification was closed, not clicked — not a stop request
+
+    async def clicked_stop() -> bool:
+        await asyncio.sleep(0.01)  # resolves strictly after `dismissed`
+        return True
+
+    mic = asyncio.create_task(mic_loop())
+    false_signal = asyncio.create_task(dismissed())
+    true_signal = asyncio.create_task(clicked_stop())
+
+    result = await _race_burst_signals(dictating, mic, false_signal, true_signal)
+
+    assert dictating.stopped, "the True signal called dictating.stop()"
+    assert result == "the transcript", "mic is always awaited to its own real end"
+    assert false_signal.done() and true_signal.done()
+
+
+async def test_race_burst_signals_cancels_the_losing_signal() -> None:
+    """A signal still pending when the race is decided some OTHER way (the mic finishing on
+    its own here) must be cancelled, not left running past the burst that started it — a
+    stray `stop_notification` subprocess left waiting would show a Stop button for a burst
+    that has already ended."""
+    from stt_cli.live.dictation import _race_burst_signals
+
+    class _FakeDictating:
+        def stop(self) -> None:
+            pass
+
+    async def mic_loop() -> str:
+        return "done already"  # the mic finishes on its own, no signal needed
+
+    never_resolves = asyncio.Event()
+
+    async def stuck_signal() -> bool:
+        await never_resolves.wait()
+        return True  # pragma: no cover - unreachable in this test
+
+    mic = asyncio.create_task(mic_loop())
+    losing_signal = asyncio.create_task(stuck_signal())
+
+    result = await _race_burst_signals(_FakeDictating(), mic, losing_signal)
+
+    assert result == "done already"
+    assert losing_signal.cancelled(), "the still-pending signal was cancelled, not leaked"

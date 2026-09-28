@@ -163,6 +163,23 @@ def _optional_section() -> None:
     if not installed:
         print(f"      fix: {diarize.INSTALL_HINT}")
     _dictation_line()
+    _notification_stop_line()
+
+
+def _notification_stop_line() -> None:
+    """Whether `stt mic`'s notification Stop button is available — never required (the
+    hotkey firing again, or being released, always works regardless), but ticket #79's
+    stated baseline expectation is that SOME clickable stop is always there, so its absence
+    is reported here like any other optional feature rather than discovered only when a
+    burst starts and no button ever appears — see `live.status.notifier_available`.
+    """
+    from ..live import status
+
+    available = status.notifier_available()
+    found = "terminal-notifier found" if available else "terminal-notifier NOT found"
+    print(f"  {_mark(available)} mic notification Stop button: {found}")
+    if not available:
+        print(f"      fix: {status.INSTALL_HINT} (the hotkey itself always works without it)")
 
 
 def _dictation_line() -> None:

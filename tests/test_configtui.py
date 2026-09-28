@@ -41,19 +41,27 @@ def test_examples_and_choices_only_name_real_settings() -> None:
     assert set(configtui._choices()) <= known
 
 
-def test_every_hotkey_example_is_a_spec_parse_actually_accepts() -> None:
+def test_every_hotkey_example_is_a_spec_the_resolver_actually_accepts() -> None:
     """A misleading example in the TUI is worse than no example: `cmd+shift+;` looked
     plausible and reads back from ``EXAMPLES`` verbatim, but `hotkey.parse` names the key
-    `semicolon`, not `;`, so typing the example the screen itself suggested was refused."""
-    from stt_cli.live.hotkey import parse
+    `semicolon`, not `;`, so typing the example the screen itself suggested was refused.
+    Each field's examples are checked against ITS OWN resolver — `hotkey_press` and
+    `hotkey_hold` share the same strong-modifier rule (cmd or ctrl) after a shift-for-hold
+    relaxation was investigated, shipped, and reverted (see hotkey.py's module docstring),
+    so neither field's examples offer a shift-only chord any more — and both fields'
+    `"none"` example is a disable word, not a chord, so `resolve_*` (not raw `parse`) is
+    what has to accept it."""
+    from stt_cli.live.hotkey import resolve_hold, resolve_press
 
-    for example in configtui.EXAMPLES["hotkey"]:
-        parse(example)  # raises HotkeyError if this example would be refused
+    for example in configtui.EXAMPLES["hotkey_press"]:
+        resolve_press(example)  # raises HotkeyError if this example would be refused
+    for example in configtui.EXAMPLES["hotkey_hold"]:
+        resolve_hold(example)
 
 
 def test_choices_are_internally_consistent_with_their_own_source_of_truth() -> None:
     """Each fixed choice list is imported from wherever that enum is really defined
-    (`pipeline.COMPARE_MODES`, `hotkey.VALID_MODES`, ...) rather than retyped here — this
+    (`pipeline.COMPARE_MODES`, `backends.ORDER`, ...) rather than retyped here — this
     pins that the import actually landed a non-empty, string-only tuple, not a typo."""
     for key, choices in configtui._choices().items():
         assert choices, f"{key} has an empty choice list"
@@ -103,7 +111,7 @@ def test_search_matches_by_name_or_by_description() -> None:
     state = configtui.TuiState()
     state.start_search()
     state.type_search("hotkey")
-    assert "hotkey" in state.matches and "hotkey_mode" in state.matches
+    assert "hotkey_press" in state.matches and "hotkey_hold" in state.matches
     assert "model" not in state.matches
 
 
@@ -119,13 +127,13 @@ def test_search_matching_a_description_word_finds_the_setting_by_meaning() -> No
 def test_ending_a_search_lands_on_the_selected_settings_real_group() -> None:
     state = configtui.TuiState()
     state.start_search()
-    state.type_search("hotkey_mode")
-    assert state.matches == ("hotkey_mode",)
+    state.type_search("hotkey_hold")
+    assert state.matches == ("hotkey_hold",)
     state.end_search()
     assert state.search is None
-    assert state.selected_key() == "hotkey_mode"
+    assert state.selected_key() == "hotkey_hold"
     _group_name, names = configtui.GROUPS[state.group]
-    assert "hotkey_mode" in names
+    assert "hotkey_hold" in names
 
 
 def test_group_navigation_is_disabled_while_searching() -> None:
@@ -186,19 +194,22 @@ def test_apply_toggle_flips_a_boolean(tmp_path, monkeypatch) -> None:
 
 def test_apply_reset_removes_a_stored_value(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("STT_HOME", str(tmp_path))
-    configtui.apply_edit("hotkey", "cmd+shift+d")
-    assert config.load_settings().hotkey == "cmd+shift+d"
-    ok, message = configtui.apply_reset("hotkey")
+    configtui.apply_edit("hotkey_press", "cmd+shift+d")
+    assert config.load_settings().hotkey_press == "cmd+shift+d"
+    ok, message = configtui.apply_reset("hotkey_press")
     assert ok and "reset" in message
-    assert config.load_settings().hotkey is None
+    assert config.load_settings().hotkey_press is None
 
 
 def test_command_line_shows_the_equivalent_cli_invocation() -> None:
-    assert configtui.command_line("hotkey", "cmd+shift+d") == "stt config set hotkey cmd+shift+d"
+    assert (
+        configtui.command_line("hotkey_press", "cmd+shift+d")
+        == "stt config set hotkey_press cmd+shift+d"
+    )
     assert configtui.command_line("language", None) == "stt config set language (unset)"
 
 
-@pytest.mark.parametrize("key", ["backend", "context", "vad", "text_variant", "hotkey_mode"])
+@pytest.mark.parametrize("key", ["backend", "context", "vad", "text_variant"])
 def test_every_choice_offered_is_itself_a_value_apply_edit_accepts(
     key: str, tmp_path, monkeypatch
 ) -> None:
@@ -224,12 +235,12 @@ def test_apply_edit_reuses_config_cmds_validate_extra_for_a_bad_hotkey_chord(
     from stt_cli.commands.config_cmd import _set
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
-    ok, message = configtui.apply_edit("hotkey", "shift+a")
+    ok, message = configtui.apply_edit("hotkey_press", "shift+a")
     assert not ok
     with pytest.raises(SttError) as excinfo:
-        _set("hotkey", "shift+a")
+        _set("hotkey_press", "shift+a")
     assert message == excinfo.value.what, "the TUI and `stt config set` must refuse identically"
-    assert config.load_settings().hotkey is None, "the invalid chord was never stored"
+    assert config.load_settings().hotkey_press is None, "the invalid chord was never stored"
 
 
 def test_configtui_imports_the_public_validate_extra_not_a_private_name() -> None:
@@ -249,12 +260,19 @@ def test_configtui_imports_the_public_validate_extra_not_a_private_name() -> Non
 # ── the curses.error fallback: a terminal too small/without TUI support never crashes ──
 
 
-def test_launch_falls_back_to_the_plain_list_on_a_curses_error(monkeypatch, capsys) -> None:
+def test_launch_falls_back_to_the_plain_list_on_a_curses_error(
+    monkeypatch, capsys, tmp_path
+) -> None:
     """Ticket #46's third acceptance criterion: a terminal too small or lacking TUI support
-    degrades to the existing plain list instead of crashing."""
+    degrades to the existing plain list instead of crashing. Isolated from the real
+    `config.json` (`monkeypatch`d `STT_HOME`) like every other test that loads settings —
+    this one used to reach the shared machine's real file, which is not this test's own
+    fixture to depend on."""
     import curses
 
     from stt_cli._errors import EXIT_OK
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
 
     def _raise(_loop):
         raise curses.error("terminal too small")

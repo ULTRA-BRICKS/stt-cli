@@ -7,13 +7,16 @@ with the version that has the proper nouns and the punctuation right. Your termi
 dictionary reaches both, so a project name comes out spelled the way you wrote it down.
 
 Press any key yourself and stt stops correcting the sentence in flight and leaves it alone —
-it will never delete a character it did not type. Escape twice ends the session.
+it will never delete a character it did not type. Pressing the hotkey again (or releasing
+it, for a push-to-talk one) always ends the session; a system notification's Stop button
+does too, when `terminal-notifier` is installed (optional — `stt doctor` reports it).
 
 A bare `stt mic` (no subcommand) is the ad-hoc path above: dictate right now, in this shell,
 until you stop it. `run`/`start`/`status`/`stop`/`enable`/`disable` are a SEPARATE, newer way
 to use the same dictation: a background daemon that loads both models once and then idles
-with the microphone CLOSED until a global hotkey opens it for one burst at a time — see
-`stt mic --help` for the ad-hoc flags and `stt mic run --help` for the daemon's.
+with the microphone CLOSED until a global hotkey (or two — see `stt mic run --help`) opens
+it for one burst at a time — see `stt mic --help` for the ad-hoc flags and `stt mic run
+--help` for the daemon's.
 
 WHAT IT NEEDS THAT NOTHING ELSE IN STT NEEDS
     Accessibility and Microphone, both granted to the terminal application rather than to
@@ -37,7 +40,7 @@ import math
 import sys
 from typing import TYPE_CHECKING
 
-from .._errors import EXIT_ENGINE, EXIT_MISSING_DEP, EXIT_OK, EXIT_PERMISSION, SttError
+from .._errors import EXIT_ENGINE, EXIT_MISSING_DEP, EXIT_OK, EXIT_PERMISSION, SttError, UsageError
 from ..live import hotkey as hotkey_mod
 from ..live.mic_service import SERVE_TOKEN
 
@@ -125,7 +128,9 @@ def _parse(argv: list[str]) -> argparse.Namespace:
             "types twice per sentence: a fast draft model answers first so words appear "
             "while you are still speaking, then the accurate model replaces them a moment "
             "later with punctuation and proper nouns corrected. any key you press yourself "
-            "stops that second pass on the sentence in flight; press Escape twice to finish. "
+            "stops that second pass on the sentence in flight; Ctrl-C always finishes the "
+            "session, and so does a notification's Stop button when `terminal-notifier` is "
+            "installed (optional — `stt doctor` reports it). "
             "needs Accessibility and Microphone granted to the TERMINAL running stt (not "
             "stt itself) — System Settings > Privacy & Security. if nothing appears at all, "
             "`stt mic --check` shows what the microphone actually hears against the bar it "
@@ -170,18 +175,22 @@ def _daemon_parser() -> argparse.ArgumentParser:
         prog="stt mic",
         description=f"{SUMMARY} — as a managed background daemon",
         epilog=(
-            "run/start load both models once, then idle with the microphone CLOSED; the "
+            "run/start load both models once, then idle with the microphone CLOSED; a "
             "hotkey opens it for one burst at a time — a fast draft model answers first, "
             "then the accurate one retypes it corrected, same two-pass dictation as the "
             "ad-hoc path (see `stt mic --help`). any key you press yourself during a burst "
-            "stops that second pass on the sentence in flight; Escape twice, the hotkey "
-            "again (toggle mode), or releasing it (hold mode) ends that burst. "
-            "`stt mic stop` ends the daemon itself. needs Accessibility and Microphone: "
-            "granted to the TERMINAL for `run` (foreground, this shell) — but `start`/"
-            "`enable` detach into a launchd-spawned process with its OWN grant, separate "
-            "from any terminal's, so `stt mic status` names that process specifically if "
-            "it is what is missing the grant. System Settings > Privacy & Security. the "
-            "pidfile lives at $XDG_STATE_HOME/stt/mic.pid (default "
+            "stops that second pass on the sentence in flight. --hotkey-press and "
+            "--hotkey-hold are two INDEPENDENT bindings, both settable at once: pressing "
+            "the press-chord again, or releasing the hold-chord, ends the burst it started "
+            "— and a system notification's Stop button works too, for either one, from "
+            "anywhere, when `terminal-notifier` is installed (optional — `stt doctor` "
+            "reports it; the hotkey itself always works regardless). "
+            "`stt mic stop` ends the daemon itself. needs Accessibility "
+            "and Microphone: granted to the TERMINAL for `run` (foreground, this shell) — "
+            "but `start`/`enable` detach into a launchd-spawned process with its OWN grant, "
+            "separate from any terminal's, so `stt mic status` names that process "
+            "specifically if it is what is missing the grant. System Settings > Privacy & "
+            "Security. the pidfile lives at $XDG_STATE_HOME/stt/mic.pid (default "
             "~/.local/state/stt/mic.pid), the log at $XDG_CACHE_HOME/stt/mic.log (default "
             "~/.cache/stt/mic.log) — the first place to look if `stt mic status` says it is "
             "enabled but dictation never actually starts."
@@ -189,18 +198,19 @@ def _daemon_parser() -> argparse.ArgumentParser:
     )
     _add_dictation_flags(parser, daemon=True)
     parser.add_argument(
-        "--hotkey",
-        type=_hotkey_spec,
+        "--hotkey-press",
+        type=_hotkey_press_spec,
         default=None,
-        help=f"the chord that starts/stops dictation (default: {hotkey_mod.DEFAULT_HOTKEY}; "
-        "also settable with `stt config set hotkey ...`)",
+        help="press-style chord: press once to start, again to stop (default: "
+        f"{hotkey_mod.DEFAULT_PRESS_HOTKEY}; `none` disables it; also settable with "
+        "`stt config set hotkey_press ...`)",
     )
     parser.add_argument(
-        "--hotkey-mode",
-        choices=hotkey_mod.VALID_MODES,
+        "--hotkey-hold",
+        type=_hotkey_hold_spec,
         default=None,
-        help="toggle: press once to start, again to stop. hold: dictate only while held "
-        f"(push-to-talk). (default: {hotkey_mod.DEFAULT_MODE})",
+        help="hold-style chord: dictate only while held, push-to-talk (default: unset/"
+        "disabled; also settable with `stt config set hotkey_hold ...`)",
     )
     return parser
 
@@ -236,6 +246,7 @@ def _lifecycle(argv: list[str]) -> int:
     ns = argparse.Namespace()
     add_service_subcommands(subs, manager_factory=lambda: _manager(ns), service_name="mic")
     parser.parse_args(_reordered_for_argparse(argv), namespace=ns)
+    _refuse_colliding_hotkey_flags(ns)
 
     def _print_help_ok() -> int:
         parser.print_help()
@@ -248,17 +259,96 @@ def _lifecycle(argv: list[str]) -> int:
     return int(dispatch(ns, on_no_subcommand=_print_help_ok))
 
 
+def _refuse_colliding_hotkey_flags(ns: argparse.Namespace) -> None:
+    """`--hotkey-press`/`--hotkey-hold` are each validated individually by their own
+    `type=` callback (see `_hotkey_press_spec`/`_hotkey_hold_spec`), but a pair that shares
+    a KEYCODE only shows up once both are known together — checked here, right after
+    parsing, for every `_lifecycle` action (`enable`/`start`/`run`/...), not just `stt
+    config set` (`hotkey.validate`) and daemon-start time (`dictation._resolved_hotkeys`).
+    Uncaught, `stt mic enable --hotkey-press cmd+d --hotkey-hold ctrl+d` would install a
+    launchd `LaunchAgent` with `KeepAlive` for a daemon that can never actually start (see
+    `_resolved_hotkeys`'s own identical check) — a restart loop diagnosable only after the
+    fact via `stt mic status` (ticket #54), cheaper to refuse here before anything is
+    installed at all.
+
+    Resolution is a no-op ONLY when NEITHER flag was given on this invocation AND the
+    action is not one that installs/detaches a daemon (`enable`/`start`) — one flag alone
+    is never enough to skip the check, because the OTHER binding still resolves to
+    something real (the stored config value, or the built-in default) that can just as
+    easily collide. An earlier version returned whenever either flag was `None`, which
+    meant `stt mic enable --hotkey-hold cmd+shift+space` (leaving `--hotkey-press` unset)
+    silently collided with the built-in `hotkey_press` default and was never refused.
+    Mirrors the pattern `hotkey.validate` already uses via `config.load_settings()` for the
+    identical problem at `stt config set` time: resolve whichever side was NOT given on the
+    command line from stored config before comparing.
+
+    Also refuses BOTH bindings resolving to disabled, for `enable`/`start` specifically —
+    not a collision, but just as launchd-fatal (`dictation._resolved_hotkeys` refuses the
+    identical state at daemon-start time: "no hotkey is configured"). Found by review: an
+    earlier version of this function checked collisions only, so `stt config set
+    hotkey_press none` followed by a bare `stt mic enable` (no flags at all — the FIRST
+    early-return above used to fire unconditionally whenever neither flag was given on the
+    command line, before the stored-both-disabled case was ever resolved) silently
+    installed a `LaunchAgent` for a daemon with nothing that could ever open the
+    microphone — an immediate, guaranteed crash loop on every restart. Scoped to
+    `enable`/`start` only (not `status`/`stop`/`disable`, which have no reason to care
+    whether a hotkey is configured, and not `run`, which already reports the identical
+    failure immediately and visibly in the foreground via `_resolved_hotkeys` — not a
+    silent background crash loop, so it does not need this same preflight).
+    """
+    installing = ns.action in {"enable", "start"}
+    if not installing and ns.hotkey_press is None and ns.hotkey_hold is None:
+        return
+    from .. import config
+
+    stored = config.load_settings()
+    press_spec = ns.hotkey_press if ns.hotkey_press is not None else stored.hotkey_press
+    hold_spec = ns.hotkey_hold if ns.hotkey_hold is not None else stored.hotkey_hold
+    try:
+        press = hotkey_mod.resolve_press(press_spec)
+        hold = hotkey_mod.resolve_hold(hold_spec)
+    except hotkey_mod.HotkeyError as broken:
+        # The side pulled from stored config, not the one just given on this command line
+        # (that one already passed its own `type=` callback) — a hand-edited `config.json`
+        # that reached an invalid state anyway. Diagnosed here rather than left to crash,
+        # same reasoning as `dictation._resolved_hotkeys`'s identical `try`/`except`.
+        raise UsageError(
+            what="the configured hotkey is invalid",
+            why=str(broken),
+            how="fix it with `stt config set hotkey_press ...` / "
+            "`stt config set hotkey_hold ...`, or `stt config unset` either to go back to "
+            "its default",
+        ) from broken
+    if press is not None and hold is not None and hotkey_mod.same_keycode(press, hold):
+        raise UsageError(
+            what="--hotkey-press and --hotkey-hold use the same key",
+            why=f"{press.spec!r} and {hold.spec!r} both use the same physical key — a key "
+            "release only reports which key was let go, not which modifiers were held "
+            "with it, so releasing either could be misattributed to the other binding and "
+            "leave the microphone open indefinitely",
+            how="pick two different keys for --hotkey-press and --hotkey-hold",
+        )
+    if installing and press is None and hold is None:
+        raise UsageError(
+            what="no hotkey is configured",
+            why="hotkey_press and hotkey_hold are both disabled, so the daemon would idle "
+            "forever with nothing that could ever open the microphone",
+            how="`stt config unset hotkey_press` to restore the default (cmd+shift+space), "
+            "or `stt config set hotkey_press ...`/`hotkey_hold ...` to choose one yourself",
+        )
+
+
 def _reordered_for_argparse(argv: list[str]) -> list[str]:
-    """`stt mic start --hotkey X` — the lifecycle word first, its flags after, the only order
-    every example in this file's own help text and the README shows — does not parse as
-    written. `_daemon_parser`'s flags live on the PARENT parser, but once `argv[0]` (the
+    """`stt mic start --hotkey-press X` — the lifecycle word first, its flags after, the only
+    order every example in this file's own help text and the README shows — does not parse
+    as written. `_daemon_parser`'s flags live on the PARENT parser, but once `argv[0]` (the
     lifecycle word — guaranteed present and first; `run()` only reaches `_lifecycle` when it
     is) is consumed as the subcommand, argparse hands everything AFTER it to that
     subcommand's OWN subparser, which `add_service_subcommands` builds with no flags of its
-    own — so `--hotkey X` there is reported as unrecognized. Moving the lifecycle word to the
-    end lets the flags reach the parser that actually declares them, while `argv[0]` is still
-    what `run()` looks at to decide `_lifecycle` should run at all — the user-facing order
-    never changes, only what this function hands to `argparse.parse_args`.
+    own — so `--hotkey-press X` there is reported as unrecognized. Moving the lifecycle word
+    to the end lets the flags reach the parser that actually declares them, while `argv[0]`
+    is still what `run()` looks at to decide `_lifecycle` should run at all — the
+    user-facing order never changes, only what this function hands to `argparse.parse_args`.
     """
     if not argv:
         return argv
@@ -367,10 +457,10 @@ def _daemon_extra_argv(ns: argparse.Namespace) -> list[str]:
         argv += ["--threads", str(ns.threads)]
     if ns.idle_minutes is not None:
         argv += ["--idle-minutes", str(ns.idle_minutes)]
-    if ns.hotkey is not None:
-        argv += ["--hotkey", ns.hotkey]
-    if ns.hotkey_mode is not None:
-        argv += ["--hotkey-mode", ns.hotkey_mode]
+    if ns.hotkey_press is not None:
+        argv += ["--hotkey-press", ns.hotkey_press]
+    if ns.hotkey_hold is not None:
+        argv += ["--hotkey-hold", ns.hotkey_hold]
     if ns.quiet:
         argv += ["--quiet"]
     return argv
@@ -390,15 +480,25 @@ def _serve(rest: list[str]) -> int:
     return EXIT_OK
 
 
-def _hotkey_spec(given: str) -> str:
-    """`--hotkey` refusing a spec `hotkey.parse` cannot use, at parse time, not at daemon
-    startup. `stt mic enable` bakes the argv this validates into a launchd `LaunchAgent`
-    with `KeepAlive`; an unreachable `--hotkey` that only failed once the daemon actually
-    started would have crash-looped it — every restart reloading both models before dying
-    on the same invalid spec.
+def _hotkey_press_spec(given: str) -> str:
+    """`--hotkey-press` refusing a spec `hotkey.resolve_press` cannot use, at parse time,
+    not at daemon startup. `stt mic enable` bakes the argv this validates into a launchd
+    `LaunchAgent` with `KeepAlive`; an unreachable `--hotkey-press` that only failed once
+    the daemon actually started would have crash-looped it — every restart reloading both
+    models before dying on the same invalid spec.
     """
     try:
-        hotkey_mod.parse(given)
+        hotkey_mod.resolve_press(given)
+    except hotkey_mod.HotkeyError as broken:
+        raise argparse.ArgumentTypeError(str(broken)) from broken
+    return given
+
+
+def _hotkey_hold_spec(given: str) -> str:
+    """`--hotkey-hold`'s own version of `_hotkey_press_spec` — same reasoning, the other
+    binding."""
+    try:
+        hotkey_mod.resolve_hold(given)
     except hotkey_mod.HotkeyError as broken:
         raise argparse.ArgumentTypeError(str(broken)) from broken
     return given

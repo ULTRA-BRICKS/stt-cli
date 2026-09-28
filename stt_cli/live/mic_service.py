@@ -39,7 +39,7 @@ SERVE_TOKEN = "__serve"
 def mic_service(*, extra_argv: list[str] | None = None) -> Service:
     """Build the :class:`agenttools_service.Service` descriptor for the `stt mic` daemon.
 
-    ``extra_argv`` is the daemon's own flags (``--hotkey``, ``--model``, ``--device``, ...),
+    ``extra_argv`` is the daemon's own flags (``--hotkey-press``, ``--model``, ``--device``, ...),
     already rendered as CLI tokens by `commands/mic.py` from whatever the user typed on
     `run`/`start`/`enable` — this module stays a thin, flag-agnostic builder, and every
     `stt mic` daemon flag is owned in exactly one place (the CLI parser), not duplicated

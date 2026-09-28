@@ -133,8 +133,8 @@ def note(message: str, *, quiet: bool = False) -> None:
 
     `quiet` is not decoration: `-q` says "no status line, sounds or notifications", and this
     was the one channel that ignored it, so somebody who asked for a clean terminal still got
-    "loading large-v3-turbo and base" and "press Escape twice to finish" — exactly the lines
-    the flag exists to suppress.
+    "loading large-v3-turbo and base" and "listening — Ctrl-C … to finish" — exactly the
+    lines the flag exists to suppress.
     """
     if quiet:
         return
@@ -180,6 +180,114 @@ async def _banner(message: str, *, quiet: bool) -> None:
     try:
         process = await asyncio.create_subprocess_exec(
             "osascript", "-e", script,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )  # fmt: skip
+    except OSError:
+        return
+    await _briefly(process)
+
+
+# terminal-notifier's own `-group` id: a fresh notification with the same id REPLACES the
+# previous one on screen instead of stacking, and `-remove` withdraws by this same id — so a
+# stale "Stop" button left over from a burst that already ended cannot linger for the next
+# one to inherit.
+_STOP_GROUP = "stt-mic-stop"
+
+
+# `terminal-notifier` (`brew install terminal-notifier`) is the one thing `notifier_available`
+# checks for — see its docstring for why a zero-dependency alternative was investigated and
+# rejected rather than reached for. `stt doctor` and the daemon's startup banner both name
+# this exact hint when it is missing, so it is written once and quoted everywhere else.
+INSTALL_HINT = "brew install terminal-notifier"
+
+
+def notifier_available() -> bool:
+    """Whether an interactive stop-button notification is possible on this machine.
+
+    `osascript display notification` (what `_banner` above uses for the open/close chimes)
+    cannot add a button at all — AppleScript's `display notification` command has no
+    `-actions` equivalent. A genuinely zero-dependency alternative WAS investigated for
+    ticket #79 before reaching for an optional tool: `osascript display dialog ... buttons
+    {"Stop"}` can return a clicked button synchronously (`button returned of (display
+    dialog ...)`) and needs nothing installed at all. It was rejected for a specific,
+    documented reason, not a hunch: a `display dialog` panel steals input focus / frontmost-
+    application status the instant it appears — long-documented AppleScript behaviour, not
+    speculation — and `quartz.type_text` posts every character of a dictated sentence to
+    WHATEVER IS FRONTMOST at that instant (see its own docstring). A dialog popping up
+    mid-sentence would silently redirect the burst's own typed output into the dialog
+    instead of the user's actual window — worse than no Stop button at all, since a missing
+    button just means "use the hotkey", while this would lose or corrupt words the user had
+    already spoken. A real Notification Center banner does not have this problem — it is
+    specifically designed not to steal frontmost-app status, which is the one property that
+    matters here — and `terminal-notifier` (optional — `stt doctor` reports it, see
+    `INSTALL_HINT`) is the tool that can add a button to one: built on the same modern
+    UserNotifications framework `display notification` already uses for the non-interactive
+    chime above, and when given `-actions` it blocks until the user picks one and prints
+    which on stdout — see `stop_notification`. Nothing here requires it: the hotkey firing
+    again (press) or being released (hold) always works without it, and the daemon's startup
+    banner / `stt doctor` say so explicitly when it is absent — see `stop_hint`.
+    """
+    return shutil.which("terminal-notifier") is not None
+
+
+def stop_hint(guaranteed: str) -> str:
+    """The full "how to stop" clause for a status line: ``guaranteed`` (what always works —
+    worded differently for the ad-hoc path's "Ctrl-C" and the daemon's "press X again"/
+    "release X") plus, when `terminal-notifier` is installed, the notification's Stop
+    button — or, when it is not, an explicit statement that it is missing and how to add
+    it. Shared by the ad-hoc and daemon paths so a person reading one never gets a claim the
+    other would phrase differently, and so "a notification with a Stop button is always
+    available" is never left implied by silence on a machine where it is not true.
+    """
+    if notifier_available():
+        return f"{guaranteed}, or click Stop on the notification, to finish"
+    return f"{guaranteed} to finish (no notification Stop button — {INSTALL_HINT} adds one)"
+
+
+async def stop_notification(message: str, *, quiet: bool) -> bool:
+    """Post a notification with a Stop button and wait for it; ``True`` only if Stop was
+    the button actually clicked.
+
+    ``False`` (never raises) when `terminal-notifier` is not installed, ``quiet`` was asked
+    for, the process could not even start, or the notification was dismissed/closed
+    (`@CLOSED`) instead of acted on — none of those mean "stop", they mean this particular
+    way of asking was not used, and the hotkey itself (press again / release) is always
+    still there regardless of what this returns. The caller races this against the
+    microphone task (see `dictation._race_burst_signals`); cancelling the awaiting task when
+    that race is won some other way kills the still-waiting subprocess here rather than
+    leaving it running past the burst that asked for it.
+    """
+    if quiet or not notifier_available():
+        return False
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "terminal-notifier",
+            "-title", "stt",
+            "-message", message,
+            "-actions", "Stop",
+            "-group", _STOP_GROUP,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )  # fmt: skip
+    except OSError:
+        return False
+    try:
+        out, _err = await process.communicate()
+    except asyncio.CancelledError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        raise
+    return out.decode(errors="replace").strip() == "Stop"
+
+
+async def close_stop_notification(*, quiet: bool) -> None:
+    """Withdraw whatever `stop_notification` banner is still on screen, win or lose — a
+    burst that ended some OTHER way (the hotkey firing again, an idle timeout) must not
+    leave a stale Stop button on screen for the next burst to inherit."""
+    if quiet or not notifier_available():
+        return
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "terminal-notifier", "-remove", _STOP_GROUP,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )  # fmt: skip
     except OSError:

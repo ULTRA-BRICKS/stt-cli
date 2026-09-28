@@ -298,24 +298,31 @@ rather than a command. So provisional text here looks like ordinary typed text a
 corrected underneath you. If you would rather never see a wrong word at all, `--no-draft`
 types nothing until it is final.
 
-### Push-to-talk: a hotkey instead of a terminal window
+### Two hotkeys instead of a terminal window: press-to-toggle and hold-to-talk
 
 ```bash
-stt config set hotkey "cmd+shift+space"   # the chord that starts/stops dictation
-stt config set hotkey_mode hold           # hold: push-to-talk. toggle: press twice
-stt mic enable                            # start now, and start at every login
-stt mic status                            # is it running?
-stt mic stop                              # stop it
+stt config set hotkey_press "cmd+shift+space"  # press once to start, again to stop
+stt config set hotkey_hold "ctrl+opt+d"        # dictate only while held (push-to-talk)
+stt mic enable                                 # start now, and start at every login
+stt mic status                                 # is it running?
+stt mic stop                                   # stop it
 ```
 
 `stt mic run`/`start`/`status`/`stop`/`enable`/`disable` run the same dictation as a
 background daemon instead of a foreground session: both models load once, and from then on
-the microphone stays CLOSED — nothing is captured — until the configured hotkey opens it for
-one burst. `hold` mode is push-to-talk in the literal, radio sense: dictate exactly while the
-chord is held, stop the instant you release it. `toggle` mode is press-once-to-start,
-press-again-to-stop, for a sentence you don't want to hold a key through. Either way, because
-both models are already loaded, the delay between the hotkey and the microphone being live is
-under a second — a cold ad-hoc `stt mic` spends 30-45 seconds loading them first.
+the microphone stays CLOSED — nothing is captured — until one of the two configured
+bindings opens it for one burst. `hotkey_press` and `hotkey_hold` are two INDEPENDENT
+chords, both settable at once, not a mode switch on one chord: `hotkey_press` is
+press-once-to-start, press-again-to-stop, for a sentence you don't want to hold a key
+through; `hotkey_hold` is push-to-talk in the literal, radio sense — dictate exactly while
+the chord is held, stop the instant you release it — and defaults to unset (disabled) until
+you choose one. Either way, because both models are already loaded, the delay between the
+hotkey and the microphone being live is under a second — a cold ad-hoc `stt mic` spends
+30-45 seconds loading them first. A system notification with a Stop button is also
+available during a burst, on both this daemon path and the ad-hoc path above, when
+`terminal-notifier` is installed (`brew install terminal-notifier` — optional; `stt doctor`
+reports whether it is present); the hotkey itself (press again, or release) always works
+regardless of whether that optional tool is installed.
 
 `enable` also installs OS autostart (a launchd `LaunchAgent`) so the daemon comes back after
 a restart; `disable` removes it. These six lifecycle subcommands come from the same

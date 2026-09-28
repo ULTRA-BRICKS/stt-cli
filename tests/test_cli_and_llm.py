@@ -192,14 +192,18 @@ def test_the_correction_pass_is_not_offered_the_spelling_the_dictionary_removed(
     assert "we use Figma there" in prompt, "a real second opinion still has to reach it"
 
 
-def test_config_offers_exactly_the_settings_it_will_accept(capsys) -> None:
+def test_config_offers_exactly_the_settings_it_will_accept(capsys, tmp_path, monkeypatch) -> None:
     """`config list` printed every dataclass field, including the run's own identity —
     `dict_digest`, `engine_limits` — as if they were preferences, while `config set` refused
-    them as unknown. One contract, asked by all three subcommands."""
+    them as unknown. One contract, asked by all three subcommands. Isolated from the real
+    `config.json` — a stray key left there by an unrelated run must not turn this into a
+    referendum on that file instead of on the settings contract this test actually checks.
+    """
     from stt_cli import config
     from stt_cli._errors import EXIT_UNKNOWN_ITEM
     from stt_cli.cli import main
 
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
     assert main(["config", "list"]) == EXIT_OK
     listed = {line.split()[0] for line in capsys.readouterr().out.splitlines()[1:] if line.strip()}
     internal = {"dict_digest", "engine_limits", "context_compare_chosen", "output", "recorded_at"}

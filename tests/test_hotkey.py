@@ -1,5 +1,6 @@
-"""Push-to-talk: the hotkey spec parser, the tap's hotkey routing, the `stt mic` daemon's
-idle<->dictating loop, and the CLI plumbing that wires a flag into all three.
+"""Push-to-talk: the hotkey spec parser (with its distinct press/hold validation rules), the
+tap's multi-hotkey routing, the `stt mic` daemon's idle<->dictating loop for BOTH concurrent
+bindings, and the CLI plumbing that wires `--hotkey-press`/`--hotkey-hold` into all three.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import pytest
 from stt_cli import config
 from stt_cli._errors import EngineError
 from stt_cli.live.gate import HANGOVER_MS, RATE
-from stt_cli.live.hotkey import Combo, HotkeyError, parse, resolve, resolve_mode
+from stt_cli.live.hotkey import Combo, HotkeyError, parse, resolve_hold, resolve_press, same_chord
 
 
 def tone(ms: int, amplitude: int) -> bytes:
@@ -30,7 +31,7 @@ SPEECH = tone(1200, 6000)
 SILENCE = tone(HANGOVER_MS + 400, 20)
 
 
-# ── hotkey.parse / resolve ───────────────────────────────────────────────────
+# ── hotkey.parse / resolve_press / resolve_hold ──────────────────────────────
 
 
 def test_a_chord_parses_to_its_keycode_and_modifier_bits() -> None:
@@ -53,40 +54,66 @@ def test_modifier_aliases_and_case_are_normalized() -> None:
 
 def test_a_hotkey_with_no_modifier_is_refused() -> None:
     """The whole design rests on telling a command from ordinary typing — a bare key would
-    fire on every letter the user types while the daemon is idle."""
+    fire on every letter the user types while the daemon is idle. True for either binding
+    kind: a missing modifier is refused before `kind` is ever consulted."""
     with pytest.raises(HotkeyError, match="no modifier"):
         parse("d")
+    with pytest.raises(HotkeyError, match="no modifier"):
+        parse("d", kind="hold")
 
 
-def test_a_shift_only_hotkey_is_refused() -> None:
-    """Shift is not a real modifier for this purpose: every capital letter and every shifted
-    symbol ("!", "@", "$", ...) a person types ordinarily is shift+key, so `shift+a` would
-    fire the daemon on typing a capital A — the "keylogger that occasionally opens a
-    microphone" failure, just gated on capitalization instead of on nothing at all."""
-    with pytest.raises(HotkeyError, match="cmd or ctrl"):
-        parse("shift+a")
-    parse("cmd+shift+a")  # shift is fine ALONGSIDE a real modifier
-
-
-def test_option_and_fn_alone_are_refused_even_though_they_are_not_shift() -> None:
-    """Option and Fn are not safe alone either, for the same reason as shift, just less
-    obviously: Option is how macOS types a dead-key accent (opt+e starts é) or a
-    non-breaking space (opt+space), and Fn is the laptop-keyboard route to Home/End/
-    PageUp/PageDown (fn+left/right/up/down) — both are ordinary typing and navigation, not
-    a deliberate command, on a real Mac keyboard."""
-    for spec in ("opt+space", "opt+e", "opt+shift+a", "fn+left", "fn+d"):
+def test_a_press_binding_refuses_shift_opt_or_fn_alone() -> None:
+    """A press/toggle binding fires on a single, momentary key-down — indistinguishable from
+    one ordinary keystroke of the exact same key+modifiers, so shift, opt and fn are all
+    refused alone: every capital letter is shift+key, opt+e types an accent, fn+arrow is
+    Home/End/PageUp/PageDown — all constant, ordinary events with no modifier at all."""
+    for spec in ("shift+a", "opt+space", "opt+e", "opt+shift+a", "fn+left", "fn+d"):
         with pytest.raises(HotkeyError, match="cmd or ctrl"):
-            parse(spec)
-    parse("cmd+opt+space")  # opt/fn are fine ALONGSIDE a real modifier, same as shift
-    parse("cmd+fn+d")
+            parse(spec, kind="press")
+    parse("cmd+shift+a", kind="press")  # shift is fine ALONGSIDE a real modifier
+    parse("cmd+opt+space", kind="press")
+    parse("cmd+fn+d", kind="press")
+
+
+def test_a_hold_binding_refuses_shift_alone_same_as_a_press_binding() -> None:
+    """`hotkey_hold` once relaxed this rule to accept shift alone, reasoning that nobody
+    sustains shift+key for a burst-length few seconds by ACCIDENT (the OS's own key-repeat
+    spams the capital letter instantly, self-correcting garbage). An independent review
+    caught the real problem: `tap.py`'s tap is listen-only, so a sustained `shift+d` hold
+    does not just risk an accidental collision, it reliably TYPES "d" (then repeats it) into
+    the document being dictated into on every single INTENTIONAL use — cmd/ctrl have no such
+    self-typing behaviour, held or not. The relaxation was reverted: both binding kinds now
+    require cmd or ctrl, full stop (see the module docstring's "WHY HOLD DOES NOT RELAX THE
+    MODIFIER RULE EITHER" section)."""
+    with pytest.raises(HotkeyError, match="cmd or ctrl"):
+        parse("shift+d", kind="hold")
+    with pytest.raises(HotkeyError, match="cmd or ctrl"):
+        parse("shift+d", kind="press")
+
+    parse("cmd+shift+d", kind="hold")  # shift is fine ALONGSIDE a real modifier, same as press
+
+
+def test_a_hold_binding_still_refuses_option_and_fn_alone() -> None:
+    """Option and Fn were never candidates for the relaxation shift briefly got: opt+letter
+    types a dead-key accent/symbol (identical self-typing problem to shift), and both
+    opt+arrow/opt+delete and fn+arrow/fn+delete repeat a word-jump/word-delete or
+    page-scroll/forward-delete during ordinary, burst-length sustained use — so both stay
+    exactly as forbidden-alone for hold as they are for press."""
+    for spec in ("opt+left", "opt+delete", "opt+e", "fn+left", "fn+delete", "fn+d"):
+        with pytest.raises(HotkeyError, match="cmd or ctrl"):
+            parse(spec, kind="hold")
+    parse("cmd+opt+d", kind="hold")  # opt/fn are fine ALONGSIDE a real modifier, same as press
+    parse("ctrl+fn+d", kind="hold")
 
 
 @pytest.mark.parametrize("spec", ["cmd+d", "ctrl+d"])
-def test_each_strong_modifier_alone_is_a_valid_hotkey(spec: str) -> None:
+def test_each_strong_modifier_alone_is_valid_for_either_binding_kind(spec: str) -> None:
     """Only cmd and ctrl are never, on their own, how macOS itself produces a character or a
-    navigation event — see `test_option_and_fn_alone_are_refused...` for the modifiers that
-    look similarly "strong" but are not."""
-    parse(spec)  # must not raise
+    navigation event, and never, held down, sustain a self-typing chord either — valid for
+    both press and hold, unlike shift/opt (which type a character) or fn (which sustains a
+    scroll/forward-delete)."""
+    parse(spec, kind="press")
+    parse(spec, kind="hold")
 
 
 def test_an_unknown_modifier_is_refused() -> None:
@@ -100,10 +127,12 @@ def test_an_unknown_key_is_refused() -> None:
 
 
 def test_escape_is_not_a_valid_hotkey_key() -> None:
-    """`tap.py` already owns Escape for stop-correcting/end-the-session; a hotkey sharing it
-    would fight that, so it is not in the table at all."""
+    """`tap.py` already owns Escape for stop-correcting; a hotkey sharing it would fight
+    that, so it is not in the table at all — for either binding kind."""
     with pytest.raises(HotkeyError):
         parse("cmd+escape")
+    with pytest.raises(HotkeyError):
+        parse("cmd+escape", kind="hold")
 
 
 @pytest.mark.parametrize("spec", ["", "   ", "cmd+", "+d", "cmd++d"])
@@ -112,23 +141,63 @@ def test_a_malformed_spec_is_refused(spec: str) -> None:
         parse(spec)
 
 
-def test_resolve_falls_back_to_the_stated_default_when_unset() -> None:
-    from stt_cli.live.hotkey import DEFAULT_HOTKEY
+def test_resolve_press_falls_back_to_the_stated_default_when_unset() -> None:
+    from stt_cli.live.hotkey import DEFAULT_PRESS_HOTKEY
 
-    assert resolve(None) == parse(DEFAULT_HOTKEY)
-    assert resolve("") == parse(DEFAULT_HOTKEY)
+    assert resolve_press(None) == parse(DEFAULT_PRESS_HOTKEY)
 
 
-def test_resolve_mode_falls_back_to_toggle_and_validates() -> None:
-    from stt_cli.live.hotkey import DEFAULT_MODE
+def test_resolve_hold_has_no_default_and_is_none_when_unset() -> None:
+    """Unlike `resolve_press`, `resolve_hold` has no built-in chord — nothing was ever
+    obviously right for a push-to-talk style nobody asked for by default."""
+    assert resolve_hold(None) is None
 
-    assert resolve_mode(None) == DEFAULT_MODE == "toggle"
-    assert resolve_mode("HOLD") == "hold"
+
+@pytest.mark.parametrize("word", ["", "none", "NONE", " off ", "Off"])
+def test_either_resolver_treats_a_disable_word_as_explicitly_off(word: str) -> None:
+    """Explicitly off (`stt config set hotkey_press none`) and merely unset must resolve the
+    same way for `hotkey_hold` (both `None`) but DIFFERENTLY for `hotkey_press`: unset falls
+    back to the built-in default, an explicit disable word does not."""
+    assert resolve_press(word) is None
+    assert resolve_hold(word) is None
+
+
+def test_resolve_press_and_resolve_hold_raise_on_a_bad_spec_including_the_default() -> None:
     with pytest.raises(HotkeyError):
-        resolve_mode("sometimes")
+        resolve_press("d")
+    with pytest.raises(HotkeyError):
+        resolve_hold("d")
 
 
-# ── Combo.matches — caps lock and keypad bits must not break a held hotkey ──
+def test_same_chord_ignores_spec_text_but_not_keycode_or_modifiers() -> None:
+    """`"shift+cmd+space"` and `"cmd+shift+space"` parse to the same keycode/modifier bits
+    but a DIFFERENT `spec` string (order is preserved for status text) — `same_chord` must
+    call them the same chord even though `Combo.__eq__` (which compares `spec` too) would
+    not."""
+    a = parse("cmd+shift+space")
+    b = parse("shift+cmd+space")
+    assert a != b, "the spec strings differ, so plain equality says they are different"
+    assert same_chord(a, b), "but they fire on the exact same physical key event"
+    assert not same_chord(a, parse("cmd+shift+d")), "a different key is not the same chord"
+    assert not same_chord(a, parse("cmd+space")), "a different modifier mask is not either"
+
+
+def test_same_keycode_is_broader_than_same_chord() -> None:
+    """`cmd+d` and `ctrl+d` are NOT `same_chord` (different modifiers) but ARE
+    `same_keycode` — the distinction `hotkey.validate`/`dictation._resolved_hotkeys` now
+    check, because a key-RELEASE only reports the keycode, never the modifiers, so
+    `tap.Watcher` cannot tell two bindings sharing a key apart on release even when their
+    modifiers genuinely differ."""
+    from stt_cli.live.hotkey import same_keycode
+
+    cmd_d = parse("cmd+d")
+    ctrl_d = parse("ctrl+d")
+    assert not same_chord(cmd_d, ctrl_d), "different modifiers — not the same chord"
+    assert same_keycode(cmd_d, ctrl_d), "but the same physical key, which is what matters here"
+    assert not same_keycode(cmd_d, parse("cmd+e")), "a genuinely different key is not"
+
+
+# ── Combo.matches / released — caps lock and keypad bits must not break a held hotkey ──
 
 
 def test_matches_ignores_caps_lock_and_keypad_bits() -> None:
@@ -151,7 +220,7 @@ def test_matches_requires_the_right_keycode() -> None:
     assert not combo.matches(50, combo.modifiers)
 
 
-# ── tap.Watcher — hotkey routing, faked at the CGEvent boundary ─────────────
+# ── tap.Watcher — multi-hotkey routing, faked at the CGEvent boundary ───────
 
 
 class _FakeServices:
@@ -209,35 +278,35 @@ def test_a_matching_key_down_fires_on_hotkey_and_also_interrupts_correction(monk
     Control+letter to caret motion), so it must count as "the user touched the keyboard"
     exactly like any other key, in ADDITION to firing the hotkey."""
     combo = parse("cmd+shift+space")
-    hotkey_events: list[bool] = []
+    hotkey_events: list[tuple[Combo, bool]] = []
     watcher, fired = _watcher_with_fake_events(
         monkeypatch,
         keycode=combo.keycode,
         flags=combo.modifiers,
-        hotkey=combo,
-        on_hotkey=hotkey_events.append,
+        hotkeys=[combo],
+        on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
     )
     from stt_cli.live import tap
 
     watcher._handle(0, tap._KEY_DOWN, 1, 0)
-    assert hotkey_events == [True]
+    assert hotkey_events == [(combo, True)]
     assert fired == [("key", combo.keycode)], "the correction in flight must be disowned too"
 
 
 def test_a_matching_key_up_fires_on_hotkey_false(monkeypatch) -> None:
     combo = parse("cmd+shift+space")
-    hotkey_events: list[bool] = []
+    hotkey_events: list[tuple[Combo, bool]] = []
     watcher, fired = _watcher_with_fake_events(
         monkeypatch,
         keycode=combo.keycode,
         flags=combo.modifiers,
-        hotkey=combo,
-        on_hotkey=hotkey_events.append,
+        hotkeys=[combo],
+        on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
     )
     from stt_cli.live import tap
 
     watcher._handle(0, tap._KEY_UP, 1, 0)
-    assert hotkey_events == [False]
+    assert hotkey_events == [(combo, False)]
     assert fired == [], "a release was never the user typing something"
 
 
@@ -249,18 +318,18 @@ def test_a_release_matches_by_keycode_even_if_the_modifiers_already_let_go(monke
     — a hold-mode burst could keep the microphone open, typing into whatever the user
     focused next, until the 30-minute idle timeout."""
     combo = parse("cmd+shift+space")
-    hotkey_events: list[bool] = []
+    hotkey_events: list[tuple[Combo, bool]] = []
     watcher, _fired = _watcher_with_fake_events(
         monkeypatch,
         keycode=combo.keycode,
         flags=0,  # every modifier already released by the time this key-up arrives
-        hotkey=combo,
-        on_hotkey=hotkey_events.append,
+        hotkeys=[combo],
+        on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
     )
     from stt_cli.live import tap
 
     watcher._handle(0, tap._KEY_UP, 1, 0)
-    assert hotkey_events == [False], "the release must fire on keycode alone"
+    assert hotkey_events == [(combo, False)], "the release must fire on keycode alone"
 
 
 def test_an_os_autorepeat_key_down_does_not_fire_a_second_press(monkeypatch) -> None:
@@ -269,14 +338,14 @@ def test_an_os_autorepeat_key_down_does_not_fire_a_second_press(monkeypatch) -> 
     self-cancelling almost immediately, and made hold-mode look like a fresh press instead
     of "still holding"."""
     combo = parse("cmd+shift+space")
-    hotkey_events: list[bool] = []
+    hotkey_events: list[tuple[Combo, bool]] = []
     watcher, fired = _watcher_with_fake_events(
         monkeypatch,
         keycode=combo.keycode,
         flags=combo.modifiers,
         autorepeat=1,
-        hotkey=combo,
-        on_hotkey=hotkey_events.append,
+        hotkeys=[combo],
+        on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
     )
     from stt_cli.live import tap
 
@@ -294,8 +363,8 @@ def test_an_ordinary_key_still_reaches_on_key_when_a_hotkey_is_configured(monkey
         monkeypatch,
         keycode=99,  # not the hotkey's keycode
         flags=0,
-        hotkey=combo,
-        on_hotkey=lambda pressed: None,
+        hotkeys=[combo],
+        on_hotkey=lambda c, pressed: None,
     )
     from stt_cli.live import tap
 
@@ -314,19 +383,19 @@ def test_our_own_marker_is_ignored_even_when_it_matches_the_hotkey(monkeypatch) 
         "frameworks",
         lambda: _FakeAPI(keycode=combo.keycode, flags=combo.modifiers, stamp=marker),
     )
-    hotkey_events: list[bool] = []
+    hotkey_events: list[tuple[Combo, bool]] = []
     fired: list[tuple[str, object]] = []
     watcher = tap.Watcher(
         marker=marker,
         on_key=lambda code: fired.append(("key", code)),
-        hotkey=combo,
-        on_hotkey=hotkey_events.append,
+        hotkeys=[combo],
+        on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
     )
     watcher._handle(0, tap._KEY_DOWN, 1, 0)
     assert hotkey_events == [] and fired == []
 
 
-def test_a_watcher_with_no_hotkey_behaves_exactly_as_before(monkeypatch) -> None:
+def test_a_watcher_with_no_hotkeys_behaves_exactly_as_before(monkeypatch) -> None:
     """The ad-hoc single-session path never configures a hotkey; this pins that its
     behaviour is untouched by any of the above — key-down reaches `on_key`, nothing else
     is ever consulted."""
@@ -339,13 +408,46 @@ def test_a_watcher_with_no_hotkey_behaves_exactly_as_before(monkeypatch) -> None
     assert fired == [("key", 42)]
 
 
+def test_two_configured_hotkeys_are_each_routed_by_their_own_identity(monkeypatch) -> None:
+    """A daemon with BOTH `hotkey_press` and `hotkey_hold` configured passes both to the
+    SAME `Watcher` (see `dictation._watch_daemon`) — this is the tap-level half of "the
+    daemon correctly watches both bindings concurrently": a key-down matching one of the two
+    must report exactly THAT combo, never the other, so `dictation._await_release` can tell
+    which binding armed the current burst."""
+    press = parse("cmd+shift+space")
+    hold = parse("ctrl+opt+d")
+    hotkey_events: list[tuple[Combo, bool]] = []
+    watcher, _fired = _watcher_with_fake_events(
+        monkeypatch,
+        keycode=hold.keycode,
+        flags=hold.modifiers,
+        hotkeys=[press, hold],
+        on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
+    )
+    from stt_cli.live import tap
+
+    watcher._handle(0, tap._KEY_DOWN, 1, 0)
+    assert hotkey_events == [(hold, True)], "the hold binding's own key-down, not the press one"
+
+    hotkey_events.clear()
+    watcher2, _fired2 = _watcher_with_fake_events(
+        monkeypatch,
+        keycode=press.keycode,
+        flags=press.modifiers,
+        hotkeys=[press, hold],
+        on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
+    )
+    watcher2._handle(0, tap._KEY_DOWN, 1, 0)
+    assert hotkey_events == [(press, True)], "and the press binding's own key-down, not hold's"
+
+
 def test_key_up_is_only_added_to_the_mask_when_a_hotkey_is_configured() -> None:
-    """A watcher with no hotkey must ask for exactly the same events it always did — adding
+    """A watcher with no hotkeys must ask for exactly the same events it always did — adding
     key-up unconditionally would be a behaviour change to the ad-hoc path for no reason."""
     from stt_cli.live import tap
 
-    no_hotkey_mask = tap._event_mask(None)
-    with_hotkey_mask = tap._event_mask(parse("cmd+shift+space"))
+    no_hotkey_mask = tap._event_mask(())
+    with_hotkey_mask = tap._event_mask([parse("cmd+shift+space")])
     assert not no_hotkey_mask & (1 << tap._KEY_UP), "no hotkey: key-up is not requested"
     assert with_hotkey_mask & (1 << tap._KEY_UP), "a hotkey: key-up IS requested"
     assert no_hotkey_mask & (1 << tap._KEY_DOWN), "key-down is always requested"
@@ -355,37 +457,116 @@ def test_key_up_is_only_added_to_the_mask_when_a_hotkey_is_configured() -> None:
     assert with_hotkey_mask == no_hotkey_mask | (1 << tap._KEY_UP), (
         "a hotkey adds exactly one bit to the ad-hoc mask, nothing else changes"
     )
+    # Two hotkeys ask for exactly the same mask as one — key-up is a single bit, not one
+    # per configured binding.
+    both = tap._event_mask([parse("cmd+shift+space"), parse("ctrl+opt+d")])
+    assert both == with_hotkey_mask
 
 
 # ── config round-trip ────────────────────────────────────────────────────────
 
 
-def test_hotkey_and_hotkey_mode_round_trip_through_config_coerce() -> None:
-    assert config.coerce("hotkey", "cmd+shift+d") == "cmd+shift+d"
-    assert config.coerce("hotkey_mode", "hold") == "hold"
-    assert "hotkey" in config.configurable()
-    assert "hotkey_mode" in config.configurable()
+def test_hotkey_press_and_hotkey_hold_round_trip_through_config_coerce() -> None:
+    assert config.coerce("hotkey_press", "cmd+shift+d") == "cmd+shift+d"
+    assert config.coerce("hotkey_hold", "ctrl+opt+d") == "ctrl+opt+d"
+    assert "hotkey_press" in config.configurable()
+    assert "hotkey_hold" in config.configurable()
 
 
-def test_validate_accepts_a_real_chord_and_a_real_mode() -> None:
+def test_validate_accepts_real_press_and_hold_chords(tmp_path, monkeypatch) -> None:
+    """End to end through the public entry point `stt config set` actually calls."""
     from stt_cli.live.hotkey import validate
 
-    validate("hotkey", "cmd+shift+d")  # must not raise
-    validate("hotkey_mode", "hold")  # must not raise
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    validate("hotkey_press", "cmd+shift+d")  # must not raise
+    validate("hotkey_hold", "ctrl+opt+d")  # must not raise
 
 
-def test_validate_refuses_a_bad_chord_with_a_clean_sttError_not_a_bare_valueerror() -> None:
-    """The bug a security review caught: `config.coerce` alone never calls `hotkey.parse`,
-    so `stt config set hotkey a` used to succeed and store an unusable value — surfacing
-    later as a raw, uncaught `HotkeyError` (a bare `ValueError`) the first time a daemon
-    tried to start, instead of the clean refusal every other bad setting gets."""
+def test_validate_refuses_a_shift_only_chord_for_either_binding(tmp_path, monkeypatch) -> None:
+    """A shift-only chord is refused for BOTH `hotkey_press` and `hotkey_hold` — an earlier
+    version relaxed `hotkey_hold` to accept shift alone, and that relaxation was reverted
+    (see hotkey.py's module docstring) once an independent review found `tap.py`'s
+    listen-only tap means a sustained `shift+d` hold reliably TYPES "d" into the document
+    being dictated into on every intentional use, not just on accidental collision."""
     from stt_cli._errors import SttError
     from stt_cli.live.hotkey import validate
 
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    with pytest.raises(SttError) as raised:
+        validate("hotkey_press", "shift+d")
+    assert "cmd or ctrl" in raised.value.why
+    with pytest.raises(SttError) as raised:
+        validate("hotkey_hold", "shift+d")
+    assert "cmd or ctrl" in raised.value.why
+
+
+def test_validate_refuses_a_bad_chord_with_a_clean_ssterror_not_a_bare_valueerror(
+    tmp_path, monkeypatch
+) -> None:
+    """The bug a security review caught: `config.coerce` alone never calls `hotkey.parse`,
+    so `stt config set hotkey_press a` used to succeed and store an unusable value —
+    surfacing later as a raw, uncaught `HotkeyError` (a bare `ValueError`) the first time a
+    daemon tried to start, instead of the clean refusal every other bad setting gets."""
+    from stt_cli._errors import SttError
+    from stt_cli.live.hotkey import validate
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
     with pytest.raises(SttError):
-        validate("hotkey", "a")
+        validate("hotkey_press", "a")
     with pytest.raises(SttError):
-        validate("hotkey_mode", "sometimes")
+        validate("hotkey_hold", "a")
+
+
+def test_validate_attributes_a_bad_error_to_the_stored_sibling_not_the_field_being_set(
+    tmp_path, monkeypatch
+) -> None:
+    """Found by review: an earlier version resolved ``value`` and the sibling's stored
+    value inside ONE shared `try`, so a `HotkeyError` raised by the sibling's already-
+    stored, unrelated bad value (a hand-edited `config.json`) was blamed on whichever field
+    was being SET — `stt config set hotkey_press cmd+shift+space` (a perfectly valid value)
+    would have been refused with a message saying `hotkey_press is not a valid...` when the
+    real problem was a broken `hotkey_hold` already sitting in the file. Each field's
+    failure must be attributed to the field that actually caused it."""
+    from stt_cli import config
+    from stt_cli._errors import SttError
+    from stt_cli.live.hotkey import validate
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    config.save_setting("hotkey_hold", "a")  # bypasses validate_extra — an invalid stored
+    # value only a hand-edited config.json (or this direct write) could produce.
+
+    with pytest.raises(SttError) as raised:
+        validate("hotkey_press", "cmd+shift+space")  # value itself is perfectly valid
+    assert "the stored hotkey_hold is invalid" in raised.value.what
+    assert "hotkey_press is not a valid" not in raised.value.what
+
+    # The symmetric case: a broken stored hotkey_press, a valid hotkey_hold being set.
+    config.unset_setting("hotkey_hold")
+    config.save_setting("hotkey_press", "a")
+    with pytest.raises(SttError) as raised:
+        validate("hotkey_hold", "ctrl+opt+d")
+    assert "the stored hotkey_press is invalid" in raised.value.what
+    assert "hotkey_hold is not a valid" not in raised.value.what
+
+
+def test_validate_refuses_hotkey_press_and_hotkey_hold_sharing_a_key(tmp_path, monkeypatch) -> None:
+    """A single-field check cannot see this on its own — `validate` reads the OTHER field's
+    currently stored value to catch it. Refuses not just an identical chord but ANY shared
+    keycode, even with different modifiers (`cmd+d` / `ctrl+d`): a key-release only reports
+    which key was let go, not which modifiers were held, so `tap.Watcher` cannot tell two
+    bindings sharing a key apart on release — see `hotkey.same_keycode`."""
+    from stt_cli._errors import SttError
+    from stt_cli.commands.config_cmd import _set
+    from stt_cli.live.hotkey import validate
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    _set("hotkey_press", "cmd+shift+d")
+    with pytest.raises(SttError, match="same key"):
+        validate("hotkey_hold", "cmd+shift+d")  # identical chord
+    with pytest.raises(SttError, match="same key"):
+        validate("hotkey_hold", "shift+cmd+d")  # same keycode/modifiers, different spec order
+    with pytest.raises(SttError, match="same key"):
+        validate("hotkey_hold", "ctrl+d")  # same keycode, genuinely DIFFERENT modifiers
 
 
 def test_setting_a_bad_hotkey_through_the_cli_is_refused_not_stored(tmp_path, monkeypatch) -> None:
@@ -394,80 +575,108 @@ def test_setting_a_bad_hotkey_through_the_cli_is_refused_not_stored(tmp_path, mo
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
     with pytest.raises(SttError):
-        _set("hotkey", "a")
-    assert config.load_settings().hotkey is None, "the bad value was never stored"
+        _set("hotkey_press", "a")
+    assert config.load_settings().hotkey_press is None, "the bad value was never stored"
 
 
 def test_setting_a_bad_hotkey_through_the_tui_is_refused_not_stored(tmp_path, monkeypatch) -> None:
     from stt_cli.commands._configtui import apply_edit
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
-    ok, message = apply_edit("hotkey", "shift+a")
+    ok, message = apply_edit("hotkey_press", "shift+a")
     assert not ok
     assert message
-    assert config.load_settings().hotkey is None, "the bad value was never stored"
+    assert config.load_settings().hotkey_press is None, "the bad value was never stored"
 
 
-# ── the daemon's own state machine (Toggle / edges), no fake hardware needed ─
+# ── the daemon's own state machine (_HotkeyBus / edges), no fake hardware needed ─
 
 
-async def test_toggle_marshals_presses_onto_the_loop_queue() -> None:
-    from stt_cli.live.dictation import _Toggle
+async def test_hotkey_bus_marshals_combo_and_pressed_onto_the_loop_queue() -> None:
+    from stt_cli.live.dictation import _HotkeyBus
 
-    toggle = _Toggle(asyncio.get_running_loop())
-    toggle(True)
-    toggle(False)
-    assert await toggle.events.get() is True
-    assert await toggle.events.get() is False
+    combo = parse("cmd+shift+space")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    bus(combo, True)
+    bus(combo, False)
+    assert await bus.events.get() == (combo, True)
+    assert await bus.events.get() == (combo, False)
 
 
-async def test_next_hotkey_edge_returns_false_when_shutdown_wins() -> None:
-    from stt_cli.live.dictation import _next_hotkey_edge, _Toggle
+async def test_next_hotkey_edge_returns_none_when_shutdown_wins() -> None:
+    from stt_cli.live.dictation import _HotkeyBus, _next_hotkey_edge
 
-    toggle = _Toggle(asyncio.get_running_loop())
+    bus = _HotkeyBus(asyncio.get_running_loop())
     shutdown = asyncio.Event()
     shutdown.set()
-    assert await _next_hotkey_edge(toggle, shutdown) is False
+    assert await _next_hotkey_edge(bus, shutdown) is None
 
 
-async def test_next_hotkey_edge_returns_the_press() -> None:
-    from stt_cli.live.dictation import _next_hotkey_edge, _Toggle
+async def test_next_hotkey_edge_returns_the_edge() -> None:
+    from stt_cli.live.dictation import _HotkeyBus, _next_hotkey_edge
 
-    toggle = _Toggle(asyncio.get_running_loop())
-    toggle(True)
-    assert await _next_hotkey_edge(toggle, asyncio.Event()) is True
+    combo = parse("cmd+shift+space")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    bus(combo, True)
+    assert await _next_hotkey_edge(bus, asyncio.Event()) == (combo, True)
 
 
-async def test_shutdown_wins_a_press_already_queued_when_it_fires() -> None:
-    """A hotkey press sitting in the queue when `stt mic stop`/Ctrl-C arrives must not start
+async def test_shutdown_wins_an_edge_already_queued_when_it_fires() -> None:
+    """A hotkey edge sitting in the queue when `stt mic stop`/Ctrl-C arrives must not start
     a burst: `asyncio.wait` can resolve both tasks in the same wakeup, and a version of this
-    that checked the press unconditionally opened the microphone right after the user had
+    that checked the edge unconditionally opened the microphone right after the user had
     just asked the daemon to stop."""
-    from stt_cli.live.dictation import _next_hotkey_edge, _Toggle
+    from stt_cli.live.dictation import _HotkeyBus, _next_hotkey_edge
 
-    toggle = _Toggle(asyncio.get_running_loop())
-    toggle(True)
+    combo = parse("cmd+shift+space")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    bus(combo, True)
     shutdown = asyncio.Event()
     shutdown.set()
-    assert await _next_hotkey_edge(toggle, shutdown) is False
+    assert await _next_hotkey_edge(bus, shutdown) is None
 
 
-async def test_await_release_toggle_mode_ignores_release_ends_on_next_press() -> None:
-    from stt_cli.live.dictation import _await_release, _Toggle
+async def test_await_release_press_kind_ignores_release_ends_on_next_press_of_same_combo() -> None:
+    from stt_cli.live.dictation import _await_release, _HotkeyBus
 
-    toggle = _Toggle(asyncio.get_running_loop())
-    toggle(False)
-    toggle(True)
-    await asyncio.wait_for(_await_release(toggle, "toggle"), timeout=1)
+    combo = parse("cmd+shift+space")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    bus(combo, False)
+    bus(combo, True)
+    assert await asyncio.wait_for(_await_release(bus, combo, "press"), timeout=1) is True
 
 
-async def test_await_release_in_hold_mode_ignores_a_stray_press_and_ends_on_release() -> None:
-    from stt_cli.live.dictation import _await_release, _Toggle
+async def test_await_release_hold_kind_ignores_a_stray_press_and_ends_on_release() -> None:
+    from stt_cli.live.dictation import _await_release, _HotkeyBus
 
-    toggle = _Toggle(asyncio.get_running_loop())
-    toggle(True)
-    toggle(False)
-    await asyncio.wait_for(_await_release(toggle, "hold"), timeout=1)
+    combo = parse("cmd+shift+space")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    bus(combo, True)
+    bus(combo, False)
+    assert await asyncio.wait_for(_await_release(bus, combo, "hold"), timeout=1) is True
+
+
+async def test_await_release_ignores_edges_from_the_other_configured_binding() -> None:
+    """The other half of "the daemon correctly watches both bindings concurrently": a burst
+    armed by ONE binding must not be ended (or confused) by the OTHER binding firing
+    mid-burst — `_await_release` consumes and drops any edge that is not its own `armed`
+    combo, leaving it out of the queue for whatever comes next rather than misfiring."""
+    from stt_cli.live.dictation import _await_release, _HotkeyBus
+
+    press = parse("cmd+shift+space")
+    hold = parse("ctrl+opt+d")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+
+    # A hold-armed burst is running; the press binding fires (start AND stop) mid-burst —
+    # neither edge may end this hold burst.
+    bus(press, True)
+    bus(press, False)
+    task = asyncio.create_task(_await_release(bus, hold, "hold"))
+    await asyncio.sleep(0.02)
+    assert not task.done(), "the other binding's edges must not end this burst"
+
+    bus(hold, False)  # the actual release that DOES end it
+    assert await asyncio.wait_for(task, timeout=1) is True
 
 
 # ── the full idle -> burst -> idle -> shutdown cycle, with a fake tap and mic ─
@@ -477,7 +686,7 @@ class _FakeWatcher:
     """Stands in for `tap.Watcher`: no thread, no real CGEventTap — just remembers the
     callbacks so a test can fire them directly, the way a real hotkey press would."""
 
-    def __init__(self, *, marker, on_key, hotkey=None, on_hotkey=None) -> None:
+    def __init__(self, *, marker, on_key, hotkeys=(), on_hotkey=None) -> None:
         self.on_key = on_key
         self.on_hotkey = on_hotkey
         self.failure: str | None = None
@@ -492,8 +701,8 @@ class _FakeWatcher:
 
 async def _burst_audio():
     """One real utterance, then an open mic that keeps streaming quiet forever — so the
-    burst only ends when the daemon's own stop logic (the toggle, or Escape-twice) says so,
-    the same way a real held-open microphone would."""
+    burst only ends when the daemon's own stop logic (the hotkey) says so, the same way a
+    real held-open microphone would."""
     yield SPEECH
     yield SILENCE
     while True:
@@ -519,10 +728,11 @@ def _wire_fakes(monkeypatch):
     typed: list[str] = []
     monkeypatch.setattr(dictation.quartz, "type_text", lambda text, *, marker: typed.append(text))
     monkeypatch.setattr(dictation.quartz, "press_backspace", lambda times, *, marker: None)
+    monkeypatch.setattr(dictation.status, "notifier_available", lambda: False)
     watchers: list[_FakeWatcher] = []
 
-    def fake_watcher(*, marker, on_key, hotkey=None, on_hotkey=None):
-        watcher = _FakeWatcher(marker=marker, on_key=on_key, hotkey=hotkey, on_hotkey=on_hotkey)
+    def fake_watcher(*, marker, on_key, hotkeys=(), on_hotkey=None):
+        watcher = _FakeWatcher(marker=marker, on_key=on_key, hotkeys=hotkeys, on_hotkey=on_hotkey)
         watchers.append(watcher)
         return watcher
 
@@ -536,7 +746,7 @@ def _wire_fakes(monkeypatch):
     return typed, watchers
 
 
-async def test_the_daemon_idles_then_dictates_on_the_hotkey_toggle_and_returns_to_idle(
+async def test_the_daemon_idles_then_dictates_on_the_press_binding_and_returns_to_idle(
     monkeypatch,
 ) -> None:
     from stt_cli.live import capture as capture_mod
@@ -547,30 +757,78 @@ async def test_the_daemon_idles_then_dictates_on_the_hotkey_toggle_and_returns_t
     models = dictation.Models(settled=_Answering("Привет!"), draft=None)
     settings = config.Settings(dictionary=False)
     device = capture_mod.Device(index=0, name="fake mic")
-    combo = hotkey_mod.parse("cmd+shift+space")
+    press = hotkey_mod.parse("cmd+shift+space")
     args = argparse.Namespace(quiet=True, idle_minutes=None)
 
-    task = asyncio.create_task(
-        dictation._idle_loop(args, device, models, settings, combo, "toggle")
-    )
+    task = asyncio.create_task(dictation._idle_loop(args, device, models, settings, press, None))
     await asyncio.sleep(0)
     assert watchers, "the daemon installs its keyboard watcher before idling"
     watcher = watchers[0]
 
-    watcher.on_hotkey(True)  # first press: start dictating
+    watcher.on_hotkey(press, True)  # first press: start dictating
     for _ in range(50):
         await asyncio.sleep(0)
         if typed:
             break
     assert typed == ["Привет!"], "the burst actually opened the mic and typed what it heard"
 
-    watcher.on_hotkey(True)  # second press (toggle mode): stop this burst
+    watcher.on_hotkey(press, True)  # second press (press binding = toggle): stop this burst
     await asyncio.sleep(0.05)
 
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
     assert watcher.stopped, "the tap is released when the daemon exits"
+
+
+async def test_the_daemon_watches_both_bindings_concurrently(monkeypatch) -> None:
+    """Ticket #79's central claim: `hotkey_press` and `hotkey_hold` are both live in the
+    SAME daemon at once, not a mode switch on one chord. Runs a press-armed toggle burst,
+    then — in the SAME running daemon, no restart — a hold-armed push-to-talk burst on a
+    DIFFERENT chord, and checks both actually dictated."""
+    from stt_cli.live import capture as capture_mod
+    from stt_cli.live import dictation
+    from stt_cli.live import hotkey as hotkey_mod
+
+    typed, watchers = _wire_fakes(monkeypatch)
+    models = dictation.Models(settled=_Answering("Привет!"), draft=None)
+    settings = config.Settings(dictionary=False)
+    device = capture_mod.Device(index=0, name="fake mic")
+    press = hotkey_mod.parse("cmd+shift+space")
+    hold = hotkey_mod.parse("ctrl+opt+d")
+    args = argparse.Namespace(quiet=True, idle_minutes=None)
+
+    task = asyncio.create_task(dictation._idle_loop(args, device, models, settings, press, hold))
+    await asyncio.sleep(0)
+    watcher = watchers[0]
+
+    # The press binding: one press starts, a second (of the SAME chord) stops.
+    watcher.on_hotkey(press, True)
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if typed:
+            break
+    assert typed == ["Привет!"]
+    watcher.on_hotkey(press, True)
+    await asyncio.sleep(0.05)
+
+    # The hold binding, on a different chord entirely: press arms it, release ends it —
+    # a second press of the SAME hold chord must NOT end it (push-to-talk, not toggle).
+    watcher.on_hotkey(hold, True)
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if len(typed) == 2:
+            break
+    assert typed == ["Привет!", "Привет!"], "the hold binding dictated too, same daemon"
+    watcher.on_hotkey(hold, True)  # a spurious second press mid-hold must not end it
+    await asyncio.sleep(0.02)
+    watcher.on_hotkey(hold, False)  # the actual release ends it
+    await asyncio.sleep(0.05)
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert watcher.stopped
 
 
 async def test_a_key_press_reaches_the_live_session_but_not_a_dead_one(
@@ -596,16 +854,14 @@ async def test_a_key_press_reaches_the_live_session_but_not_a_dead_one(
     models = dictation.Models(settled=_Answering("Привет!"), draft=None)
     settings = config.Settings(dictionary=False)
     device = capture_mod.Device(index=0, name="fake mic")
-    combo = hotkey_mod.parse("cmd+shift+space")
+    press = hotkey_mod.parse("cmd+shift+space")
     args = argparse.Namespace(quiet=True, idle_minutes=None)
 
-    task = asyncio.create_task(
-        dictation._idle_loop(args, device, models, settings, combo, "toggle")
-    )
+    task = asyncio.create_task(dictation._idle_loop(args, device, models, settings, press, None))
     await asyncio.sleep(0)
     watcher = watchers[0]
 
-    watcher.on_hotkey(True)  # first press: start dictating
+    watcher.on_hotkey(press, True)  # first press: start dictating
     for _ in range(50):
         await asyncio.sleep(0)
         if typed:
@@ -615,7 +871,7 @@ async def test_a_key_press_reaches_the_live_session_but_not_a_dead_one(
     watcher.on_key(0)  # mid-burst: must reach the live session
     assert len(interrupted) == 1, "a key pressed during the burst never reached the session"
 
-    watcher.on_hotkey(True)  # second press (toggle mode): stop this burst
+    watcher.on_hotkey(press, True)  # second press (press binding = toggle): stop this burst
     await asyncio.sleep(0.05)
 
     watcher.on_key(0)  # a key pressed once idle again — must be dropped, not forwarded
@@ -701,23 +957,21 @@ async def test_a_burst_that_fails_returns_to_idle_instead_of_ending_the_daemon(
     models = dictation.Models(settled=_Answering("Привет!"), draft=None)
     settings = config.Settings(dictionary=False)
     device = capture_mod.Device(index=0, name="fake mic")
-    combo = hotkey_mod.parse("cmd+shift+space")
+    press = hotkey_mod.parse("cmd+shift+space")
     args = argparse.Namespace(quiet=True, idle_minutes=None)
 
-    task = asyncio.create_task(
-        dictation._idle_loop(args, device, models, settings, combo, "toggle")
-    )
+    task = asyncio.create_task(dictation._idle_loop(args, device, models, settings, press, None))
     await asyncio.sleep(0)
     watcher = watchers[0]
 
-    watcher.on_hotkey(True)  # first press: the mic fails to open
+    watcher.on_hotkey(press, True)  # first press: the mic fails to open
     for _ in range(50):
         await asyncio.sleep(0)
         if attempts >= 1 and not task.done():
             break
     assert not task.done(), "the daemon survived the failed burst — this is the whole point"
 
-    watcher.on_hotkey(True)  # second press: a real burst, proving the daemon is still alive
+    watcher.on_hotkey(press, True)  # second press: a real burst, proving the daemon is alive
     for _ in range(50):
         await asyncio.sleep(0)
         if _typed:
@@ -729,18 +983,180 @@ async def test_a_burst_that_fails_returns_to_idle_instead_of_ending_the_daemon(
         await task
 
 
-async def test_a_release_in_hold_mode_ends_the_burst_a_second_press_does_not() -> None:
-    """Distinguishes hold from toggle at the one place that matters: what ends a burst."""
-    from stt_cli.live.dictation import _await_release, _Toggle
+async def test_a_release_in_hold_kind_ends_the_burst_a_second_press_does_not() -> None:
+    """Distinguishes hold from press at the one place that matters: what ends a burst."""
+    from stt_cli.live.dictation import _await_release, _HotkeyBus
 
-    toggle = _Toggle(asyncio.get_running_loop())
-    toggle(True)  # a second press while holding must NOT end a hold-mode burst
-    task = asyncio.create_task(_await_release(toggle, "hold"))
+    combo = parse("ctrl+opt+d")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    bus(combo, True)  # a second press while holding must NOT end a hold-kind burst
+    task = asyncio.create_task(_await_release(bus, combo, "hold"))
     await asyncio.sleep(0.05)
-    assert not task.done(), "hold mode is not over yet — only a release ends it"
-    toggle(False)
+    assert not task.done(), "hold is not over yet — only a release ends it"
+    bus(combo, False)
     await asyncio.wait_for(task, timeout=1)
     assert task.done()
+
+
+def test_ready_hint_lists_only_the_bindings_that_are_actually_configured() -> None:
+    from stt_cli.live import hotkey as hotkey_mod
+    from stt_cli.live.dictation import _ready_hint
+
+    press = hotkey_mod.parse("cmd+shift+space")
+    hold = hotkey_mod.parse("ctrl+opt+d")
+
+    both = _ready_hint(press, hold)
+    assert "cmd+shift+space" in both and "ctrl+opt+d" in both
+
+    press_only = _ready_hint(press, None)
+    assert "cmd+shift+space" in press_only and "ctrl+opt+d" not in press_only
+
+
+def test_notification_absence_note_is_empty_when_available_and_explicit_when_not(
+    monkeypatch,
+) -> None:
+    """The exact spot ticket #79 names for the daemon's startup banner: silent when the
+    notification Stop button works, explicit (naming the install hint) when it does not."""
+    from stt_cli.live import dictation, status
+
+    monkeypatch.setattr(status, "notifier_available", lambda: True)
+    assert dictation._notification_absence_note() == ""
+
+    monkeypatch.setattr(status, "notifier_available", lambda: False)
+    note = dictation._notification_absence_note()
+    assert status.INSTALL_HINT in note
+
+
+def test_off_hint_uses_the_shared_stop_hint_for_press_and_hold(monkeypatch) -> None:
+    from stt_cli.live import hotkey as hotkey_mod
+    from stt_cli.live import status
+    from stt_cli.live.dictation import _off_hint
+
+    monkeypatch.setattr(status, "notifier_available", lambda: True)
+    press = hotkey_mod.parse("cmd+shift+space")
+    hold = hotkey_mod.parse("ctrl+opt+d")
+    assert (
+        _off_hint("press", press)
+        == "press cmd+shift+space again, or click Stop on the notification, to finish"
+    )
+    assert (
+        _off_hint("hold", hold)
+        == "release ctrl+opt+d, or click Stop on the notification, to finish"
+    )
+
+
+def test_refuse_colliding_hotkey_flags_catches_shared_keycode_before_enable_installs_anything(
+    tmp_path, monkeypatch
+) -> None:
+    """Found by the pre-commit review gate: `--hotkey-press cmd+d --hotkey-hold ctrl+d` are
+    each individually valid (their own `type=` callback only checks one field at a time),
+    but sharing a keycode with different modifiers would leave a hold burst's microphone
+    unable to end (see `hotkey.same_keycode`). `_lifecycle` calls this right after parsing,
+    BEFORE `enable` can install a launchd `LaunchAgent` for a daemon doomed to crash-loop.
+    `STT_HOME` is isolated to an empty `tmp_path` because the fix for the enable-time gap
+    below means this now reads stored config even for the single-flag cases."""
+    import argparse
+
+    from stt_cli._errors import UsageError
+    from stt_cli.commands.mic import _refuse_colliding_hotkey_flags
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    with pytest.raises(UsageError, match="same key"):
+        _refuse_colliding_hotkey_flags(
+            argparse.Namespace(hotkey_press="cmd+d", hotkey_hold="ctrl+d", action="enable")
+        )
+    # Distinct keys must never be refused.
+    _refuse_colliding_hotkey_flags(
+        argparse.Namespace(
+            hotkey_press="cmd+shift+space", hotkey_hold="ctrl+opt+d", action="enable"
+        )
+    )
+    # Neither flag given, and an action that does not install/detach a daemon: a no-op —
+    # `status`/`stop`/`disable` have no reason to care whether a hotkey is configured.
+    _refuse_colliding_hotkey_flags(
+        argparse.Namespace(hotkey_press=None, hotkey_hold=None, action="status")
+    )
+
+
+def test_refuse_colliding_hotkey_flags_resolves_the_unspecified_side_from_stored_config(
+    tmp_path, monkeypatch
+) -> None:
+    """The enable-time cross-validation gap: an earlier version returned early whenever
+    EITHER flag was `None`, so `stt mic enable --hotkey-hold cmd+shift+space` (leaving
+    `--hotkey-press` unset) silently collided with the built-in `hotkey_press` default —
+    installing a `LaunchAgent` that crash-loops forever, diagnosable only after the fact.
+    The fix resolves the unspecified side from stored config/the built-in default before
+    comparing, mirroring `hotkey.validate`'s own `config.load_settings()` pattern."""
+    import argparse
+
+    from stt_cli._errors import UsageError
+    from stt_cli.commands.mic import _refuse_colliding_hotkey_flags
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
+    # hotkey_press left unset (nothing stored either) resolves to the built-in default
+    # cmd+shift+space — a --hotkey-hold that reuses that exact key must be refused.
+    with pytest.raises(UsageError, match="same key"):
+        _refuse_colliding_hotkey_flags(
+            argparse.Namespace(hotkey_press=None, hotkey_hold="cmd+shift+space", action="enable")
+        )
+    # The symmetric case: hotkey_hold left unset but stored in config.json, and a
+    # --hotkey-press given on this invocation reuses its key.
+    from stt_cli.commands.config_cmd import _set
+
+    _set("hotkey_hold", "ctrl+opt+d")
+    with pytest.raises(UsageError, match="same key"):
+        _refuse_colliding_hotkey_flags(
+            argparse.Namespace(hotkey_press="ctrl+opt+d", hotkey_hold=None, action="enable")
+        )
+    # A single flag with no collision on either the default or the stored side must still
+    # be accepted — the fix must not become a false positive for the ordinary case.
+    _refuse_colliding_hotkey_flags(
+        argparse.Namespace(hotkey_press="cmd+shift+space", hotkey_hold=None, action="enable")
+    )
+
+
+def test_refuse_colliding_hotkey_flags_catches_both_bindings_disabled_on_enable(
+    tmp_path, monkeypatch
+) -> None:
+    """Found by review: an earlier version of the enable-time guard checked collisions
+    only, so `stt config set hotkey_press none` (disabling the default, `hotkey_hold` never
+    set) followed by a BARE `stt mic enable` — no flags at all — used to return immediately
+    from the "neither flag given" early-out before ever resolving stored config, silently
+    installing a `LaunchAgent` for a daemon with nothing that could ever open the
+    microphone: an immediate, guaranteed crash loop on every restart (`KeepAlive`), the
+    exact failure class ticket #54 was filed from. `dictation._resolved_hotkeys` already
+    refused this identical state at daemon-start time — this is the same refusal, moved
+    earlier, before anything is installed."""
+    import argparse
+
+    from stt_cli._errors import UsageError
+    from stt_cli.commands.config_cmd import _set
+    from stt_cli.commands.mic import _refuse_colliding_hotkey_flags
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    _set("hotkey_press", "none")
+
+    # A bare `stt mic enable` with NO flags at all — the exact repro.
+    with pytest.raises(UsageError, match="no hotkey is configured"):
+        _refuse_colliding_hotkey_flags(
+            argparse.Namespace(hotkey_press=None, hotkey_hold=None, action="enable")
+        )
+    # `start` gets the identical refusal — it installs/detaches a daemon too.
+    with pytest.raises(UsageError, match="no hotkey is configured"):
+        _refuse_colliding_hotkey_flags(
+            argparse.Namespace(hotkey_press=None, hotkey_hold=None, action="start")
+        )
+    # `status`/`stop`/`disable` must NOT be refused for the same stored state — they have
+    # no reason to care whether a hotkey is configured at all.
+    for action in ("status", "stop", "disable"):
+        _refuse_colliding_hotkey_flags(
+            argparse.Namespace(hotkey_press=None, hotkey_hold=None, action=action)
+        )
+    # An explicit --hotkey-press on `enable` rescues it, same stored hotkey_hold=disabled.
+    _refuse_colliding_hotkey_flags(
+        argparse.Namespace(hotkey_press="cmd+shift+space", hotkey_hold=None, action="enable")
+    )
 
 
 # ── mic.py CLI plumbing ───────────────────────────────────────────────────────
@@ -750,7 +1166,15 @@ def test_daemon_flags_round_trip_into_the_serve_argv() -> None:
     from stt_cli.commands.mic import _daemon_extra_argv, _daemon_parser
 
     ns = _daemon_parser().parse_args(
-        ["--hotkey", "cmd+shift+d", "--hotkey-mode", "hold", "--model", "small", "--quiet"]
+        [
+            "--hotkey-press",
+            "cmd+shift+d",
+            "--hotkey-hold",
+            "ctrl+opt+d",
+            "--model",
+            "small",
+            "--quiet",
+        ]
     )
     argv = _daemon_extra_argv(ns)
     assert argv == [
@@ -758,44 +1182,90 @@ def test_daemon_flags_round_trip_into_the_serve_argv() -> None:
         "small",
         "--draft-model",
         "base",
-        "--hotkey",
+        "--hotkey-press",
         "cmd+shift+d",
-        "--hotkey-mode",
-        "hold",
+        "--hotkey-hold",
+        "ctrl+opt+d",
         "--quiet",
     ]
 
 
-def test_an_invalid_hotkey_flag_is_refused_at_parse_time_not_a_crash(capsys) -> None:
-    """`stt mic enable --hotkey d` bakes its argv into a launchd LaunchAgent with
+def test_an_invalid_hotkey_press_flag_is_refused_at_parse_time_not_a_crash(capsys) -> None:
+    """`stt mic enable --hotkey-press d` bakes its argv into a launchd LaunchAgent with
     KeepAlive — a spec that only failed once the daemon actually started would crash-loop
     it, reloading both models on every restart. argparse's own `type=` rejects it before
     any of that (a clean `SystemExit(2)`, not a traceback)."""
     from stt_cli.commands.mic import _daemon_parser
 
     with pytest.raises(SystemExit) as raised:
-        _daemon_parser().parse_args(["--hotkey", "d"])
+        _daemon_parser().parse_args(["--hotkey-press", "d"])
     assert raised.value.code == 2
     assert "modifier" in capsys.readouterr().err
 
 
+def test_an_invalid_hotkey_hold_flag_is_refused_at_parse_time_same_as_press(
+    capsys,
+) -> None:
+    """`--hotkey-hold` is validated through `resolve_hold`, not `resolve_press`, but the two
+    now share the same strong-modifier rule (cmd or ctrl) after the shift-for-hold
+    relaxation was reverted — a shift-only chord trips the same argparse-time refusal for
+    either flag."""
+    from stt_cli.commands.mic import _daemon_parser
+
+    with pytest.raises(SystemExit) as raised:
+        _daemon_parser().parse_args(["--hotkey-hold", "shift+d"])
+    assert raised.value.code == 2
+    assert "cmd or ctrl" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as raised:
+        _daemon_parser().parse_args(["--hotkey-hold", "opt+d"])
+    assert raised.value.code == 2
+    assert "cmd or ctrl" in capsys.readouterr().err
+
+
 def test_a_hotkey_thats_invalid_only_in_stored_config_is_a_diagnosed_refusal() -> None:
-    """argparse only guards `--hotkey`; a hand-edited config.json can still store a bad
-    value, and that path must fail the same clean way — a raw `HotkeyError` is a `ValueError`
-    subclass `guard()` does not catch, which would surface as an unhandled traceback."""
+    """argparse only guards `--hotkey-press`/`--hotkey-hold`; a hand-edited config.json can
+    still store a bad value, and that path must fail the same clean way — a raw
+    `HotkeyError` is a `ValueError` subclass `guard()` does not catch, which would surface
+    as an unhandled traceback."""
     from stt_cli import config
     from stt_cli._errors import UsageError
-    from stt_cli.live.dictation import _resolved_hotkey
+    from stt_cli.live.dictation import _resolved_hotkeys
 
     with pytest.raises(UsageError, match="hotkey"):
-        _resolved_hotkey(config.Settings(hotkey="d"))
+        _resolved_hotkeys(config.Settings(hotkey_press="d"))
+
+
+def test_a_stored_hotkey_press_and_hold_that_share_a_key_is_a_diagnosed_refusal() -> None:
+    """The same-key collision `hotkey.validate` refuses at set-time must be refused AGAIN
+    here for a hand-edited `config.json` that reached that state anyway — this is the exact
+    bug an independent review found before this shipped: `cmd+d`/`ctrl+d` pass `same_chord`
+    (different modifiers) but share a keycode, and `tap.Watcher`'s release handler cannot
+    tell them apart, leaving a hold burst's microphone open forever."""
+    from stt_cli import config
+    from stt_cli._errors import UsageError
+    from stt_cli.live.dictation import _resolved_hotkeys
+
+    with pytest.raises(UsageError, match="same key"):
+        _resolved_hotkeys(config.Settings(hotkey_press="cmd+shift+d", hotkey_hold="shift+cmd+d"))
+    with pytest.raises(UsageError, match="same key"):
+        _resolved_hotkeys(config.Settings(hotkey_press="cmd+d", hotkey_hold="ctrl+d"))
+
+
+def test_both_hotkeys_disabled_is_a_diagnosed_refusal_not_a_silent_dead_daemon() -> None:
+    from stt_cli import config
+    from stt_cli._errors import UsageError
+    from stt_cli.live.dictation import _resolved_hotkeys
+
+    with pytest.raises(UsageError, match="no hotkey"):
+        _resolved_hotkeys(config.Settings(hotkey_press="none", hotkey_hold="none"))
 
 
 def test_reordered_for_argparse_moves_the_lifecycle_word_to_the_end() -> None:
     from stt_cli.commands.mic import _reordered_for_argparse
 
-    assert _reordered_for_argparse(["start", "--hotkey", "cmd+shift+x"]) == [
-        "--hotkey",
+    assert _reordered_for_argparse(["start", "--hotkey-press", "cmd+shift+x"]) == [
+        "--hotkey-press",
         "cmd+shift+x",
         "start",
     ]
@@ -804,8 +1274,8 @@ def test_reordered_for_argparse_moves_the_lifecycle_word_to_the_end() -> None:
 
 
 def test_daemon_flags_after_the_lifecycle_word_actually_parse() -> None:
-    """The bug a security review caught: `stt mic start --hotkey X` — the only order this
-    file's own help text and the README show — used to be handed to an empty per-action
+    """The bug a security review caught: `stt mic start --hotkey-press X` — the only order
+    this file's own help text and the README show — used to be handed to an empty per-action
     subparser (built by `add_service_subcommands`, which defines no flags of its own) and
     rejected as unrecognized. Reproduces the real parser shape (a parent with `_daemon_parser`'s
     flags, subparsers with none) without needing `agenttools_service` installed."""
@@ -817,9 +1287,11 @@ def test_daemon_flags_after_the_lifecycle_word_actually_parse() -> None:
     for name in ("run", "start", "status", "stop", "enable", "disable"):
         subs.add_parser(name)
 
-    ns = parser.parse_args(_reordered_for_argparse(["start", "--hotkey", "cmd+shift+x", "--quiet"]))
+    ns = parser.parse_args(
+        _reordered_for_argparse(["start", "--hotkey-press", "cmd+shift+x", "--quiet"])
+    )
     assert ns.action == "start"
-    assert ns.hotkey == "cmd+shift+x"
+    assert ns.hotkey_press == "cmd+shift+x"
     assert ns.quiet is True
 
     with pytest.raises(SystemExit):
@@ -827,7 +1299,7 @@ def test_daemon_flags_after_the_lifecycle_word_actually_parse() -> None:
         # (argparse's own "unrecognized arguments" on the un-reordered argv) — assert against
         # the un-reordered call specifically so a future accidental removal of the reorder
         # is caught by the FIRST assertion above failing, not silently passing this one too.
-        parser.parse_args(["start", "--hotkey", "cmd+shift+x"])
+        parser.parse_args(["start", "--hotkey-press", "cmd+shift+x"])
 
 
 def test_a_bare_lifecycle_word_without_the_shared_lib_names_the_install_fix(
@@ -859,10 +1331,10 @@ def test_run_dispatches_the_hidden_serve_token_to_the_daemon(monkeypatch) -> Non
         called.append(args)
 
     monkeypatch.setattr(dictation, "dictate_daemon", fake_daemon)
-    exit_code = mic.run(["__serve", "--hotkey", "cmd+shift+d"])
+    exit_code = mic.run(["__serve", "--hotkey-press", "cmd+shift+d"])
     assert exit_code == 0
     assert len(called) == 1
-    assert called[0].hotkey == "cmd+shift+d"  # type: ignore[attr-defined]
+    assert called[0].hotkey_press == "cmd+shift+d"  # type: ignore[attr-defined]
 
 
 def test_mic_service_serve_argv_points_at_bin_stt_in_a_source_checkout() -> None:
@@ -878,14 +1350,14 @@ def test_mic_service_serve_argv_points_at_bin_stt_in_a_source_checkout() -> None
 
     from stt_cli.live.mic_service import SERVE_TOKEN, _serve_argv
 
-    argv = _serve_argv(["--hotkey", "cmd+shift+d"])
+    argv = _serve_argv(["--hotkey-press", "cmd+shift+d"])
     repo_root = Path(__file__).resolve().parent.parent
     assert argv == [
         sys.executable,
         str(repo_root / "bin" / "stt"),
         "mic",
         SERVE_TOKEN,
-        "--hotkey",
+        "--hotkey-press",
         "cmd+shift+d",
     ]
 
@@ -902,14 +1374,14 @@ def test_mic_service_serve_argv_falls_back_to_the_module_form_for_a_real_install
     from stt_cli.live import mic_service
 
     monkeypatch.setattr(mic_service, "_dev_wrapper", lambda: None)
-    argv = mic_service._serve_argv(["--hotkey", "cmd+shift+d"])
+    argv = mic_service._serve_argv(["--hotkey-press", "cmd+shift+d"])
     assert argv == [
         sys.executable,
         "-m",
         "stt_cli.cli",
         "mic",
         mic_service.SERVE_TOKEN,
-        "--hotkey",
+        "--hotkey-press",
         "cmd+shift+d",
     ]
 

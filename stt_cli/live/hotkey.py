@@ -15,19 +15,91 @@ WHY A HOTKEY MUST CARRY A MODIFIER
     A hotkey with no modifier would fire on every ordinary letter the user types while a
     daemon is idle, which is not a hotkey, it is a keylogger that occasionally opens a
     microphone. `parse` refuses one.
+
+WHY TWO INDEPENDENT BINDINGS, NOT ONE CHORD WITH A MODE
+    An earlier version of this module had one configurable `hotkey` plus a `hotkey_mode`
+    ("toggle" or "hold") that decided what THAT chord meant — so choosing hold-to-talk cost
+    you the toggle chord entirely, and vice versa. `resolve_press`/`resolve_hold` below
+    are two independent, optionally-set chords instead: press-style (arm on a press, arm
+    OFF on the next press of the same chord) and hold-style (arm on press, arm off on
+    release) can both be configured and both be live in the same daemon at once — see
+    `dictation._watch_daemon`, which now watches for whichever of the two is configured.
+
+WHY HOLD DOES NOT RELAX THE MODIFIER RULE EITHER, EVEN THOUGH IT LOOKED LIKE IT COULD
+    A press binding fires on a single, momentary key-down — indistinguishable from one
+    ordinary keystroke of the exact same key+modifiers, which is why shift/opt/fn are all
+    refused alone (see WHY A HOTKEY MUST CARRY A MODIFIER). A hold binding looked, at
+    first, like it could afford to relax that: it does not just need an ordinary keystroke
+    to ARM, it needs the SAME chord held down, unchanged, for the whole length of a burst —
+    seconds, not milliseconds — to STAY armed, and shift+key sustained for that long is not
+    something anybody does in ORDINARY, UNRELATED typing (holding shift+key just spams the
+    OS's own key-repeat of one capital letter, which nobody means to sustain by accident).
+    An earlier version of this module shipped exactly that relaxation — accepting shift
+    alone for `hotkey_hold` — and it was WRONG, caught by an independent review before this
+    shipped, for a reason the "accidental collision" framing above never considers: it is
+    not about what happens by ACCIDENT, it is about what happens on every INTENTIONAL use.
+
+    `tap.py`'s tap is LISTEN-ONLY (see its own module docstring) — it observes every key
+    event, but never blocks one from reaching whatever has focus. Command and Control are
+    safe to hold because macOS never uses them, alone or with a letter, to insert a
+    character into a text field; an app either binds Cmd+D/Ctrl+D to a shortcut or ignores
+    it outright, and either way nothing is TYPED. Shift is fundamentally different: holding
+    Shift+D does not merely risk colliding with something else — it reliably, on every
+    keyboard, in every text field, TYPES the letter D, then repeats it via the OS's own
+    key-repeat, for as long as the chord stays down. A hold binding using `shift+d` would
+    therefore corrupt the very document being dictated into on every single legitimate use
+    of the feature, not as an edge case but as the guaranteed, designed-in behavior — the
+    burst's own "hold the hotkey while you talk" is indistinguishable, to the OS, from
+    "hold Shift+D while you talk," and the second one types.
+
+    Option was never a candidate for the same underlying reason, just reached by a
+    different route: Option types a dead-key accent or symbol under many letters (opt+e
+    starts é), so opt+key held down has the identical self-typing problem PLUS the
+    sustained-hold collision already documented above (opt+arrow/opt+delete repeat a
+    word-jump/word-delete during ordinary editing). Fn does not type a character for an
+    ordinary letter, but is excluded for the sustained-hold collision on its own two key
+    families (fn+arrow/fn+delete repeat a page-scroll/forward-delete). No weak modifier
+    survives BOTH tests — "never types a character when held" and "never collides with an
+    ordinary sustained hold" — the way Command and Control already do, which is why
+    `_STRONG_MODIFIERS_HOLD` is, after this correction, identical to
+    `_STRONG_MODIFIERS_PRESS`: both require Command or Control, full stop. Kept as two
+    separately named constants rather than one, because the two are safe for genuinely
+    different reasons (press: a single ordinary keystroke must never arm it; hold: NEITHER
+    an ordinary keystroke NOR the sustained hold itself may arm it or corrupt the
+    document), and a future, more narrowly-scoped relaxation for one of them — a modifier
+    combination proven never to type a character under any layout, restricted to key
+    families with no known sustained-hold side effect — has a named place to live without
+    re-deriving this whole investigation from scratch.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
-VALID_MODES = ("toggle", "hold")
-DEFAULT_MODE = "toggle"
-# Used when `hotkey` is unset in both config and `--hotkey`. Cmd+Shift+Space is not bound by
-# macOS itself and collides with nothing in Terminal, VS Code, Safari or Chrome as shipped —
-# checked by hand against each application's own Keyboard Shortcuts panel. It is still just a
-# starting point: `stt config set hotkey ...` (or the TUI) is how you make it yours.
-DEFAULT_HOTKEY = "cmd+shift+space"
+# The two independent ways a binding can arm/disarm a burst — "press" arms on a press and
+# disarms on the NEXT press of the same chord (a toggle); "hold" arms on press and disarms
+# on release (push-to-talk). Which one applies to a burst is a fact about WHICH binding
+# fired (`hotkey_press` vs `hotkey_hold`), never a separate setting — see the module
+# docstring. A `Literal` rather than a runtime tuple of choices (the old `VALID_MODES`) on
+# purpose: nothing parses this from user input any more, so mypy checking every branch that
+# switches on it is worth more than a runtime membership test nothing calls.
+BindingKind = Literal["press", "hold"]
+# Used when `hotkey_press` is unset in both config and `--hotkey-press`. Cmd+Shift+Space is
+# not bound by macOS itself and collides with nothing in Terminal, VS Code, Safari or Chrome
+# as shipped — checked by hand against each application's own Keyboard Shortcuts panel. It
+# is still just a starting point: `stt config set hotkey_press ...` (or the TUI) is how you
+# make it yours. `hotkey_hold` has no default of its own — it starts unset (disabled), since
+# there is no chord that is obviously right for a push-to-talk style nobody asked for yet.
+DEFAULT_PRESS_HOTKEY = "cmd+shift+space"
+# What a person types to turn OFF a binding. Checked case- and whitespace-insensitively;
+# empty string is also accepted, so `stt config set hotkey_hold ""` and leaving it unset
+# mean the same thing (both "disabled" — `hotkey_hold` has no default to fall back to).
+# For `hotkey_press` the two are DELIBERATELY different: unset falls back to
+# `DEFAULT_PRESS_HOTKEY`, while an explicit disable word (including `""`) turns it off —
+# `stt config set hotkey_press ""` is not the same as `stt config unset hotkey_press`, and
+# the only way to silence the built-in default entirely is the explicit word.
+_DISABLE_WORDS = frozenset({"", "none", "off"})
 
 
 class HotkeyError(ValueError):
@@ -45,19 +117,40 @@ _ALTERNATE = 1 << 19
 _COMMAND = 1 << 20
 _FN = 1 << 23
 RELEVANT_FLAGS = _SHIFT | _CONTROL | _ALTERNATE | _COMMAND | _FN
-# Shift alone does not make a chord safe: every capital letter and every shifted symbol
-# ("!", "@", "$", ...) a person types ordinarily is shift+key, so a hotkey that only
-# required shift would fire constantly during normal typing — exactly the "keylogger that
-# occasionally opens a microphone" failure the module docstring warns about, just gated on
-# capitalization instead of on nothing at all.
+# Shift alone does not make a PRESS/toggle chord safe: every capital letter and every
+# shifted symbol ("!", "@", "$", ...) a person types ordinarily is shift+key, so a toggle
+# that only required shift would fire constantly during normal typing — exactly the
+# "keylogger that occasionally opens a microphone" failure the module docstring warns
+# about, just gated on capitalization instead of on nothing at all.
 #
-# Option and Fn are not safe either, even though neither is used for capitalization: Option
-# is how macOS types a dead-key accent (opt+e/u/n start é/ü/ñ) and punctuation (opt+space is
-# a non-breaking space), and Fn is the laptop-keyboard route to Home/End/PageUp/PageDown
-# (fn+left/right/up/down) — both are things people press constantly while doing nothing
-# hotkey-like at all. Only Command and Control are never, on their own, how macOS itself
-# produces a character or a navigation event; `parse` requires at least one of them.
-_STRONG_MODIFIERS = _CONTROL | _COMMAND
+# Option and Fn are not safe for PRESS either, even though neither is used for
+# capitalization: Option is how macOS types a dead-key accent (opt+e/u/n start é/ü/ñ) and
+# punctuation (opt+space is a non-breaking space), and Fn is the laptop-keyboard route to
+# Home/End/PageUp/PageDown (fn+left/right/up/down) — both are things people press
+# constantly while doing nothing hotkey-like at all. Only Command and Control are never,
+# on their own, how macOS itself produces a character or a navigation event; `parse`
+# requires at least one of them for a press binding.
+#
+# A HOLD binding stays down for a burst-length few seconds, so it asks a SECOND question a
+# press never has to: does holding this modifier+key down, unbroken, for that whole span
+# ALSO type into whatever has focus — since `tap.py`'s tap is listen-only and never blocks
+# the real event. Command and Control pass both tests (never a single ordinary keystroke,
+# never a sustained one either — no app-independent OS behaviour types a character for
+# either of them). Shift fails the SECOND test even though it looked like it might pass the
+# first: an earlier version of this constant added Shift for hold on exactly that "nobody
+# sustains it by accident" reasoning, and an independent review caught the real problem —
+# holding Shift+D is not an accident to guard against, it is the feature's own INTENDED
+# behaviour, and it reliably types "D" (then repeats it) into the document being dictated
+# into for the whole burst. Option fails both tests (opt+letter types an accent AND
+# opt+arrow/opt+delete repeat a word-jump/word-delete). Fn fails the second test alone
+# (fn+arrow/fn+delete repeat a page-scroll/forward-delete) even though it never types a
+# character for an ordinary letter. See the module docstring's "WHY HOLD DOES NOT RELAX THE
+# MODIFIER RULE EITHER" section for the full investigation, including the relaxation this
+# replaced and why it was wrong. `_STRONG_MODIFIERS_HOLD` is therefore identical to
+# `_STRONG_MODIFIERS_PRESS` — kept as two named constants because the two are safe for
+# different reasons, not because the required bits currently differ.
+_STRONG_MODIFIERS_PRESS = _CONTROL | _COMMAND
+_STRONG_MODIFIERS_HOLD = _STRONG_MODIFIERS_PRESS
 
 _MODIFIERS: dict[str, int] = {
     "cmd": _COMMAND,
@@ -191,8 +284,16 @@ class Combo:
         return keycode == self.keycode
 
 
-def parse(spec: str) -> Combo:
-    """``"cmd+shift+space"`` -> a :class:`Combo`, or a :class:`HotkeyError` saying why not."""
+def parse(spec: str, *, kind: BindingKind = "press") -> Combo:
+    """``"cmd+shift+space"`` -> a :class:`Combo`, or a :class:`HotkeyError` saying why not.
+
+    ``kind`` selects which strong-modifier rule applies — "press" (the default, matching
+    every existing caller that does not name a binding) and "hold" both require cmd or
+    ctrl today (`_STRONG_MODIFIERS_PRESS`/`_STRONG_MODIFIERS_HOLD` are currently the same
+    value). See the module docstring's "WHY HOLD DOES NOT RELAX THE MODIFIER RULE EITHER"
+    section for why a relaxation was investigated, shipped, and then reverted, and the
+    comment above `_STRONG_MODIFIERS_HOLD` for why the parameter still exists.
+    """
     if not spec or not spec.strip():
         raise HotkeyError("a hotkey cannot be empty — e.g. `cmd+shift+space`")
     parts = [p.strip().lower() for p in spec.split("+")]
@@ -214,11 +315,13 @@ def parse(spec: str) -> Combo:
                 f"{name!r} in {spec!r} is not a modifier — use cmd, shift, ctrl, opt or fn"
             )
         mask |= _MODIFIERS[name]
-    if not mask & _STRONG_MODIFIERS:
+    strong = _STRONG_MODIFIERS_HOLD if kind == "hold" else _STRONG_MODIFIERS_PRESS
+    if not mask & strong:
         raise HotkeyError(
             f"{spec!r} has no cmd or ctrl — shift, opt and fn are all things macOS itself "
-            "uses during ordinary typing and navigation, so a chord needs cmd or ctrl too, "
-            f"e.g. `cmd+{spec}`"
+            "uses during ordinary typing and navigation (and, held down, opt/fn+arrow or "
+            "delete repeat an edit while shift+key keeps typing the letter itself), so a "
+            f"chord needs cmd or ctrl too, e.g. `cmd+{spec}`"
         )
     if key not in _KEYCODES:
         raise HotkeyError(
@@ -228,42 +331,144 @@ def parse(spec: str) -> Combo:
     return Combo(keycode=_KEYCODES[key], modifiers=mask, spec="+".join(parts))
 
 
-def resolve(configured: str | None) -> Combo:
-    """The hotkey a daemon should actually listen for: ``configured``, or the built-in
-    default when nobody has set one. Raises :class:`HotkeyError` on a bad spec either way —
-    including a bad *default*, which would otherwise fail silently the one time it matters.
+def _disabled(configured: str | None) -> bool:
+    return configured is not None and configured.strip().lower() in _DISABLE_WORDS
+
+
+def _resolve_binding(
+    configured: str | None, *, default: str | None, kind: BindingKind
+) -> Combo | None:
+    """One binding's chord: ``configured``, the binding's own ``default`` if nothing was
+    configured, or ``None`` if the binding is explicitly disabled (``configured`` is one of
+    `_DISABLE_WORDS`) — shared by `resolve_press`/`resolve_hold` so the "unset means the
+    default, an explicit disable-word means off" rule is written once. ``kind`` is forwarded
+    to `parse` unchanged, so each binding is validated against ITS OWN strong-modifier rule.
     """
-    return parse(configured if configured else DEFAULT_HOTKEY)
+    if configured is None:
+        return parse(default, kind=kind) if default is not None else None
+    if _disabled(configured):
+        return None
+    return parse(configured, kind=kind)
 
 
-def resolve_mode(configured: str | None) -> str:
-    """The activation mode a daemon should use: ``configured``, or the default, validated."""
-    mode = (configured or DEFAULT_MODE).strip().lower()
-    if mode not in VALID_MODES:
-        raise HotkeyError(f"{mode!r} is not a hotkey mode — use {' or '.join(VALID_MODES)}")
-    return mode
+def resolve_press(configured: str | None) -> Combo | None:
+    """The press-style (toggle) binding a daemon should listen for: ``configured``, the
+    built-in default when nobody has set one, or ``None`` when explicitly disabled (`stt
+    config set hotkey_press none`). Raises :class:`HotkeyError` on a bad spec, including a
+    bad *default*, which would otherwise fail silently the one time it matters — validated
+    against the PRESS strong-modifier rule (`_STRONG_MODIFIERS_PRESS`: cmd or ctrl only).
+    """
+    return _resolve_binding(configured, default=DEFAULT_PRESS_HOTKEY, kind="press")
+
+
+def resolve_hold(configured: str | None) -> Combo | None:
+    """The hold-style (push-to-talk) binding a daemon should listen for, or ``None`` when
+    nobody has configured one — unlike `resolve_press` there is no built-in default to fall
+    back to, so "unset" and "disabled" resolve the same way. Validated against the HOLD
+    strong-modifier rule (`_STRONG_MODIFIERS_HOLD`), currently identical to press's (cmd or
+    ctrl only) — see the module docstring's "WHY HOLD DOES NOT RELAX THE MODIFIER RULE
+    EITHER" section for why a relaxation looked possible and was not safe.
+    """
+    return _resolve_binding(configured, default=None, kind="hold")
+
+
+def same_chord(a: Combo, b: Combo) -> bool:
+    """Would ``a`` and ``b`` fire on the exact same physical key event?
+
+    Deliberately not `Combo.__eq__` (which also compares `spec`): "shift+cmd+space" and
+    "cmd+shift+space" parse to the same keycode and the same modifier mask but a DIFFERENT
+    `spec` string (modifier order is preserved for `--help`/status text), so the equality
+    operator would call them different chords when what matters here — can `hotkey_press`
+    and `hotkey_hold` both be armed by literally the same key-down — says they are not.
+    """
+    return a.keycode == b.keycode and a.modifiers == b.modifiers
+
+
+def same_keycode(a: Combo, b: Combo) -> bool:
+    """Would ``a`` and ``b`` fire on a key-UP for the SAME physical key, regardless of which
+    modifiers were held at the time it went down?
+
+    `Combo.released` deliberately ignores modifiers (see its own docstring: whichever
+    modifier the hand lets go of first already has its own bit cleared by the time the
+    key-up arrives), which means `tap.Watcher` cannot tell two bindings sharing a keycode
+    apart on release AT ALL — not just when they also share the same modifiers. Two chords
+    that pass `same_chord` (different) but share a keycode — ``cmd+d`` and ``ctrl+d`` — are
+    just as broken: holding and releasing ``ctrl+d`` fires a release keyed only on ``d``,
+    which `tap.Watcher` attributes to whichever configured combo it checks FIRST (`cmd+d`,
+    since `hotkey_press` is always listed before `hotkey_hold` — see
+    `dictation._watch_daemon`), so the hold binding's own `_await_release` never sees its
+    release and the microphone stays open until the 30-minute idle timeout. `same_chord` is
+    a strict subset of this (identical keycode AND identical modifiers implies identical
+    keycode) — `validate`/`dictation._resolved_hotkeys` check this one instead, which
+    refuses everything `same_chord` would have and the keycode-only collision besides.
+    """
+    return a.keycode == b.keycode
 
 
 def validate(key: str, value: str) -> None:
     """Raise a clean, catchable error if ``value`` is not legal for ``key``
-    (``"hotkey"``/``"hotkey_mode"``) — called at the moment ``stt config set``/the TUI store
-    it, not left for `resolve`/`resolve_mode` to discover the first time a daemon tries to
-    start. That gap was real: an invalid `hotkey` stored this way, uncaught until
-    `dictate_daemon` called `resolve`, surfaced as a raw traceback (`HotkeyError` is a
+    (``"hotkey_press"``/``"hotkey_hold"``) — called at the moment ``stt config set``/the TUI
+    store it, not left for `resolve_press`/`resolve_hold` to discover the first time a
+    daemon tries to start. That gap was real: an invalid `hotkey` stored this way, uncaught
+    until `dictate_daemon` resolved it, surfaced as a raw traceback (`HotkeyError` is a
     `ValueError`, not an `SttError` the CLI's top-level handler recognises) instead of the
     clean refusal every other bad setting in this codebase gets — and would have crashed the
     config TUI outright, since its own error handling only catches `SttError`.
+
+    Also refuses the one thing a single-field check cannot see on its own: `hotkey_press`
+    and `hotkey_hold` resolving to combos that share a KEYCODE — not just an identical chord
+    — by reading the OTHER field's currently stored value. A key-release carries only the
+    keycode, not the modifiers (`Combo.released`), so two bindings sharing a key are
+    ambiguous on release even with different modifiers — see `same_keycode`. A daemon
+    started from a hand-edited `config.json` that reached this same state anyway is caught
+    by the identical check in `dictation._resolved_hotkeys`.
+
+    ``value`` and the OTHER field's stored value are resolved in two SEPARATE `try` blocks,
+    not one shared one — found by review: a single shared `try` blamed whichever field was
+    being SET for a `HotkeyError` that actually came from the sibling's already-stored,
+    unrelated bad value (a hand-edited `config.json`'s `hotkey_hold` gone invalid would have
+    made `stt config set hotkey_press cmd+shift+space` — a perfectly valid value — refused
+    with a message blaming `hotkey_press`). Each field's own failure is now attributed to
+    the field that actually caused it.
     """
+    from .. import config
     from .._errors import UsageError
 
+    sibling = "hotkey_hold" if key == "hotkey_press" else "hotkey_press"
     try:
-        if key == "hotkey":
-            parse(value)
-        elif key == "hotkey_mode":
-            resolve_mode(value)
+        if key == "hotkey_press":
+            press = resolve_press(value)
+        elif key == "hotkey_hold":
+            hold = resolve_hold(value)
+        else:
+            return
     except HotkeyError as bad:
         raise UsageError(
             what=f"{key} is not a valid {key.replace('_', ' ')}",
             why=str(bad),
-            how=f"stt config set {key} <a value from --help>, or leave it unset for the default",
+            how=f"stt config set {key} <a chord, e.g. cmd+shift+d>, or "
+            f"`stt config set {key} none` to disable it",
         ) from bad
+    try:
+        if key == "hotkey_press":
+            hold = resolve_hold(config.load_settings().hotkey_hold)
+        else:
+            press = resolve_press(config.load_settings().hotkey_press)
+    except HotkeyError as bad:
+        raise UsageError(
+            what=f"the stored {sibling} is invalid",
+            why=str(bad),
+            how=f"stt config set {sibling} <a chord, e.g. cmd+shift+d>, or "
+            f"`stt config set {sibling} none` to disable it",
+        ) from bad
+    if press is not None and hold is not None and same_keycode(press, hold):
+        raise UsageError(
+            what="hotkey_press and hotkey_hold cannot use the same key",
+            why=f"{press.spec!r} and {hold.spec!r} both use the same physical key — a key "
+            "RELEASE only reports which key was let go, not which modifiers were held with "
+            "it, so releasing either could be misattributed to the other binding and leave "
+            "the microphone open indefinitely",
+            how="pick two different keys for hotkey_press and hotkey_hold (the modifiers "
+            "may still differ), or `stt config set hotkey_hold none` (or hotkey_press) to "
+            "disable the one you do not need",
+        )

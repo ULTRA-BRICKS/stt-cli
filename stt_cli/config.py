@@ -114,16 +114,19 @@ class Settings:
     # doing. Zero means the detector's own default. Raise it in a room where stray noises get
     # typed; lower it if a quiet voice goes unheard. `stt mic --check` reports both numbers.
     mic_threshold: float = 0.0
-    # The global chord that starts/stops a background `stt mic` daemon (`live/hotkey.py`),
-    # e.g. "cmd+shift+space". None means nobody has chosen one, which `hotkey.resolve` reads
-    # as "use the built-in default" — the same None-means-unset convention `language` and
-    # `timezone` already use, so a fresh install still states a real default in `--help`
-    # without this file hard-coding what that default is.
-    hotkey: str | None = None
-    # "toggle" (press once to start, again to stop) or "hold" (dictate only while held).
-    # None resolves through `hotkey.resolve_mode` the same way `hotkey` resolves through
-    # `hotkey.resolve` — one place owns the actual default word.
-    hotkey_mode: str | None = None
+    # The two independent global chords a background `stt mic` daemon listens for
+    # (`live/hotkey.py`), e.g. "cmd+shift+space" — press-style (arm on a press, disarm on
+    # the NEXT press of the same chord) and hold-style (arm on press, disarm on release),
+    # both settable at once. `hotkey_press` unset means "use the built-in default"
+    # (`hotkey.resolve_press` reads that, the same None-means-unset convention `language`
+    # and `timezone` already use); `hotkey_hold` unset means simply "disabled" — there is no
+    # built-in default for a push-to-talk style nobody asked for. Either can also be
+    # EXPLICITLY disabled (`stt config set hotkey_press none`) rather than merely unset, to
+    # turn off a binding that would otherwise default to armed. Never both the same chord —
+    # `hotkey.validate` refuses that at set-time, `dictation._resolved_hotkeys` refuses it
+    # again at daemon-start time for a hand-edited config.json.
+    hotkey_press: str | None = None
+    hotkey_hold: str | None = None
 
     # voice activity detection
     vad: str = "auto"  # auto | silero | ffmpeg | none

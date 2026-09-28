@@ -2,7 +2,7 @@
 
 WHY THIS EXISTS
     `stt config list`/`get`/`set` are precise and scriptable, and precise and scriptable is
-    a bad way to discover that `hotkey_mode` exists, what it does, or what values it takes.
+    a bad way to discover that `hotkey_hold` exists, what it does, or what values it takes.
     Typing a setting name correctly is the wrong first step for somebody who does not yet
     know the name — they know roughly what they want ("make Ctrl-C during dictation act
     differently", "I want Russian by default") and have to guess the rest. This screen is
@@ -52,7 +52,7 @@ from ._keycodes import (
 GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("engine", ("backend", "model", "language", "threads", "whispercpp_root")),
     ("context", ("context", "context_compare")),
-    ("push-to-talk", ("hotkey", "hotkey_mode", "mic_threshold")),
+    ("push-to-talk", ("hotkey_press", "hotkey_hold", "mic_threshold")),
     (
         "voice detection",
         ("vad", "vad_threshold", "vad_min_silence_ms", "vad_speech_pad_ms", "vad_min_speech_ms"),
@@ -74,8 +74,8 @@ HELP: dict[str, str] = {
     "whispercpp_root": "path to a whisper.cpp checkout, if it is not on PATH",
     "context": "how much of the model's own previous output feeds back as context",
     "context_compare": "cross-check against a context-off decode to catch a self-reinforcing loop",
-    "hotkey": "the global chord that starts/stops the `stt mic` background daemon",
-    "hotkey_mode": "toggle (press twice) or hold (push-to-talk) for the mic daemon's hotkey",
+    "hotkey_press": "press-style chord for the `stt mic` daemon (press again to stop)",
+    "hotkey_hold": "hold-style chord for push-to-talk; unset disables it (no default)",
     "mic_threshold": "how loud a frame must be to count as speech; 0 uses the built-in bar",
     "vad": "which voice activity detector finds speech in the audio",
     "vad_threshold": "silero's speech-probability cutoff, 0.0 to 1.0",
@@ -110,7 +110,8 @@ HELP: dict[str, str] = {
 EXAMPLES: dict[str, tuple[str, ...]] = {
     "model": ("large-v3-turbo", "small", "base"),
     "language": ("ru", "en", "auto"),
-    "hotkey": ("cmd+shift+space", "ctrl+opt+d", "cmd+shift+semicolon"),
+    "hotkey_press": ("cmd+shift+space", "ctrl+opt+d", "cmd+shift+semicolon", "none"),
+    "hotkey_hold": ("ctrl+opt+d", "cmd+shift+semicolon", "none"),
     "timezone": ("Europe/Belgrade", "UTC", "America/New_York"),
     "variant_models": ("small,medium",),
     "formats": ("txt,md", "txt,srt,vtt"),
@@ -123,14 +124,12 @@ def _choices() -> dict[str, tuple[str, ...]]:
     """Fixed value sets, one source of truth each — imported lazily (and only from modules
     that are themselves cheap) so this screen's own import stays light."""
     from .. import backends, llm
-    from ..live import hotkey as hotkey_mod
     from ..pipeline import COMPARE_MODES
 
     return {
         "backend": ("auto", *backends.ORDER),
         "context": ("off", "short", "full"),
         "context_compare": COMPARE_MODES,
-        "hotkey_mode": hotkey_mod.VALID_MODES,
         "vad": ("auto", "silero", "ffmpeg", "none"),
         "fix_with": ("auto", *llm.ORDER),
         "text_variant": ("fixed", "raw", "both"),

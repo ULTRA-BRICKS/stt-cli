@@ -20,12 +20,13 @@ TELLING OUR OWN KEYSTROKES APART
 WHAT THIS TAP IS NOT ALLOWED TO BECOME
     A system-wide key-down tap is a keylogger with a different name. The defence that
     actually holds is that a key code never leaves this file for anything but a comparison:
-    the session is told THAT a key was pressed and, for the one hotkey it listens for, WHICH
-    — a hotkey the caller supplied, compared here and reported only as pressed/released, the
-    same rule the original single hotkey (Escape) always followed. Nothing here writes a key
-    code to a log, a file, or the archive, and nothing may start doing so. There is no reason
-    live dictation needs the content of what the user typed by hand, and every reason it
-    must not have it.
+    the session is told THAT a key was pressed and, for the hotkeys it listens for (zero,
+    one, or two — a press-style and a hold-style binding may both be configured at once),
+    WHICH ONE — each supplied by the caller, compared here and reported only as
+    pressed/released, the same rule the original single hotkey (Escape) always followed.
+    Nothing here writes a key code to a log, a file, or the archive, and nothing may start
+    doing so. There is no reason live dictation needs the content of what the user typed by
+    hand, and every reason it must not have it.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from __future__ import annotations
 import ctypes
 import secrets
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from .hotkey import Combo
 from .quartz import _Frameworks, frameworks
@@ -78,17 +79,17 @@ def new_marker() -> int:
     return secrets.randbits(62) + 1
 
 
-def _event_mask(hotkey: Combo | None) -> int:
+def _event_mask(hotkeys: Sequence[Combo]) -> int:
     """The `CGEventTapCreate` mask for a watcher: key-down and every caret-moving button
-    always; key-up ONLY when a hotkey is configured (needed solely to notice its release —
-    see `_KEY_UP` and `_handle`). Pure and free of `_run`'s ctypes plumbing so a test can
-    check the actual bits a hotkey-less watcher asks for, not just assert the mask constant
-    differs from itself.
+    always; key-up ONLY when at least one hotkey is configured (needed solely to notice its
+    release — see `_KEY_UP` and `_handle`). Pure and free of `_run`'s ctypes plumbing so a
+    test can check the actual bits a hotkey-less watcher asks for, not just assert the mask
+    constant differs from itself.
     """
     mask = 1 << _KEY_DOWN
     for button in _MOUSE_DOWN:
         mask |= 1 << button
-    if hotkey is not None:
+    if hotkeys:
         mask |= 1 << _KEY_UP
     return mask
 
@@ -110,12 +111,12 @@ class Watcher:
         *,
         marker: int,
         on_key: Callable[[int], None],
-        hotkey: Combo | None = None,
-        on_hotkey: Callable[[bool], None] | None = None,
+        hotkeys: Sequence[Combo] = (),
+        on_hotkey: Callable[[Combo, bool], None] | None = None,
     ) -> None:
         self._marker = marker
         self._on_key = on_key
-        self._hotkey = hotkey
+        self._hotkeys = tuple(hotkeys)
         self._on_hotkey = on_hotkey
         self._loop: int | None = None
         self._ready = threading.Event()
@@ -180,31 +181,37 @@ class Watcher:
         if stamp == self._marker:
             return event
         code = int(api.services.CGEventGetIntegerValueField(ctypes.c_void_p(event), _KEYCODE_FIELD))
-        hotkey, on_hotkey = self._hotkey, self._on_hotkey
+        hotkeys, on_hotkey = self._hotkeys, self._on_hotkey
         if kind == _KEY_UP:
-            # Only reachable when `_run` put key-up in the mask, which it does only for a
-            # configured hotkey (see `_run`) — every watcher without one never receives this
-            # kind at all. It exists solely to notice the hotkey's own release and must never
-            # reach `on_key`: a release was never "the user typed something", and treating it
-            # as one would fire the correction-interrupt twice per activation.
-            if hotkey is not None and on_hotkey is not None and hotkey.released(code):
-                on_hotkey(False)
+            # Only reachable when `_run` put key-up in the mask, which it does only when at
+            # least one hotkey is configured (see `_run`) — every watcher with none never
+            # receives this kind at all. It exists solely to notice a hotkey's own release
+            # and must never reach `on_key`: a release was never "the user typed something",
+            # and treating it as one would fire the correction-interrupt twice per
+            # activation.
+            if on_hotkey is not None:
+                for combo in hotkeys:
+                    if combo.released(code):
+                        on_hotkey(combo, False)
+                        break  # configured hotkeys never share a keycode — see hotkey.validate
             return event
-        if kind == _KEY_DOWN and hotkey is not None and on_hotkey is not None:
+        if kind == _KEY_DOWN and on_hotkey is not None:
             flags = int(api.services.CGEventGetFlags(ctypes.c_void_p(event)))
-            if hotkey.matches(code, flags):
-                autorepeat = api.services.CGEventGetIntegerValueField(
-                    ctypes.c_void_p(event), _AUTOREPEAT_FIELD
-                )
-                if not autorepeat:
-                    on_hotkey(True)
-                # Deliberately falls through to `on_key` below — see the docstring.
+            for combo in hotkeys:
+                if combo.matches(code, flags):
+                    autorepeat = api.services.CGEventGetIntegerValueField(
+                        ctypes.c_void_p(event), _AUTOREPEAT_FIELD
+                    )
+                    if not autorepeat:
+                        on_hotkey(combo, True)
+                    # Deliberately falls through to `on_key` below — see the docstring.
+                    break
         self._on_key(code if kind == _KEY_DOWN else -1)
         return event
 
     def _run(self) -> None:
         api = _declare(frameworks())
-        mask = _event_mask(self._hotkey)
+        mask = _event_mask(self._hotkeys)
         port = api.services.CGEventTapCreate(
             _SESSION_TAP, _HEAD_INSERT, _LISTEN_ONLY, mask, self._trampoline, None
         )

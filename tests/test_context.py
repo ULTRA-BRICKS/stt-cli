@@ -951,7 +951,14 @@ def test_an_explicit_context_compare_off_survives_fix() -> None:
     assert archive.fingerprint(implied) != archive.fingerprint(chosen)
 
 
-def test_the_cli_marks_context_compare_as_chosen_only_when_it_is_given() -> None:
+def test_the_cli_marks_context_compare_as_chosen_only_when_it_is_given(
+    tmp_path, monkeypatch
+) -> None:
+    """Isolated from the real `config.json`: `_settings` merges stored config over CLI
+    defaults, so a stray key OR a stored `context_compare` on the shared machine's real
+    file would make this a test of that file, not of the CLI flag this test actually
+    checks."""
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
     assert _settings_from(["a.m4a", "--fix"]).context_compare_chosen is False
     assert _settings_from(["a.m4a", "--fix", "--context-compare", "off"]).context_compare_chosen
 
