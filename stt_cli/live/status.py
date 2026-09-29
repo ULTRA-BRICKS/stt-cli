@@ -19,13 +19,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import os
 import random
+import re
 import shutil
 import subprocess
 import sys
 import unicodedata
 import wave
 from array import array
+from collections.abc import Iterator
 from pathlib import Path
 
 # The cue is generated rather than borrowed. macOS ships fourteen sounds and none of them
@@ -96,6 +99,12 @@ class Line:
     NEW-line-per-update artefact through anything that is not a real terminal (a `\\r`-to-`\\n`
     text-mode reader, `subprocess.Popen(text=True)`, most log/capture tooling). That is a
     property of the reader, not a bug here — see ticket #89 for the full live reproduction.
+
+    A bare `\\r` also only works while the line fits on ONE physical row: it returns to the
+    start of the row the cursor is on, so a frame the terminal wrapped leaves its first rows
+    behind, and every repaint adds another copy of them (#100 — a 50-column phone terminal).
+    So every frame, padding included, is fitted to the width of the terminal it is written
+    to — standard error, measured again at each repaint so a resize between two frames counts.
     """
 
     def __init__(self, *, enabled: bool = True) -> None:
@@ -105,18 +114,68 @@ class Line:
     def show(self, text: str) -> None:
         if not self.enabled:
             return
-        room = max(20, shutil.get_terminal_size((80, 24)).columns - 1)
+        room = _room()
         painted = _within(text, room)
         width = _columns(painted)
-        sys.stderr.write("\r" + painted + " " * max(0, self._width - width))
+        # The erase is capped as well: after the terminal narrows, padding out to the old
+        # frame's width would wrap on its own.
+        sys.stderr.write("\r" + painted + " " * max(0, min(self._width, room) - width))
         sys.stderr.flush()
         self._width = width
 
     def clear(self) -> None:
         if self.enabled and self._width:
-            sys.stderr.write("\r" + " " * self._width + "\r")
+            sys.stderr.write("\r" + " " * min(self._width, _room()) + "\r")
             sys.stderr.flush()
             self._width = 0
+
+
+def _room() -> int:
+    """How many columns a repainted frame may use: one short of the terminal's width.
+
+    Measured on standard error, the stream the line is written to. `shutil.get_terminal_size`
+    is the wrong question: it reads `COLUMNS` first (set once, stale after a resize) and then
+    measures standard OUTPUT, which is a file for `stt mic > notes.txt` — so it answered 80
+    for a 50-column terminal. The last column is left empty because writing into it puts some
+    terminals into a pending wrap that the next character, or the `\\r`, resolves differently.
+    """
+    try:
+        columns = os.get_terminal_size(sys.stderr.fileno()).columns
+    except (AttributeError, OSError, ValueError):
+        columns = 0
+    if columns <= 0:
+        # A pty that never had a size set reports zero; the environment's guess beats none.
+        columns = shutil.get_terminal_size((80, 24)).columns
+    return max(1, columns - 1)
+
+
+# Zero-width on screen: CSI (colour, cursor), OSC (title, hyperlink) and two-byte escapes.
+_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+_RESET = "\x1b[0m"
+
+
+def _cells(text: str) -> Iterator[tuple[str, int]]:
+    """`text` as (piece, columns) pairs: an escape sequence costs nothing, a combining or
+    format character (an accent, a zero-width joiner, a variation selector) costs nothing, an
+    East Asian wide or fullwidth character costs two, and any other control character — a
+    newline in dictated text, a stray escape — is shown as a space, since it would otherwise
+    move the cursor off the row the next `\\r` returns to."""
+    at = 0
+    while at < len(text):
+        escape = _ESCAPE.match(text, at)
+        if escape:
+            yield escape.group(), 0
+            at = escape.end()
+            continue
+        mark = text[at]
+        at += 1
+        kind = unicodedata.category(mark)
+        if kind == "Cc":
+            yield " ", 1
+        elif kind in ("Mn", "Me", "Cf"):
+            yield mark, 0
+        else:
+            yield mark, 2 if unicodedata.east_asian_width(mark) in "WF" else 1
 
 
 def _columns(text: str) -> int:
@@ -129,22 +188,26 @@ def _columns(text: str) -> int:
     wrapped instead of fitting, and the erase that follows it was short by the difference and
     left the tail of the previous line on screen.
     """
-    return sum(2 if unicodedata.east_asian_width(mark) in "WF" else 1 for mark in text)
+    return sum(cost for _, cost in _cells(text))
 
 
 def _within(text: str, room: int) -> str:
-    """`text`, trimmed to fit `room` columns, with an ellipsis when anything was dropped."""
-    if _columns(text) <= room:
-        return text
+    """`text`, made printable on one row and trimmed to fit `room` columns, with an ellipsis
+    when anything was dropped. Escape sequences are kept, and a trimmed line that carried any
+    ends with a reset, so a colour cut off before its own reset does not leak past the line."""
+    pieces = list(_cells(text))
+    if sum(cost for _, cost in pieces) <= room:
+        return "".join(piece for piece, _ in pieces)
     kept: list[str] = []
     used = 0
-    for mark in text:
-        cost = _columns(mark)
+    styled = False
+    for piece, cost in pieces:
         if used + cost > room - 1:
             break
-        kept.append(mark)
+        kept.append(piece)
         used += cost
-    return "".join(kept) + "\N{HORIZONTAL ELLIPSIS}"
+        styled = styled or piece.startswith("\x1b")
+    return "".join(kept) + "\N{HORIZONTAL ELLIPSIS}" + (_RESET if styled else "")
 
 
 def note(message: str, *, quiet: bool = False) -> None:

@@ -11,10 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
+import io
 import math
+import os
+import re
 import struct
+import termios
 import threading
 import time
+import unicodedata
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -356,6 +362,146 @@ def test_the_status_line_is_measured_in_columns_not_characters() -> None:
     trimmed = status._within("日本語日本語", 6)
     assert status._columns(trimmed) <= 6, "it fits the room it was given"
     assert trimmed.endswith("\N{HORIZONTAL ELLIPSIS}"), "and says that something was dropped"
+
+
+class _NarrowTerminal(io.StringIO):
+    """Standard error on a terminal of a chosen width: everything written is kept, and the
+    width is a real pty's, so `os.get_terminal_size` measures it the way it measures a phone
+    connected through Moshi or ssh."""
+
+    def __init__(self, columns: int) -> None:
+        super().__init__()
+        self._leader, self._follower = os.openpty()
+        self.resize(columns)
+
+    def resize(self, columns: int) -> None:
+        fcntl.ioctl(self._follower, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
+
+    def isatty(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return self._follower
+
+    def close(self) -> None:
+        os.close(self._leader)
+        os.close(self._follower)
+        super().close()
+
+
+@pytest.fixture
+def narrow_terminal(monkeypatch):
+    """A 50-column terminal for standard error, with `COLUMNS` claiming 80 — the stale value
+    a shell exported before the phone rotated, and near enough the answer `shutil` gives when
+    standard output is a file rather than the terminal. Installed with `redirect_stderr` in
+    the test body: pytest's own capture replaces `sys.stderr` between setup and the call."""
+    terminal = _NarrowTerminal(50)
+    monkeypatch.setenv("COLUMNS", "80")
+    yield terminal
+    terminal.close()
+
+
+def _rows(written: str, columns: int) -> list[str]:
+    """What a terminal `columns` wide shows after `written`: escape sequences drawn as
+    nothing, auto-wrap after the last column, `\\r` back to the start of the CURRENT row, and
+    a wide character taking two cells."""
+    rows: list[list[str]] = [[]]
+    at = 0
+    for mark in re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", written):
+        if mark in "\r\n":
+            at = 0
+            if mark == "\n":
+                rows.append([])
+            continue
+        cost = 2 if unicodedata.east_asian_width(mark) in "WF" else 1
+        if unicodedata.combining(mark):
+            continue
+        if at + cost > columns:
+            rows.append([])
+            at = 0
+        row = rows[-1]
+        row.extend(" " * (at + cost - len(row)))
+        row[at : at + cost] = [mark] + [""] * (cost - 1)
+        at += cost
+    return ["".join(row).rstrip() for row in rows]
+
+
+def test_a_repainted_line_never_wraps_in_a_narrow_terminal(narrow_terminal) -> None:
+    """#100: Alex watches dictation on a 50-column phone terminal. The width was measured on
+    standard output (or read from a stale `COLUMNS`), so a frame 79 columns wide wrapped onto
+    two rows, and the bare `\\r` of the next repaint went back only to the second — leaving a
+    copy of the first row behind on every repaint: "● listening … text", over and over."""
+    from stt_cli.live import status
+
+    sentence = "so the thing I wanted to say is that the status line keeps stacking up"
+    words = sentence.split(" ")
+    with contextlib.redirect_stderr(narrow_terminal):
+        line = status.Line()
+        for count in range(1, len(words) + 1):
+            line.show(status.render(listening=True, text=" ".join(words[:count]), settled=False))
+        line.show(status.render(listening=True, text="日本語の文章" * 10, settled=True))
+        line.show(status.render(listening=True, text="a line\nwith a newline in it", settled=True))
+
+    written = narrow_terminal.getvalue()
+    frames = written.split("\r")[1:]
+    assert all(status._columns(frame) <= 49 for frame in frames), "every frame fits one row"
+    shown = [row for row in _rows(written, 50) if row]
+    assert shown == ["● listening  ✓ a line with a newline in it"], "one row, the latest"
+
+
+def test_a_resize_between_repaints_is_measured_and_the_erase_fits_too(narrow_terminal) -> None:
+    """A phone turned from landscape to portrait mid-sentence: the frame after the resize is
+    fitted to the new width, and so is the padding that erases the wider frame before it —
+    padded out to the old width, the erase itself wrapped. The same goes for the erase that
+    ends the session when the turn comes after the last frame."""
+    from stt_cli.live import status
+
+    narrow_terminal.resize(90)
+    with contextlib.redirect_stderr(narrow_terminal):
+        line = status.Line()
+        line.show("x" * 85)
+        narrow_terminal.resize(50)
+        line.show("short")
+        narrow_terminal.resize(90)
+        line.show("y" * 85)
+        narrow_terminal.resize(50)
+        line.clear()
+
+    first, after_resize, _, erase, _ = narrow_terminal.getvalue().split("\r")[1:]
+    assert status._columns(first) == 85, "the wide terminal was used while it was wide"
+    assert after_resize.rstrip(" ") == "short"
+    assert status._columns(after_resize) <= 49, "the frame and its padding fit 50 columns"
+    assert status._columns(erase) <= 49, "and so does the final erase"
+
+
+def test_a_terminal_narrower_than_twenty_columns_is_fitted_too(narrow_terminal) -> None:
+    """The old floor of 20 columns meant a very narrow terminal was never fitted at all."""
+    from stt_cli.live import status
+
+    narrow_terminal.resize(12)
+    with contextlib.redirect_stderr(narrow_terminal):
+        status.Line().show("● listening  … a sentence far wider than twelve columns")
+
+    frame = narrow_terminal.getvalue().split("\r")[1]
+    assert status._columns(frame) <= 11
+    assert frame.endswith("\N{HORIZONTAL ELLIPSIS}")
+
+
+def test_escape_sequences_and_combining_marks_take_no_columns() -> None:
+    """Width is what the terminal draws: a colour code draws nothing, an accent sits on the
+    letter before it, and a cut that falls inside a colour resets it rather than letting it
+    run on past the line."""
+    from stt_cli.live import status
+
+    assert status._columns("\x1b[1;32mok\x1b[0m") == 2
+    assert status._columns("\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\") == 4
+    assert status._columns("cafe\N{COMBINING ACUTE ACCENT}") == 4
+    assert status._columns("a\N{ZERO WIDTH SPACE}b") == 2
+
+    trimmed = status._within("\x1b[32m" + "x" * 60, 20)
+    assert trimmed.startswith("\x1b[32m"), "the colour is kept"
+    assert trimmed.endswith("\N{HORIZONTAL ELLIPSIS}\x1b[0m"), "the cut is marked and reset"
+    assert status._columns(trimmed) == 20
 
 
 def test_a_voice_is_told_from_a_room_by_how_much_the_level_moves() -> None:

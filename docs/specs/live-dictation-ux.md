@@ -275,11 +275,11 @@ other way withdraws its notification, so no stale Stop button is left behind.
 **Shipped today — not meeting the requirement:**
 
 - The only notification every user gets is `osascript display notification "listening on
-  <device>"` (`status.opened`, `stt_cli/live/status.py:226`), which has no button and does
+  <device>"` (`status.opened`, `stt_cli/live/status.py:289`), which has no button and does
   not say how to stop. For the daemon, the "how to stop" text goes only to its log file.
 - The Stop button depends on the optional `terminal-notifier`
-  (`notifier_available`, `status.py:278`), and is called with `-actions Stop`
-  (`status.py:341`). The terminal-notifier Homebrew installs today does not read
+  (`notifier_available`, `status.py:341`), and is called with `-actions Stop`
+  (`status.py:404`). The terminal-notifier Homebrew installs today does not read
   `-actions`: 2.0.0 removed action buttons, and 3.0.0 (2026-08-23; Homebrew stable is 3.1.0
   as of 2026-09-29) brought them back as `-action TITLE`, singular
   ([3.0.0 release notes](https://github.com/julienXX/terminal-notifier/releases/tag/3.0.0)).
@@ -310,15 +310,18 @@ other way withdraws its notification, so no stale Stop button is left behind.
 
 ### 7.1 Rendering
 
-One line on standard error, redrawn in place (`status.Line`, `stt_cli/live/status.py:92`):
+One line on standard error, redrawn in place (`status.Line`, `stt_cli/live/status.py:95`):
 a bare carriage return before each repaint, never a newline mid-session, and silent when
-standard error is not a terminal. `--quiet` turns it off. Each frame is trimmed to
-`shutil.get_terminal_size((80, 24)).columns - 1`, at least 20 (`status.py:108`) — but that
-call reads `COLUMNS` or measures standard **output**, not the standard error the line is
-written to, and falls back to 80 when standard output is not a terminal; a terminal
-narrower than 20 columns is never fitted. Section 7.2 is the rule this must meet.
+standard error is not a terminal. `--quiet` turns it off. Each frame, and the padding that
+erases the previous one, is fitted to one column less than the width of standard error
+itself, measured at every repaint (`status._room`); `COLUMNS` and the width of standard
+output are consulted only when standard error reports no size. Widths are counted in
+terminal cells (`status._columns`): escape sequences and combining or format characters
+take none, East Asian wide and fullwidth characters take two, and a control character in
+the text (a newline in dictated text) is drawn as a space. A trimmed frame ends in `…`, and
+in a colour reset when it carried any escape sequence. Section 7.2 is the rule this meets.
 
-| State | Frame (`status.render`, `status.py:168`) |
+| State | Frame (`status.render`, `status.py:231`) |
 | --- | --- |
 | Idle, nothing heard yet | `● start speaking _  try saying "…"` — the caret alternates `_` / space every 0.5 s |
 | Hearing speech, draft | `● listening  … <draft text>` |
@@ -352,17 +355,30 @@ The rules:
 - Proof: a capture from a ~50-column terminal (Moshi/ssh, or a resized local terminal),
   before and after, with no duplicated or partly overwritten rows.
 
+**Shipped (#100):** the width is measured on standard error at every repaint, with no
+20-column floor, and the erase padding is capped to it (section 7.1). Before, it was
+measured through `shutil.get_terminal_size`, which reads `COLUMNS` and then standard output:
+with standard output redirected (`stt mic > notes.txt`) or a stale `COLUMNS`, a 50-column
+terminal was painted as if it were 80 columns wide, and a pty capture at 50 columns showed
+one new `● listening … <draft>` row per repaint — Alex's first report. The same capture
+now shows one row. Tests: `tests/test_live.py::test_a_repainted_line_never_wraps_in_a_narrow_terminal`,
+`test_a_resize_between_repaints_is_measured_and_the_erase_fits_too`,
+`test_a_terminal_narrower_than_twenty_columns_is_fitted_too`,
+`test_escape_sequences_and_combining_marks_take_no_columns`. Out of reach of a bare `\r`: a
+terminal that reflows its rows when it narrows (Terminal.app, iTerm2) turns the frame drawn
+before the resize into two rows itself, and the first of them stays on screen.
+
 A separate line-oriented mode for readers that are not terminals (a line-by-line capture
 shows every frame as a new line, as #89 measured) is not part of #100's fix.
 
 ### 7.3 Idle UX
 
 Shipped by [#91](https://git.hyperide.ai/ultrabricks/stt-cli/issues/91): the idle head reads
-"start speaking" (`_INVITATION`, `status.py:78`) instead of the passive "listening", with a
+"start speaking" (`_INVITATION`, `status.py:81`) instead of the passive "listening", with a
 blinking caret (`_blink_while_idle`, `stt_cli/live/dictation.py:308`, every 0.5 s) and one
-example phrase chosen once per burst (`status.example_hint`, `status.py:195`): a term from
+example phrase chosen once per burst (`status.example_hint`, `status.py:258`): a term from
 the user's own dictionary when there is one, otherwise a built-in spoken sentence
-(`_BUILTIN_EXAMPLES`, `status.py:86`). The frame reverts to the listening form the moment
+(`_BUILTIN_EXAMPLES`, `status.py:89`). The frame reverts to the listening form the moment
 speech arrives.
 
 - Gap: examples come only from the personal dictionary; once installed dictionaries exist
@@ -392,7 +408,7 @@ mechanism.
 | Daemon on by default, liveness-verified | yes (after first successful dictation) | no — daemon crash-looping on Alex's Mac | #87, #98, #97 |
 | Daemon on at the first `stt` run | no | — | #98 |
 | Daemon has its own Accessibility + Microphone | no | — | #98, #97 |
-| No wrapped-row corruption in a ~50-column terminal | no | — | #100 |
+| No wrapped-row corruption in a ~50-column terminal | yes | pty captures at 50 columns, not yet on Alex's phone | #100 |
 | Inviting idle line | yes | unit tests only | #91 |
 
 ## 10. Open decisions
