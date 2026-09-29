@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "echo build needs no dependencies",
+  "buildCommand": "node build.mjs",
+  "outputDirectory": "public",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "regions": ["fra1"],
+  "functions": {
+    "api/index.mjs": {
+      "maxDuration": 10,
+      "includeFiles": "{data/**,lib/**}"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/dictionaries", "destination": "/api/index" },
+    { "source": "/api/dictionaries/:id", "destination": "/api/index" }
+  ]
+}

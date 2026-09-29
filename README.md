@@ -192,6 +192,10 @@ way the file's SHA-256 must match the catalog index before anything is written, 
 validated exactly as a hand-typed entry would be. The network is touched only by those two
 commands with `--remote`, never by a transcription.
 
+The same catalog is browsable at <https://stt-dicts-marketplace.vercel.app>: search by
+topic, tag or term, see every term and its recorded mis-hearings, and download the file or
+copy its `stt dict install <id>` command.
+
 Installed dictionaries live in `<STT_HOME>/dicts/installed/` and join your own terms in every
 transcription: your terms first, then each installed dictionary in alphabetical order by id.
 Your own dictionary wins every conflict, and an earlier installed dictionary wins over a

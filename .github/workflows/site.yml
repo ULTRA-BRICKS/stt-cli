@@ -1,0 +1,100 @@
+# The dictionary marketplace site (site/, spec docs/specs/dictionaries.md section 8).
+#
+# `check` builds the site from stt_cli/dictionaries/, runs its API tests against the shared
+# fixture, and walks the built pages in a real browser (the Playwright suite, served by
+# serve.mjs) on every change: a dictionary PR that breaks the site fails here, in its own PR.
+#
+# `deploy` publishes to the Vercel project stt-dicts-marketplace: a preview for a pull request,
+# production (https://stt-dicts-marketplace.vercel.app) for main. Vercel's Git integration does
+# not cover Forgejo (https://vercel.com/docs/git), so this job drives the Vercel CLI itself
+# (`vercel build` + `vercel deploy --prebuilt`). It needs the repository secret VERCEL_TOKEN
+# (a Vercel access token for the team that owns the project); without it the job says so and
+# deploys nothing, rather than failing every PR. The CLI reads VERCEL_TOKEN from the environment,
+# so the token never appears on a command line. Node and npm ship on ubuntu-latest.
+#
+# After a production deploy the same browser suite runs against the public production URL, so
+# the Vercel function and rewrites (which nothing local executes) are tested where they run.
+# Preview deployments sit behind Vercel's deployment protection, so a preview is not walked.
+
+name: site
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Build the site from the bundled catalog
+        run: node site/build.mjs
+
+      - name: API contract tests
+        working-directory: site
+        run: node --test test/*.test.mjs
+
+      - name: Install the browser test runner
+        working-directory: site
+        run: |
+          npm ci
+          ./node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Browser tests against the local build
+        working-directory: site
+        run: npm run e2e
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: team_lKA0l5FGJudwmRlkdeF1h4VD
+      VERCEL_PROJECT_ID: prj_b1o0HWTdsXOaUBvdSVp5rfdAoyjO
+      TARGET: ${{ github.event_name == 'push' && 'production' || 'preview' }}
+    steps:
+      - name: Is a Vercel token configured?
+        id: gate
+        run: |
+          if [ -n "$VERCEL_TOKEN" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::VERCEL_TOKEN is not set: skipping the $TARGET deploy of stt-dicts-marketplace"
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: steps.gate.outputs.ok == 'true'
+
+      - name: Install the Vercel CLI
+        if: steps.gate.outputs.ok == 'true'
+        run: npm install --global vercel@61.0.0
+
+      - name: Build and deploy
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: site
+        run: |
+          prod=""
+          if [ "$TARGET" = production ]; then prod="--prod"; fi
+          vercel pull --yes --environment="$TARGET"
+          vercel build $prod
+          url=$(vercel deploy --prebuilt $prod)
+          echo "::notice::deployed $TARGET: $url"
+
+      - name: Browser tests against production
+        if: steps.gate.outputs.ok == 'true' && env.TARGET == 'production'
+        working-directory: site
+        env:
+          BASE_URL: https://stt-dicts-marketplace.vercel.app
+        run: |
+          npm ci
+          ./node_modules/.bin/playwright install --with-deps chromium
+          npm run e2e

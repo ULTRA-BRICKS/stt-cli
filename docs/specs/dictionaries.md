@@ -17,8 +17,11 @@ both sources (`stt_cli/sources.py`), the index reader (`catalog.parse_index`), t
 `search`/`install`/`installed`/`show`/`uninstall` commands, installed-dictionary merging and the
 fingerprint (`stt_cli/installed.py`), read by file transcription and `stt dict check`. Live dictation
 still reads only the personal dictionary; switching it is
-[#113](https://git.hyperide.ai/ultrabricks/stt-cli/issues/113). None of the following is built yet:
-overlays, the marketplace website, and usage-based suggestions. Build order,
+[#113](https://git.hyperide.ai/ultrabricks/stt-cli/issues/113). **Shipped by
+[#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86):** the marketplace website of section 8
+(`site/`), deployed at `https://stt-dicts-marketplace.vercel.app`, whose API tests read the same contract
+fixture `tests/fixtures/dictionaries/` as the stt side. None of the following is built yet: overlays and
+usage-based suggestions. Build order,
 as recorded on the epic: [#81](https://git.hyperide.ai/ultrabricks/stt-cli/issues/81) (format, catalog
 contract, curated content), then [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) (sources,
 install, effective glossary, cache fingerprint), then
@@ -411,11 +414,11 @@ serves exactly the hashes the bundled source verifies.
 | `GET /api/dictionaries?tag=<t>&q=<query>` | The catalog index document of section 4; `tag` and `q` only filter its list. With no parameters it is byte-identical to the committed `index.json`. |
 | `GET /api/dictionaries/<id>` | The dictionary file's committed bytes, so its SHA-256 matches the index; 404 for an unknown id. |
 
-**Publish flow (from [#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86); open).** (a) A hosted publish API with its own authentication, modeled on
+**Publish flow (decided on [#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86), 2026-09-29, reversible: (b)).** (a) A hosted publish API with its own authentication, modeled on
 boards-app's `server/identity.mjs`, backed by a Postgres/Neon table of dictionary versions. (b) A pull
 request adding `stt_cli/dictionaries/<id>.json`; its CI runs section 3's validation and the index
 regeneration test, a maintainer reviews terms and notes, and the merge redeploys the site; `/publish`
-documents the steps. Recommendation: (b). The committed catalog stays the only source of truth, no
+documents the steps. Chosen: (b). The committed catalog stays the only source of truth, no
 database or login system is needed, and the review of notes (section 4) has a natural place. Option (a)
 makes a database a second catalog the bundled source never sees.
 
@@ -492,11 +495,11 @@ Until then the suggestion check prints its result to the terminal instead of pos
 | --- | --- | --- |
 | Uninstall command name, given `stt dict rm` already removes a personal term | decided on [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83): `uninstall`, which pairs with `install` and cannot be mistyped as `rm` | [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) |
 | Overlay parser: standard-library subset or optional PyYAML with JSON fallback | standard-library subset (section 7) | [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84), recorded in this file |
-| Publish flow: hosted API or pull request | pull request (section 8) | [#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86) |
-| Site placement: `site/` here or a separate repository | `site/` in this repository (section 8) | [#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86) |
 | Suggestion thresholds (10 transcripts; 0.6 per transcript; 5 and a quarter of the window) | start here, tune on real archives | [#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88) |
 
 Decided here, not open: the version is an integer (section 3); index, API shapes and merge precedence as
 above. Decided on 2026-09-29 and recorded on the tickets (each reversible): the on-disk layout, installed
 dictionaries under `<app_home>` and overlays under `~/.config/stt-cli/` (section 5, #83, #84); the site
-name `stt-dicts-marketplace` at `https://stt-dicts-marketplace.vercel.app` (section 8, #86).
+name `stt-dicts-marketplace` at `https://stt-dicts-marketplace.vercel.app` (section 8, #86). Decided on
+[#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86) when the site was built: publishing is a pull
+request, and the site lives in `site/` in this repository (section 8).

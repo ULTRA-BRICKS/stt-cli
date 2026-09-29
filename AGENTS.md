@@ -203,6 +203,17 @@ invariants of its own on top of the ones below.
   fail on a stale index. An `aka` is substituted without asking, so it must be a wrong
   spelling that actually occurs — the shipped ones are real stt output — and never an
   ordinary word in the dictionary's languages. No spelling may belong to two dictionaries.
+- **The marketplace site** (`site/`, spec `docs/specs/dictionaries.md` section 8): static
+  pages and a two-endpoint API generated from `stt_cli/dictionaries/` by `site/build.mjs`,
+  Node standard library only. The API serves the committed bytes unchanged — the index with
+  no query parameters, each file for `/api/dictionaries/<id>` — because stt verifies them by
+  SHA-256; never make the site rewrite a catalog file. `tests/fixtures/dictionaries/` is the
+  fixture both the site's API tests and stt's source tests read. Preview with
+  `node site/build.mjs && node site/serve.mjs`; browser tests with `cd site && npm ci &&
+  npm run e2e` (`BASE_URL=<url>` for a deployment). `.github/workflows/site.yml` runs the API and
+  browser tests on every change and, once the `VERCEL_TOKEN` secret is set, deploys a preview for
+  a PR and production for main, re-running the browser tests against production only; without
+  the secret the deploy is skipped with a notice.
 
 ## Checks
 
