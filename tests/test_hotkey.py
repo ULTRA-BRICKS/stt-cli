@@ -2483,6 +2483,10 @@ def test_a_daemon_that_never_resolves_within_the_probe_budget_stays_retryable(
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
     monkeypatch.setattr(mic.time, "sleep", lambda _seconds: None)
+    # The bounded multi-probe loop only exists on macOS — `_wait_for_daemon_liveness`
+    # probes once and returns off it — so this has to pin the platform the way the
+    # sibling test below does, or Linux CI sees one probe instead of the full budget (#96).
+    monkeypatch.setattr(mic.sys, "platform", "darwin")
 
     probes: list[str] = []
 
@@ -2578,10 +2582,19 @@ def test_an_unanswerable_probe_off_macos_still_confirms_via_autostart_active(
         def autostart_active(self) -> bool:
             return True
 
+    probes: list[str] = []
+
+    def probe_launchd(label: str) -> None:
+        probes.append(label)
+
     monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
-    monkeypatch.setattr(mic_service, "probe_launchd", lambda label: None)
+    monkeypatch.setattr(mic_service, "probe_launchd", probe_launchd)
     mic._maybe_autostart_daemon(quiet=True)
 
+    # Off macOS the bounded retry loop must not run at all (#96) — it would only hold the
+    # config lock for the whole budget waiting on a launchd that does not exist. At most one
+    # probe, not exactly one: skipping the pointless call entirely would be just as correct.
+    assert len(probes) <= 1, "off macOS the bounded retry loop must not run (#96)"
     assert config.load_settings().mic_daemon_autostart is True
 
 
