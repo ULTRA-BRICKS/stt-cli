@@ -283,8 +283,8 @@ def test_an_out_of_range_similarity_is_refused_before_any_work(tmp_path, monkeyp
     monkeypatch.setenv("STT_HOME", str(tmp_path))
     for bad in (-0.1, 1.5, float("nan")):
         with pytest.raises(UsageError):
-            pipeline._resolve(Settings(dict_similarity=bad))
-    settled, _ = pipeline._resolve(Settings(dict_similarity=0.8))
+            pipeline._resolve(Settings(dict_similarity=bad), pipeline.Reporter(quiet=True))
+    settled, _ = pipeline._resolve(Settings(dict_similarity=0.8), pipeline.Reporter(quiet=True))
     assert settled.dict_similarity == 0.8
 
 
@@ -295,7 +295,7 @@ def test_the_dictionary_is_read_once_and_passed_on(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
     dictionary.save(dictionary.Dictionary([_term("ConLoca")]))
-    settled, snapshot = pipeline._resolve(Settings())
+    settled, snapshot = pipeline._resolve(Settings(), pipeline.Reporter(quiet=True))
     dictionary.save(dictionary.Dictionary([_term("ConLoca"), _term("Figma")]))
     assert [t.term for t in snapshot.terms] == ["ConLoca"]
     assert settled.dict_digest == dictionary.Dictionary([_term("ConLoca")]).digest()

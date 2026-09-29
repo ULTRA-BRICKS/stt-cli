@@ -171,6 +171,37 @@ The phonetic matcher is home-grown on purpose: Soundex and Metaphone are built f
 orthography and do not accept Cyrillic at all, and these recordings switch language
 mid-sentence. `--dict-similarity` moves the threshold; `stt dict check` shows the scores.
 
+### Curated dictionaries
+
+Instead of typing a whole field's vocabulary in by hand, install a curated dictionary. stt
+ships 21 of them (medicine, pharmacology, law, finance, software, AI, and more, several with
+a Russian companion):
+
+```bash
+stt dict search medic              # id, version, term count, languages, title, tags; * = installed
+stt dict search --tag drug-names
+stt dict install medical-general   # re-running it later upgrades to the newest version
+stt dict installed                 # what is installed, and anything the merge left out
+stt dict show medical-general      # its terms
+stt dict uninstall medical-general
+```
+
+`--remote` on `search` and `install` asks the marketplace website
+(https://stt-dicts-marketplace.vercel.app) instead of the copies bundled with stt. Either
+way the file's SHA-256 must match the catalog index before anything is written, and it is
+validated exactly as a hand-typed entry would be. The network is touched only by those two
+commands with `--remote`, never by a transcription.
+
+Installed dictionaries live in `<STT_HOME>/dicts/installed/` and join your own terms in every
+transcription: your terms first, then each installed dictionary in alphabetical order by id.
+Your own dictionary wins every conflict, and an earlier installed dictionary wins over a
+later one; whatever a conflict leaves out is reported as a warning by the transcription and
+by `stt dict installed`. `stt dict list` still shows only your own terms. The cache key
+covers the terms the transcription ends up using, so installing or uninstalling a dictionary
+that adds any term re-runs the transcription instead of serving the one made before; a
+dictionary whose every entry a conflict left out changes nothing, and neither does the key.
+Live dictation (`stt mic`) does not read the installed dictionaries yet.
+
 ## Speakers
 
 ```bash

@@ -1,0 +1,37 @@
+{
+  "dictionaries": [
+    {
+      "id": "fixture-games",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "771eeecef6830ee4dbbd6e61c657e04e69b621b39affb4e853a12a747a02ff42",
+      "source": "written by hand for the source-parser tests and the website's API contract tests",
+      "tags": [
+        "gaming"
+      ],
+      "term_count": 2,
+      "title": "Fixture game names",
+      "version": 1
+    },
+    {
+      "id": "fixture-tools",
+      "languages": [
+        "en"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "517c0de166ec40eb73b7575b8d61e14482707403b694a0a71d9b2c98a66f22b3",
+      "source": "written by hand for the source-parser tests and the website's API contract tests",
+      "tags": [
+        "software-engineering-tools",
+        "vendor-names"
+      ],
+      "term_count": 3,
+      "title": "Fixture tool names",
+      "version": 2
+    }
+  ],
+  "format": 1
+}

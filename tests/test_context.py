@@ -228,7 +228,7 @@ def test_an_old_fix_run_is_not_served_without_the_comparison(monkeypatch, tmp_pa
     that — which has none of the variants — must not answer for it."""
     monkeypatch.setenv("STT_HOME", str(tmp_path))
     stale = Settings(fix=True, context_compare="off")  # what an older run stored
-    fresh, _ = pipeline._resolve(Settings(fix=True))
+    fresh, _ = pipeline._resolve(Settings(fix=True), pipeline.Reporter(quiet=True))
     assert fresh.context_compare == "auto"
     assert archive.fingerprint(fresh) != archive.fingerprint(stale)
 
@@ -621,8 +621,11 @@ def test_settings_that_cannot_matter_stay_out_of_the_cache_key() -> None:
     re-decode of the recording to produce a byte-identical transcript."""
     from stt_cli import pipeline
 
-    plain, _ = pipeline._resolve(Settings(dictionary=False))
-    tuned, _ = pipeline._resolve(Settings(dictionary=False, dict_similarity=0.7, dict_bias=False))
+    plain, _ = pipeline._resolve(Settings(dictionary=False), pipeline.Reporter(quiet=True))
+    tuned, _ = pipeline._resolve(
+        Settings(dictionary=False, dict_similarity=0.7, dict_bias=False),
+        pipeline.Reporter(quiet=True),
+    )
     assert archive.fingerprint(plain) == archive.fingerprint(tuned)
 
 
@@ -942,10 +945,12 @@ def test_an_explicit_context_compare_off_survives_fix() -> None:
     """`--fix` turning the comparison on is an implication, not an override: somebody who
     typed `--context-compare off` said what they wanted, and a flag that cannot be turned
     off is not a flag. Before this, `--fix --context-compare off` still re-decoded."""
-    implied, _ = pipeline._resolve(Settings(fix=True))
+    implied, _ = pipeline._resolve(Settings(fix=True), pipeline.Reporter(quiet=True))
     assert implied.context_compare == "auto"
 
-    chosen, _ = pipeline._resolve(Settings(fix=True, context_compare_chosen=True))
+    chosen, _ = pipeline._resolve(
+        Settings(fix=True, context_compare_chosen=True), pipeline.Reporter(quiet=True)
+    )
     assert chosen.context_compare == "off"
     # ...and the two are different runs, so neither is served from the other's cache entry.
     assert archive.fingerprint(implied) != archive.fingerprint(chosen)

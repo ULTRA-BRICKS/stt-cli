@@ -46,10 +46,11 @@ THE CONTRACT
     the website shows is what the pipeline uses.
 
 WHAT THIS MODULE DOES NOT DO
-    It does not change what `dictionary.load()` returns: installing a dictionary and merging
-    it into the glossary a transcription uses is a separate step (#83), and so are overlays
-    (#84). This module reads, validates and indexes the files; nothing in the transcription
-    path imports it yet.
+    It does not change what `dictionary.load()` returns, and it touches neither the network
+    nor the user's files: it reads, validates and indexes dictionaries, and parses an index
+    somebody else produced (`parse_index`). Fetching and verifying are `sources.py`;
+    installing, and merging what is installed into the glossary a transcription uses, are
+    `installed.py`. Overlays are a later step (#84).
 
 PUBLISHING
     The bundled dictionaries live in ``stt_cli/dictionaries/`` beside ``tags.json`` (the tag
@@ -78,9 +79,8 @@ DIRECTORY = Path(__file__).parent / "dictionaries"
 INDEX = "index.json"
 TAGS = "tags.json"
 
-# The index's own shape. Nothing reads the index yet; the reader that installs from it (#83)
-# is meant to refuse a format it does not know, so a future shape says "upgrade stt" rather
-# than being misread.
+# The index's own shape. A reader refuses a format newer than this one (`parse_index`), so a
+# future shape says "upgrade stt" rather than being misread.
 INDEX_FORMAT = 1
 
 TITLE_CHARS = 80
@@ -93,7 +93,19 @@ SLUG_LENGTHS = range(2, 65)
 
 _ENVELOPE = ("id", "version", "title", "tags", "languages", "license", "source", "terms")
 _TERM_FIELDS = ("aka", "id", "note", "term")
-_TOO_BIG = "a dictionary is a list of names, not a corpus"
+_INDEX_ROW = (
+    "id",
+    "languages",
+    "license",
+    "sha256",
+    "source",
+    "tags",
+    "term_count",
+    "title",
+    "version",
+)
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+TOO_BIG = "a dictionary is a list of names, not a corpus"
 
 # ISO 639-1, the two-letter codes. The list is closed and has not changed in years, so it is
 # written out rather than fetched: validation must work offline and give the same answer on
@@ -171,6 +183,43 @@ class Distributable:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogEntry:
+    """One row of the catalog index: what a dictionary is and the hash of its file, no terms."""
+
+    id: str
+    version: int
+    title: str
+    tags: tuple[str, ...]
+    languages: tuple[str, ...]
+    license: str
+    source: str
+    term_count: int
+    sha256: str
+
+    def matches(self, query: str) -> bool:
+        """Does the id, the title or a tag contain ``query``, ignoring case?
+
+        The index holds no terms, so a term's text is deliberately not searched: the answer
+        would depend on which source was asked.
+        """
+        wanted = query.casefold()
+        return any(wanted in text.casefold() for text in (self.id, self.title, *self.tags))
+
+
+@dataclass(frozen=True, slots=True)
+class Catalog:
+    """A parsed catalog index, sorted by id."""
+
+    entries: tuple[CatalogEntry, ...]
+
+    def find(self, ident: str) -> CatalogEntry | None:
+        return next((entry for entry in self.entries if entry.id == ident), None)
+
+    def ids(self) -> list[str]:
+        return [entry.id for entry in self.entries]
+
+
 def read_tags(directory: Path = DIRECTORY) -> dict[str, Tag]:
     """The committed tag vocabulary: ``{slug: {"kind": "topic" | "facet", "label": ...}}``."""
     target = directory / TAGS
@@ -199,7 +248,7 @@ def parse(blob: bytes, *, origin: str, tags: Mapping[str, Tag]) -> Distributable
     published and hashed.
     """
     if len(blob) > MAX_DICTIONARY_BYTES:
-        raise _invalid(origin, f"is larger than {in_units(MAX_DICTIONARY_BYTES)}", _TOO_BIG)
+        raise _invalid(origin, f"is larger than {in_units(MAX_DICTIONARY_BYTES)}", TOO_BIG)
     raw = _decoded(blob, origin)
     if not isinstance(raw, dict):
         raise _invalid(origin, "is not a dictionary", "expected a JSON object")
@@ -359,12 +408,91 @@ def render_index(dictionaries: list[Distributable]) -> str:
     return json.dumps(document, sort_keys=True, ensure_ascii=False, indent=2) + "\n"
 
 
+def parse_index(blob: bytes, *, origin: str) -> Catalog:
+    """Read a catalog index (`render_index`'s output) that may have come from anywhere.
+
+    Checked as strictly as a dictionary file, and for a sharper reason: every field here is
+    printed on a listing, and a remote index is text a stranger wrote. A title carrying an
+    ESC would be executed by the terminal showing it, and an id is about to become a file
+    name, so ``../x`` must never get past this function.
+    """
+    if len(blob) > MAX_DICTIONARY_BYTES:
+        raise _invalid(origin, f"is larger than {in_units(MAX_DICTIONARY_BYTES)}", TOO_BIG)
+    raw = _decoded(blob, origin)
+    if not isinstance(raw, dict):
+        raise _invalid(origin, "is not a catalog index", '{"format": 1, "dictionaries": [...]}')
+    _require_exact_fields(raw, ("format", "dictionaries"), ("format", "dictionaries"), origin)
+    shape = raw["format"]
+    if isinstance(shape, bool) or not isinstance(shape, int) or shape < 1:
+        raise _invalid(origin, f"has format {shape!r}", "the format is a positive integer")
+    if shape > INDEX_FORMAT:
+        raise UsageError(
+            what=f"{origin} is a catalog index in format {shape}",
+            why=f"this stt reads format {INDEX_FORMAT}, so it would misread a newer one",
+            how="upgrade stt",
+        )
+    rows = raw["dictionaries"]
+    if not isinstance(rows, list):
+        raise _invalid(origin, "has no list of dictionaries", '"dictionaries": [...]')
+    if not rows:
+        # As `bundled` refuses an empty set: an empty index is a broken deployment far more
+        # often than an empty catalog, and would otherwise read as "nothing matches".
+        raise _invalid(origin, "lists no dictionaries", "a catalog index lists at least one")
+    entries: dict[str, CatalogEntry] = {}
+    for position, row in enumerate(rows, start=1):
+        where = f"{origin}: dictionary {position}"
+        if not isinstance(row, dict):
+            raise _invalid(where, "is not an object", 'expected {"id": ..., "sha256": ...}')
+        _require_exact_fields(row, _INDEX_ROW, _INDEX_ROW, where)
+        entry = _index_row(row, where)
+        if entry.id in entries:
+            raise _invalid(where, f"repeats the id {entry.id!r}", "one row per dictionary")
+        entries[entry.id] = entry
+    return Catalog(entries=tuple(sorted(entries.values(), key=lambda entry: entry.id)))
+
+
+def _index_row(row: Mapping[str, object], where: str) -> CatalogEntry:
+    ident, version, count, digest = row["id"], row["version"], row["term_count"], row["sha256"]
+    _require_slug(ident, f"{where} id")
+    assert isinstance(ident, str)
+    where = f"{where} ({ident})"
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise _invalid(where, f"has version {version!r}", "a positive integer")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise _invalid(where, f"has term_count {count!r}", "a positive integer")
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise _invalid(where, "has no SHA-256", "64 lowercase hexadecimal digits")
+    title, source, license_id = row["title"], row["source"], row["license"]
+    _require_line(title, f"{where} title", TITLE_CHARS)
+    _require_line(source, f"{where} source", SOURCE_CHARS)
+    _require_line(license_id, f"{where} license", TITLE_CHARS)
+    tags = _unique_strings(row["tags"], f"{where} tags")
+    for tag in tags:
+        _require_slug(tag, f"{where} tag")
+    languages = _unique_strings(row["languages"], f"{where} languages")
+    strange = [code for code in languages if code not in LANGUAGES]
+    if strange:
+        raise _invalid(where, f"names languages {_listed(strange)}", "ISO 639-1 codes")
+    assert isinstance(title, str) and isinstance(source, str) and isinstance(license_id, str)
+    return CatalogEntry(
+        id=ident,
+        version=version,
+        title=title,
+        tags=tuple(tags),
+        languages=tuple(languages),
+        license=license_id,
+        source=source,
+        term_count=count,
+        sha256=digest,
+    )
+
+
 def _read(path: Path) -> bytes:
     """The file's exact bytes, through the one guarded reader (`jsonio.read_text`).
 
     Strict UTF-8 decodes and re-encodes losslessly, so the bytes hashed are the bytes on disk.
     """
-    text = read_text(path, how="restore it", limit=MAX_DICTIONARY_BYTES, too_big=_TOO_BIG)
+    text = read_text(path, how="restore it", limit=MAX_DICTIONARY_BYTES, too_big=TOO_BIG)
     if text is None:
         raise UsageError(
             what=f"could not read {path}",

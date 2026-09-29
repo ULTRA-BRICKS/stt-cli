@@ -388,8 +388,8 @@ class Archive:
 _writers = itertools.count()
 
 
-def write_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` via a temporary neighbour, so readers never see a partial file.
+def write_atomic(path: Path, content: str | bytes) -> None:
+    """Write ``content`` to ``path`` via a temporary neighbour, so readers never see a partial file.
 
     The neighbour's name is unique to the writer — the pid, plus a counter for the writers
     inside one process. A shared name would let two writers interleave into one temporary
@@ -403,7 +403,10 @@ def write_atomic(path: Path, text: str) -> None:
     """
     partial = path.with_name(f"{path.name}.{os.getpid()}.{next(_writers)}.part")
     try:
-        partial.write_text(text, "utf-8")
+        if isinstance(content, bytes):
+            partial.write_bytes(content)  # exactly these bytes: no newline translation
+        else:
+            partial.write_text(content, "utf-8")
         partial.replace(path)
     finally:
         partial.unlink(missing_ok=True)

@@ -29,6 +29,7 @@ async. Zero required third-party runtime dependencies.
 | `hf.py`, `auth.py` | Hugging Face credentials and the `stt login` browser flow |
 | `dictionary.py`, `fuzzy.py` | terminology: prompt biasing, exact fixes, phonetic flags |
 | `catalog.py`, `dictionaries/` | distributable dictionaries: the format's validator, the curated bundled set, the catalog index |
+| `sources.py`, `installed.py` | where a dictionary comes from (bundled or the marketplace site, SHA-256 verified), `stt dict install`, and the effective glossary: personal terms plus installed ones |
 | `archive.py` | content-addressed store plus a SQLite index |
 | `formats.py`, `timestamps.py` | renderers and the three timestamp modes |
 | `registry.py` | the model pool: one human name per model, per-engine ids, sizes |
@@ -128,7 +129,9 @@ invariants of its own on top of the ones below.
   daemon showing the user the one toggle to click, and noticing the click), `launchctl
   kickstart` in `live/mic_service.py` (`stt mic --fix` restarting a down daemon), and the
   `urllib` calls plus `pbpaste` poll in `hf.py`/`auth.py` (a login is a conversation with a
-  human, and `urllib` keeps the token out of an argument vector that `curl` would expose).
+  human, and `urllib` keeps the token out of an argument vector that `curl` would expose),
+  and the `urllib` GETs in `sources.py` (`stt dict search/install --remote` only, imported
+  inside the function so neither `stt --help` nor a transcription loads the network stack).
 - **Every failure is an `SttError` subclass** with what/why/how and a stable exit code
   (see `_errors.py`). Never `sys.exit(1)` with a bare message.
 - **Nothing durable in `/tmp`.** Audio and transcripts live in the archive under

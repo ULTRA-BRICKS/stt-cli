@@ -268,6 +268,40 @@ def test_importing_the_dispatcher_does_not_read_the_version() -> None:
     assert asked.stdout.strip() == "False", "importing the dispatcher read pyproject.toml"
 
 
+def test_the_help_text_loads_no_network_and_nothing_third_party() -> None:
+    """`stt --help` works on a bare machine and never pays for the network.
+
+    Building the help text imports every command module — `commands/dict_cmd.py`, which
+    offers `stt dict install --remote`, and through the transcription command the whole
+    pipeline — so `urllib.request` has to stay inside the function that fetches. Asked in a
+    fresh interpreter for the reason the test above gives.
+    """
+    import subprocess
+
+    probe = (
+        "import contextlib, io, sys\n"
+        "before = set(sys.modules)\n"
+        "import stt_cli.cli\n"
+        "with contextlib.redirect_stdout(io.StringIO()):\n"
+        "    stt_cli.cli.main(['--help'])\n"
+        "added = set(sys.modules) - before\n"
+        "import sysconfig\n"
+        "packages = {sysconfig.get_paths()[key] for key in ('purelib', 'platlib')}\n"
+        "foreign = sorted(name for name in added if any(\n"
+        "    (getattr(sys.modules[name], '__file__', None) or '').startswith(root)\n"
+        "    for root in packages))\n"
+        "print('stt_cli.sources' in sys.modules, 'urllib.request' in sys.modules, foreign)\n"
+    )
+    root = Path(__file__).resolve().parent.parent
+    asked = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=root, check=True
+    )
+    # The first value proves the module under suspicion was imported at all: without it this
+    # test passed with `import urllib.request` at the top of `sources.py`, because
+    # `import stt_cli.cli` alone imports no command module.
+    assert asked.stdout.strip() == "True False []"
+
+
 def test_an_unreadable_pyproject_falls_through_rather_than_raising(tmp_path) -> None:
     """A malformed or absent file is a reason to ask the metadata, not to crash."""
     import stt_cli

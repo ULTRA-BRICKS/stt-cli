@@ -1,0 +1,14 @@
+{
+  "gaming": {
+    "kind": "topic",
+    "label": "Gaming"
+  },
+  "software-engineering-tools": {
+    "kind": "topic",
+    "label": "Software engineering tools"
+  },
+  "vendor-names": {
+    "kind": "facet",
+    "label": "Vendor and product names"
+  }
+}

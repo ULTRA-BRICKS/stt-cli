@@ -1,0 +1,13 @@
+{
+  "id": "fixture-games",
+  "version": 1,
+  "title": "Fixture game names",
+  "tags": ["gaming"],
+  "languages": ["en", "ru"],
+  "license": "CC0-1.0",
+  "source": "written by hand for the source-parser tests and the website's API contract tests",
+  "terms": [
+    {"id": "minecraft", "term": "Minecraft", "aka": ["mine craft"]},
+    {"id": "factorio", "term": "Factorio", "aka": ["factor io"], "note": "a factory-building game"}
+  ]
+}

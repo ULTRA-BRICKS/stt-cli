@@ -12,9 +12,13 @@ today is one hand-maintained personal dictionary: `dictionary.json` under the ap
 and edited through `stt dict list/add/rm/import/check` (`stt_cli/commands/dict_cmd.py:34-48`).
 **Shipped by [#81](https://git.hyperide.ai/ultrabricks/stt-cli/issues/81):** the distributable format
 and its validator (`stt_cli/catalog.py`), the 21 curated dictionaries of section 4 with `tags.json`, and
-the committed catalog index. Nothing in the transcription path reads them yet. None of the following is
-built yet: any dictionary source, the `search`/`install`/`installed`/`remove`/`show` commands,
-installed-dictionary merging, overlays, the marketplace website, and usage-based suggestions. Build order,
+the committed catalog index. **Shipped by [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83):**
+both sources (`stt_cli/sources.py`), the index reader (`catalog.parse_index`), the
+`search`/`install`/`installed`/`show`/`uninstall` commands, installed-dictionary merging and the
+fingerprint (`stt_cli/installed.py`), read by file transcription and `stt dict check`. Live dictation
+still reads only the personal dictionary; switching it is
+[#113](https://git.hyperide.ai/ultrabricks/stt-cli/issues/113). None of the following is built yet:
+overlays, the marketplace website, and usage-based suggestions. Build order,
 as recorded on the epic: [#81](https://git.hyperide.ai/ultrabricks/stt-cli/issues/81) (format, catalog
 contract, curated content), then [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) (sources,
 install, effective glossary, cache fingerprint), then
@@ -198,12 +202,11 @@ and `install` with the remote source, never by a transcription or a dictation se
 | `stt dict search [query] [--tag T] [--remote]` | Lists id, version, title, tags, languages and term count of entries whose id, title or tags contain the query, case-insensitively; marks installed ones. It reads only the catalog index, which holds no terms, so unlike the website's search (section 8) it does not match term text. |
 | `stt dict install <id> [--remote]` | Fetches, verifies, validates (section 3), writes. Re-installing upgrades, printing old and new version, and warns if an overlay exists for it. |
 | `stt dict installed` | Lists installed dictionaries (id, version, term count, overlay or not); warns when the effective glossary exceeds the 500-term phonetic screen or merging dropped entries (section 6). Offline. |
-| `stt dict remove <id>` | Deletes the installed file; leaves the overlay (the user's own writing) and says where it is. |
+| `stt dict uninstall <id>` | Deletes the installed file; leaves the overlay (the user's own writing) and says where it is. |
 | `stt dict show <id>` | The effective terms of one installed dictionary, each marked base, replaced or added; disabled entries separately; every overlay warning (section 7). Before [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84), base terms only. |
 
-`remove` is a working name. Section 11 recommends `uninstall` instead, because `stt dict rm` already
-deletes a personal term and the two are one typo apart; whichever name #83 settles replaces `remove`
-everywhere in this document.
+The uninstall command is `uninstall`, settled by [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83)
+(section 11): `stt dict rm` already deletes a personal term, and `remove` was one typo away from it.
 
 **On-disk layout (decided on [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) and
 [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84), 2026-09-29, reversible): split by
@@ -211,7 +214,7 @@ who writes the file.**
 
 | File | Path | Written by |
 | --- | --- | --- |
-| Installed dictionary | `<app_home>/dicts/installed/<id>.json` | stt (`install`, `remove`) |
+| Installed dictionary | `<app_home>/dicts/installed/<id>.json` | stt (`install`, `uninstall`) |
 | Overlay | `~/.config/stt-cli/dicts/overlays/<dict_id>.yaml`; `$XDG_CONFIG_HOME/stt-cli/dicts/overlays/<dict_id>.yaml` when `XDG_CONFIG_HOME` is set | the user, by hand |
 
 `<app_home>` is `config.app_home()`: `STT_HOME` if set, otherwise
@@ -220,7 +223,7 @@ who writes the file.**
 archive (`stt_cli/config.py:72-96`). An installed dictionary is a downloaded artefact stt writes and
 replaces itself, so it sits beside the personal dictionary it is merged with and keeps `STT_HOME`'s test
 isolation. An overlay is the one dictionary file a person writes by hand and expects to find, edit and
-keep, so it goes in the conventional configuration directory Alex named; an upgrade or `stt dict remove`
+keep, so it goes in the conventional configuration directory Alex named; an upgrade or `stt dict uninstall`
 can then never touch it. stt keeps none of its own files under `~/.config` today (its one write there is
 `install-skill`'s blurb for the opencode harness, `stt_cli/install.py:96-101`; the `$XDG_STATE_HOME` pid
 file named in `stt_cli/commands/mic.py:592-594` belongs to the external service library), so the overlay
@@ -243,7 +246,7 @@ comparable with the index.
 | Site unreachable, timeout, HTTP error | `NetworkError`, exit 7 | check the network, or install without `--remote` |
 | File fails validation | `UsageError` (`stt_cli/_errors.py:65`), exit 2 | names the entry and the limit it broke |
 | Index `format` newer than this stt | `UsageError`, exit 2 | upgrade stt |
-| `remove` or `show` of an id not installed | `unknown_item`, exit 4 | `stt dict installed` |
+| `uninstall` or `show` of an id not installed | `unknown_item`, exit 4 | `stt dict installed` |
 
 ## 6. Effective glossary and cache fingerprint
 
@@ -285,8 +288,8 @@ near-matches to installed terms stay flags (`AGENTS.md:149-151`).
 | Call site | Change |
 | --- | --- |
 | `stt_cli/pipeline.py:247` (`_resolve`) | effective glossary, loaded once; the snapshot feeds every later stage (`stt_cli/pipeline.py:230-234`) |
-| `stt_cli/live/dictation.py:220` (ad-hoc session), `:835` (daemon burst) | effective glossary, loaded once per session or burst, as today |
-| `stt_cli/live/status.py:218` (`example_hint`, called once per burst from `stt_cli/live/dictation.py:358`) | takes the glossary the same session or burst already loaded instead of reading it again; keeps the built-in fallback when there is none (`stt_cli/live/status.py:217-220`), so the hint can name an installed term when the personal dictionary is empty. A burst loads the effective glossary once, not twice, before the microphone opens. |
+| `stt_cli/live/dictation.py:220` (ad-hoc session), `:835` (daemon burst) | effective glossary, loaded once per session or burst, as today. Not switched by [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83), whose change left `stt_cli/live/` to concurrent work; tracked in [#113](https://git.hyperide.ai/ultrabricks/stt-cli/issues/113). |
+| `stt_cli/live/status.py:218` (`example_hint`, called once per burst from `stt_cli/live/dictation.py:358`) | takes the glossary the same session or burst already loaded instead of reading it again; keeps the built-in fallback when there is none (`stt_cli/live/status.py:217-220`), so the hint can name an installed term when the personal dictionary is empty. A burst loads the effective glossary once, not twice, before the microphone opens. [#113](https://git.hyperide.ai/ultrabricks/stt-cli/issues/113). |
 | `stt_cli/commands/dict_cmd.py:217` (`_check`) | effective glossary: the command explains what the pipeline does. Today `_check` loads the personal dictionary even with `settings.dictionary` off; after the switch it reports an empty glossary then, as the pipeline would use none. |
 | `stt_cli/commands/dict_cmd.py:56` (`_list`) | unchanged: personal terms, byte-identical output |
 | `dictionary.editing` (`stt_cli/dictionary.py:551-573`; `add`, `rm`, `import`) | unchanged: writes the personal file only |
@@ -306,7 +309,7 @@ each a test:
 
 | Change | Fingerprint |
 | --- | --- |
-| Install or remove a dictionary contributing at least one surviving entry | changes |
+| Install or uninstall a dictionary contributing at least one surviving entry | changes |
 | Edit an overlay so the effective entries change | changes |
 | Reformat an installed or overlay file; bump `version` with identical terms | unchanged (words, not presentation, `AGENTS.md:132-134`) |
 | Personal dictionary only, nothing installed | identical to today's digest, so existing archives stay valid |
@@ -473,7 +476,7 @@ through `resources.py`'s disk guard like every large download.
 ## 10. Platform deferrals
 
 Platform-independent, and in scope wherever stt starts: the distributable format, catalog and tag
-vocabulary, both sources, install/remove/show, overlays, the effective glossary and fingerprint, the
+vocabulary, both sources, install/uninstall/show, overlays, the effective glossary and fingerprint, the
 website, and section 9's eligibility and scoring. Deferred: notifications and microphone capture outside
 macOS. Linux needs `notify-send` or a D-Bus notification action (oh-my-pi's
 `packages/tui/src/desktop-notify.ts` is the one precedent found) plus capture, tracked in
@@ -487,7 +490,7 @@ Until then the suggestion check prints its result to the terminal instead of pos
 
 | Decision | Recommendation here | Owner |
 | --- | --- | --- |
-| Uninstall command name, given `stt dict rm` already removes a personal term | `uninstall` instead of `remove`: pairs with `install`, cannot be mistyped as `rm` | [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) |
+| Uninstall command name, given `stt dict rm` already removes a personal term | decided on [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83): `uninstall`, which pairs with `install` and cannot be mistyped as `rm` | [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) |
 | Overlay parser: standard-library subset or optional PyYAML with JSON fallback | standard-library subset (section 7) | [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84), recorded in this file |
 | Publish flow: hosted API or pull request | pull request (section 8) | [#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86) |
 | Site placement: `site/` here or a separate repository | `site/` in this repository (section 8) | [#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86) |

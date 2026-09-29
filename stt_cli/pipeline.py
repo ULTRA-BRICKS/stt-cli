@@ -26,7 +26,18 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import archive as archive_mod
-from . import chunks, cleaning, config, dictionary, formats, media, postprocess, vad, variants
+from . import (
+    chunks,
+    cleaning,
+    config,
+    dictionary,
+    formats,
+    installed,
+    media,
+    postprocess,
+    vad,
+    variants,
+)
 from ._errors import SttError, unknown_item
 from .backends import DecodeRequest, resolve
 from .backends.base import Backend, context_tokens
@@ -72,7 +83,7 @@ async def transcribe(
     source: Path, settings: Settings, *, reporter: Reporter, store: archive_mod.Archive
 ) -> RunResult:
     """Transcribe one file end to end, answering from the archive when nothing has changed."""
-    settings, terms = _resolve(settings)
+    settings, terms = _resolve(settings, reporter)
     audio, archived_sha = await resolve_source(source, store, reporter)
     info = await media.inspect(audio, recorded_at=settings.recorded_at)
     if archived_sha is not None:
@@ -224,7 +235,7 @@ def _diarize_key(settings: Settings) -> str:
     return f"speakers={settings.speakers or 'auto'}"
 
 
-def _resolve(settings: Settings) -> tuple[Settings, dictionary.Dictionary]:
+def _resolve(settings: Settings, reporter: Reporter) -> tuple[Settings, dictionary.Dictionary]:
     """Settle everything the cache key depends on BEFORE the key is computed.
 
     Returns the dictionary it read along with the settings, and every later stage uses THAT
@@ -232,6 +243,10 @@ def _resolve(settings: Settings) -> tuple[Settings, dictionary.Dictionary]:
     change the glossary halfway through an hour-long run: the transcript would then be
     stored under a fingerprint describing a dictionary that did not produce it, and asking
     for the old dictionary again would serve the new dictionary's words out of the cache.
+    The dictionary is the EFFECTIVE glossary — the personal terms plus every installed
+    dictionary (`installed.load_effective`) — so installing or uninstalling one changes the
+    digest, and the fingerprint with it, exactly as editing the personal file does. What the
+    merge left out is said here, once per transcription.
 
     Two things here are implied rather than typed by the user, and both change the words in
     the transcript, so both have to be settled before ``archive.fingerprint`` sees the
@@ -244,7 +259,9 @@ def _resolve(settings: Settings) -> tuple[Settings, dictionary.Dictionary]:
     The dictionary digest is here rather than inside the fingerprint for a plainer reason: a
     hash function that reads a file is a hash function nobody can test.
     """
-    terms = dictionary.load() if settings.dictionary else dictionary.Dictionary()
+    terms, warnings = installed.load_effective(settings)
+    for warning in warnings:
+        reporter.step(f"dictionary: {warning}")
     # Fail on a bad `context` here rather than after ffmpeg, voice-activity detection and
     # chunking have already run: the CLI constrains it with `choices`, but a hand-edited
     # config.json does not go through argparse.

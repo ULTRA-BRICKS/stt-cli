@@ -7,6 +7,11 @@ term gets flagged for the reader and for the LLM correction pass.
 
 ``stt dict check`` exists so the phonetic threshold is inspectable rather than magic: paste
 a line of a transcript and see exactly what would have been flagged and how strongly.
+
+``stt dict search`` / ``install`` / ``installed`` / ``show`` / ``uninstall`` adopt a whole
+curated dictionary at once — bundled with stt, or from the marketplace website with
+``--remote``. Installed terms join the personal ones in every transcription; the personal
+dictionary wins every conflict, and ``stt dict list`` still shows only the personal terms.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import os
 import stat
 from pathlib import Path
 
-from .. import dictionary, portable
+from .. import dictionary, installed, portable, sources
 from .._errors import EXIT_OK, EXIT_UNKNOWN_ITEM, UsageError
 
 # How far below the flagging threshold `stt dict check` still reports a resemblance.
@@ -46,6 +51,24 @@ def run(argv: list[str]) -> int:
 
     check = sub.add_parser("check", help="show what a line of text would match")
     check.add_argument("text", nargs="+")
+
+    remote_help = "ask the marketplace website instead of the dictionaries bundled with stt"
+    search = sub.add_parser("search", help="find a curated dictionary to install")
+    search.add_argument("query", nargs="?", default="", help="part of an id, title or tag")
+    search.add_argument("--tag", help="only dictionaries carrying this tag")
+    search.add_argument("--remote", action="store_true", help=remote_help)
+
+    adopt = sub.add_parser("install", help="install (or upgrade) a curated dictionary")
+    adopt.add_argument("id")
+    adopt.add_argument("--remote", action="store_true", help=remote_help)
+
+    sub.add_parser("installed", help="list the installed dictionaries")
+
+    show = sub.add_parser("show", help="the terms of one installed dictionary")
+    show.add_argument("id")
+
+    drop = sub.add_parser("uninstall", help="remove an installed dictionary")
+    drop.add_argument("id")
 
     args = parser.parse_args(argv)
     action = args.action or "list"
@@ -211,16 +234,22 @@ def _check(args: argparse.Namespace) -> int:
     different answer from the pipeline's in both directions — it flagged the term itself,
     which the pipeline never does, and it said nothing about "hyper ide", which the pipeline
     flags — so the command meant to explain the threshold was explaining something else.
+    For the same reason it reads the glossary the pipeline reads: the effective one, with
+    the installed dictionaries in it, and none at all when the dictionary is turned off.
     """
     from .. import config
 
-    terms = dictionary.load()
+    settings = config.load_settings()
     # Validated BEFORE the empty-dictionary shortcut, because the pipeline validates
     # unconditionally: with a broken `dict_similarity` in the config and no terms yet, this
     # command answered "nothing is wrong" while `stt rec.m4a` refused to start. The command
     # that exists to explain the threshold has to refuse exactly what the pipeline refuses.
-    threshold = config.load_settings().dict_similarity
+    threshold = settings.dict_similarity
     dictionary.validate_similarity(threshold)
+    if not settings.dictionary:
+        print("the dictionary is turned off in the settings — nothing to match against")
+        return EXIT_OK
+    terms, _ = installed.load_effective(settings)
     if not terms:
         print("the dictionary is empty — nothing to match against")
         return EXIT_OK
@@ -267,4 +296,115 @@ def _warn_if_over_budget(terms: dictionary.Dictionary) -> None:
         )
 
 
-_ACTIONS = {"list": _list, "add": _add, "rm": _remove, "import": _import, "check": _check}
+def _source(args: argparse.Namespace) -> sources.DictionarySource:
+    return sources.RemoteSource() if args.remote else sources.BundledSource()
+
+
+def _search(args: argparse.Namespace) -> int:
+    source = _source(args)
+    index = source.index()
+    found = [
+        entry
+        for entry in index.entries
+        if entry.matches(args.query) and (args.tag is None or args.tag.casefold() in entry.tags)
+    ]
+    if not found:
+        asked = [repr(args.query)] if args.query else []
+        asked += [f"--tag {args.tag}"] if args.tag else []
+        print(f"no dictionary in {source.name} matches {' '.join(asked) or 'anything'}")
+        print("  every dictionary:  stt dict search" + (" --remote" if args.remote else ""))
+        return EXIT_OK
+    have = set(installed.installed_ids())
+    width = max(len(entry.id) for entry in found)
+    for entry in found:
+        mark = "*" if entry.id in have else " "
+        print(
+            f"{mark} {entry.id:<{width}}  v{entry.version:<3} {entry.term_count:>4} terms  "
+            f"{','.join(entry.languages):<6} {entry.title}  [{', '.join(entry.tags)}]"
+        )
+    print(f"\n{len(found)} of {len(index.entries)} dictionaries in {source.name}; * = installed")
+    print(f"install one:  stt dict install <id>{' --remote' if args.remote else ''}")
+    return EXIT_OK
+
+
+def _install(args: argparse.Namespace) -> int:
+    done = installed.install(_source(args), args.id)
+    adopted = done.dictionary
+    size = f"{len(adopted.entries)} terms"
+    if done.previous is None:
+        print(f"installed {adopted.id} v{adopted.version} ({size}): {adopted.title}")
+    elif done.previous == adopted.version:
+        print(f"reinstalled {adopted.id} v{adopted.version} ({size}), already the latest version")
+    elif done.previous < adopted.version:
+        print(f"upgraded {adopted.id} from v{done.previous} to v{adopted.version} ({size})")
+    else:
+        # The other source is behind: `install` without --remote after a --remote install.
+        print(f"replaced {adopted.id} v{done.previous} with the older v{adopted.version} ({size})")
+    print(f"  {done.path}")
+    print(f"  its terms:  stt dict show {adopted.id}")
+    overlay = installed.overlay_path(adopted.id)
+    if overlay.exists():
+        print(f"warning: your overlay {overlay} customizes this dictionary; check it still fits")
+    return EXIT_OK
+
+
+def _installed(_args: argparse.Namespace) -> int:
+    from .. import config
+
+    found = installed.read_all()
+    if not found:
+        print("no dictionaries are installed")
+        print("  find one:  stt dict search")
+        return EXIT_OK
+    width = max(len(adopted.id) for adopted in found)
+    for adopted in found:
+        overlay = installed.overlay_path(adopted.id)
+        extra = f"  overlay: {overlay}" if overlay.exists() else ""
+        print(
+            f"{adopted.id:<{width}}  v{adopted.version:<3} {len(adopted.entries):>4} terms"
+            f"  {adopted.title}{extra}"
+        )
+    print(f"\n{len(found)} installed in {installed.directory()}")
+    if not config.load_settings().dictionary:
+        print("note: the dictionary is turned off in the settings, so none of these is used")
+    _, warnings = installed.merge(dictionary.load(), found)
+    for warning in warnings:
+        print(f"warning: {warning}")
+    return EXIT_OK
+
+
+def _show(args: argparse.Namespace) -> int:
+    adopted = installed.read(args.id)
+    print(f"{adopted.id} v{adopted.version}: {adopted.title}")
+    print(f"  tags: {', '.join(adopted.tags)}   languages: {', '.join(adopted.languages)}")
+    print(f"  license: {adopted.license}   source: {adopted.source}")
+    print()
+    for entry in adopted.entries:
+        print(f"  {entry.term.describe()}")
+    print(f"\n{len(adopted.entries)} term(s) in {installed.directory() / (adopted.id + '.json')}")
+    for warning in installed.drops_involving(adopted.id, dictionary.load(), installed.read_all()):
+        print(f"warning: {warning}")
+    return EXIT_OK
+
+
+def _uninstall(args: argparse.Namespace) -> int:
+    gone = installed.uninstall(args.id)
+    print(f"uninstalled {args.id} ({gone})")
+    overlay = installed.overlay_path(args.id)
+    if overlay.exists():
+        print(f"your overlay stays at {overlay}; delete it yourself if you no longer want it")
+    return EXIT_OK
+
+
+_ACTIONS = {
+    "list": _list,
+    "add": _add,
+    "rm": _remove,
+    "import": _import,
+    "check": _check,
+    "search": _search,
+    "install": _install,
+    "installed": _installed,
+    "show": _show,
+    "uninstall": _uninstall,
+}

@@ -1,0 +1,14 @@
+{
+  "id": "fixture-tools",
+  "version": 2,
+  "title": "Fixture tool names",
+  "tags": ["software-engineering-tools", "vendor-names"],
+  "languages": ["en"],
+  "license": "CC0-1.0",
+  "source": "written by hand for the source-parser tests and the website's API contract tests",
+  "terms": [
+    {"id": "conloca", "term": "ConLoca", "aka": ["ConLog", "ConLoka"], "note": "a project name"},
+    {"id": "hyperide", "term": "HyperIDE", "aka": ["hyper ide"]},
+    {"id": "figma", "term": "Figma", "aka": ["Vigma"], "note": "a design tool"}
+  ]
+}

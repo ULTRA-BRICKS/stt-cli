@@ -616,6 +616,27 @@ def _alias_index(terms: list[Term]) -> tuple[re.Pattern[str] | None, dict[str, s
     length makes the longest alias win regardless of which entry it came from — Python's
     alternation takes the first branch that matches at a position, so the order IS the rule.
     """
+    canonical = _correctable_aliases(terms)
+    if len(canonical) > MAX_ALIAS_BRANCHES:
+        # Bounded by BRANCHES, not by which entry an alias sits on. Truncating the term list
+        # here silently switched off exact correction for everything past entry 500 — the
+        # opposite of what the caps promise, which is that only the phonetic screen is
+        # capped and a spelling the user wrote down is always applied.
+        canonical = dict(list(canonical.items())[:MAX_ALIAS_BRANCHES])
+    return _compiled(canonical)
+
+
+def uncorrected_alias_count(terms: list[Term]) -> int:
+    """How many recorded spellings `_alias_index` leaves out because of ``MAX_ALIAS_BRANCHES``.
+
+    Counted over the spellings it would really correct, after the same skips, so a spelling
+    it drops for another reason (too long, claimed twice) is not reported as cut by the cap.
+    """
+    return max(0, len(_correctable_aliases(terms)) - MAX_ALIAS_BRANCHES)
+
+
+def _correctable_aliases(terms: list[Term]) -> dict[str, str]:
+    """Every alias `_alias_index` may correct, casefolded, to its term, in file order."""
     canonical: dict[str, str] = {}
     # A word that is somebody's NAME is never rewritten into somebody else's, however the
     # file came to say so. `add` refuses that collision, but the file can be hand-edited,
@@ -641,14 +662,7 @@ def _alias_index(terms: list[Term]) -> tuple[re.Pattern[str] | None, dict[str, s
             if alias.casefold() in names and alias.casefold() != term.term.casefold():
                 continue
             canonical[alias.casefold()] = term.term
-            if len(canonical) >= MAX_ALIAS_BRANCHES:
-                # Bounded by BRANCHES, not by which entry an alias sits on. Truncating the
-                # term list here silently switched off exact correction for everything past
-                # entry 500 — the opposite of what the caps promise, which is that only the
-                # phonetic screen is capped and a spelling the user wrote down is always
-                # applied.
-                return _compiled(canonical)
-    return _compiled(canonical)
+    return canonical
 
 
 def _compiled(canonical: dict[str, str]) -> tuple[re.Pattern[str] | None, dict[str, str]]:
@@ -734,8 +748,20 @@ def screen(
 
 
 def _screened(terms: list[Term]) -> list[Term]:
-    keep = [term for term in terms if len(term.term) >= MIN_TERM_LENGTH and _fits(term.term)]
-    return keep[:MAX_SCREENED_TERMS]
+    return _screenable(terms)[:MAX_SCREENED_TERMS]
+
+
+def unscreened_count(terms: list[Term]) -> int:
+    """How many terms the phonetic screen leaves out because of ``MAX_SCREENED_TERMS``.
+
+    Zero for anything built through the commands; several installed dictionaries together
+    can pass the cap, and then somebody has to be told how much it left out.
+    """
+    return max(0, len(_screenable(terms)) - MAX_SCREENED_TERMS)
+
+
+def _screenable(terms: list[Term]) -> list[Term]:
+    return [term for term in terms if len(term.term) >= MIN_TERM_LENGTH and _fits(term.term)]
 
 
 def _fits(text: str) -> bool:
