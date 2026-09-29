@@ -38,14 +38,25 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import os
 import sys
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
-from .._errors import EXIT_ENGINE, EXIT_MISSING_DEP, EXIT_OK, EXIT_PERMISSION, SttError, UsageError
+from .._errors import (
+    EXIT_ENGINE,
+    EXIT_MISSING_DEP,
+    EXIT_OK,
+    EXIT_PERMISSION,
+    EngineError,
+    MissingDependencyError,
+    PermissionDeniedError,
+    SttError,
+    UsageError,
+)
 from ..live import hotkey as hotkey_mod
-from ..live.mic_service import SERVE_TOKEN
+from ..live.mic_service import PATH_FLAG, SERVE_TOKEN
 
 if TYPE_CHECKING:
     from agenttools_service import ServiceManager
@@ -70,19 +81,13 @@ _LIFECYCLE = ("run", "start", "stop", "status", "enable", "disable")
 _EXIT_NOT_RUNNING = 3
 
 # The daemon's own Accessibility remediation, shared verbatim by `_status` (#54) and
-# `_maybe_autostart_daemon` (#87) — both diagnose the SAME fact (a launchd-spawned process
-# denied Accessibility, `probe.last_exit_code == EXIT_PERMISSION`) and must name the SAME
-# fix, not two texts that drift. This is deliberately NOT `quartz.ACCESSIBILITY_HINT`
-# (that one names "the terminal application running stt" — the ad-hoc CLI's own TCC
-# identity): a launchd job execs a different binary under a different TCC identity than
-# whatever terminal is asking, so the terminal's own grant is not evidence about the
-# daemon's, and telling the user to re-check the terminal's grant would send them to
-# check the wrong principal entirely.
+# `_maybe_autostart_daemon` (#87). Deliberately NOT `quartz.ACCESSIBILITY_HINT`, which
+# names the terminal: a launchd job is a different principal from whatever terminal is
+# asking (#80), and only the daemon itself can raise the prompt for it — which is what
+# `stt mic --fix` makes it do (#98).
 _DAEMON_ACCESSIBILITY_FIX = (
-    "grant Accessibility to the process launchd runs for the daemon (its python "
-    "interpreter, or bin/stt — add it manually in System Settings > Privacy & Security > "
-    "Accessibility if not listed; the terminal this ran in does not cover this separate, "
-    "launchd-spawned process)"
+    "run `stt mic --fix` — the daemon asks macOS for its own permission and System "
+    "Settings opens on the one toggle to click"
 )
 
 
@@ -105,6 +110,9 @@ def run(argv: list[str]) -> int:
         # открывать stt mic --help (как алиас)". See #85.
         argv = ["--help"]
     args = _parse(argv)
+    if args.fix or args.yes:
+        _refuse_options_beside_fix(args)
+        return _fix(yes=args.yes)
     # Listing first. `--check` was tested first and `--list-devices` is handled further in,
     # so `stt mic --check --list-devices` spent six seconds listening instead of printing the
     # list — the cheaper and more certain of the two answers losing to the slower one.
@@ -167,18 +175,37 @@ def _daemon_status_line() -> str:
         manager = _default_manager()
         st = manager.status()
         if st.state != "autostart":
+            if not st.running:
+                return "daemon:  not running"
+            waiting = _waiting_line(st.pid)
+            if waiting is not None:
+                return f"daemon:  {waiting}"
             pid_note = f" (pid {st.pid})" if st.pid else ""
-            return f"daemon:  running{pid_note}" if st.running else "daemon:  not running"
+            return f"daemon:  running{pid_note}"
         probe = mic_service.probe_launchd(manager.service.label)
         if probe is not None and not probe.alive:
             exit_note = _exit_note(probe)
             return f"daemon:  enabled, but not currently running{exit_note} — see `stt mic status`"
+        if probe is not None:
+            waiting = _waiting_line(probe.pid)
+            if waiting is not None:
+                return f"daemon:  {waiting}"
         pid_note = f" (pid {probe.pid})" if probe is not None and probe.pid else ""
         return f"daemon:  running{pid_note} [autostart on]"
     except ImportError:
         return "daemon:  not available (agenttools_service is not installed)"
     except Exception:
         return "daemon:  status unavailable — see `stt mic status` for the full diagnostic"
+
+
+def _waiting_line(pid: int | None) -> str | None:
+    """ "waiting for Accessibility — turn on 'python3.14' …" when the live daemon ``pid``
+    is holding for a permission click (#98), else None. Its own record, matched on pid,
+    is the only witness: the terminal asking is a different principal (#80)."""
+    from ..live import permissions
+
+    record = permissions.state_for(pid)
+    return None if record is None else permissions.waiting_text(record.state, record.principal)
 
 
 def _hotkey_lines() -> str:
@@ -260,6 +287,9 @@ def _one_hotkey_line(
 # daemon's own unrelated startup. See `_wait_for_daemon_liveness` (#87/#54).
 _AUTOSTART_PROBE_ATTEMPTS = 6
 _AUTOSTART_PROBE_INTERVAL = 0.5
+# Alive sightings (about a second) before a daemon that has written no state record is
+# taken as settled: the current code writes one within its first second.
+_AUTOSTART_RECORD_SIGHTINGS = 3
 
 
 def _wait_for_daemon_liveness(label: str) -> LaunchdProbe | None:
@@ -284,10 +314,21 @@ def _wait_for_daemon_liveness(label: str) -> LaunchdProbe | None:
 
     if sys.platform != "darwin":
         return mic_service.probe_launchd(label)
+    from ..live import permissions
+
     probe: LaunchdProbe | None = None
+    alive_sightings = 0
     for attempt in range(_AUTOSTART_PROBE_ATTEMPTS):
         probe = mic_service.probe_launchd(label)
-        if probe is not None and (probe.alive or probe.last_exit_code is not None):
+        alive_sightings += probe is not None and probe.alive
+        # Alive is settled once the daemon has said what it is doing (#98: it may be
+        # holding for a permission click, which the caller has to tell the user about) —
+        # or after a second of saying nothing, which only a daemon from before #98 does.
+        if probe is not None and (
+            (probe.alive and permissions.state_for(probe.pid) is not None)
+            or alive_sightings >= _AUTOSTART_RECORD_SIGHTINGS
+            or (not probe.alive and probe.last_exit_code is not None)
+        ):
             return probe
         if attempt < _AUTOSTART_PROBE_ATTEMPTS - 1:
             time.sleep(_AUTOSTART_PROBE_INTERVAL)
@@ -325,9 +366,7 @@ def _autostart_crash_loop_message(probe: LaunchdProbe | None, *, freshly_enabled
         return (
             f"the background daemon {verb}, but it is crash-looping{exit_note}: "
             f"it exited denied Accessibility — {_DAEMON_ACCESSIBILITY_FIX}. autostart is "
-            "NOT confirmed working yet; the next successful ad-hoc dictation retries this "
-            "check automatically once that is granted, or run `stt mic disable && stt mic "
-            "enable` yourself after granting it — `stt mic status` has the full diagnostic."
+            "NOT confirmed working yet — `stt mic status` has the full diagnostic."
         )
     return (
         f"the background daemon {verb}, but has not come up yet{exit_note} — "
@@ -381,6 +420,7 @@ def _maybe_autostart_daemon(*, quiet: bool) -> None:
     outcome: Literal["enabled", "retry"] | None = None
     crash: LaunchdProbe | None = None
     freshly_enabled = False
+    waiting: str | None = None
     try:
         with config.locked_for_daemon_decision():
             if config.load_settings().mic_daemon_autostart not in (
@@ -439,6 +479,7 @@ def _maybe_autostart_daemon(*, quiet: bool) -> None:
                     "mic_daemon_autostart", True, unset=(None, config.MIC_AUTOSTART_RETRY)
                 ):
                     outcome = "enabled"
+                    waiting = _waiting_line(probe.pid) if probe is not None else None
             else:
                 # Either a diagnosed NOT-alive daemon on macOS, or macOS itself failed to
                 # answer within the probe budget (`launchctl` unreachable, timed out, or an
@@ -469,15 +510,254 @@ def _maybe_autostart_daemon(*, quiet: bool) -> None:
     if outcome == "enabled":
         verb = "is now on" if freshly_enabled else "is confirmed on"
         status.note(
-            f"the background dictation daemon {verb} (autostart) — press the hotkey from "
-            "any application to dictate without a terminal open; `stt mic disable` turns "
-            "this off.",
+            f"the background dictation daemon {verb} (autostart) — "
+            + (
+                f"{waiting}; after that click, the hotkey works from any application"
+                if waiting is not None
+                else "press the hotkey from any application to dictate without a terminal open"
+            )
+            + "; `stt mic disable` turns this off.",
             quiet=quiet,
         )
     elif outcome == "retry":
         status.note(
             _autostart_crash_loop_message(crash, freshly_enabled=freshly_enabled), quiet=quiet
         )
+
+
+# `--fix` waits on a person, so its budget is a person's: ten minutes to find the window
+# and click. The daemon keeps waiting after that regardless; this only stops watching it.
+_FIX_TIMEOUT_SECONDS = 600.0
+_FIX_POLL_SECONDS = 1.0
+# A live daemon that has written no state record by now is running code from before
+# #98 (the current code writes one within its first second). It is restarted once, into
+# whatever its LaunchAgent names — the current code, unless it was enabled from an older
+# stt, in which case another restart would only bring the same old code back.
+_FIX_LEGACY_GRACE_SECONDS = 10.0
+# launchd relaunches a daemon that exits after ten seconds. One still down, or down again,
+# this long after it was first seen down after a failed exit is in that loop.
+_FIX_RESTART_LOOP_SECONDS = 10.0
+
+
+def _refuse_options_beside_fix(args: argparse.Namespace) -> None:
+    """`--fix` turns on the daemon as it is installed, so any other option next to it would
+    be silently dropped — and `-y` alone answers a question nothing else asks. Both are
+    refused instead. Read from the parsed namespace, so an abbreviation argparse accepted
+    (`--fi`) counts as what it means."""
+    if not args.fix:
+        raise UsageError(
+            what="`-y` only goes with `--fix`",
+            why="it answers `--fix`'s one question in advance; nothing else asks one",
+            how="`stt mic --fix -y`",
+        )
+    defaults = vars(_parse([]))
+    given = [
+        f"--{name.replace('_', '-')}"
+        for name, value in vars(args).items()
+        if name not in {"fix", "yes"} and value != defaults.get(name)
+    ]
+    if given:
+        raise UsageError(
+            what=f"`stt mic --fix` takes no other options (got: {' '.join(given)})",
+            why="it turns on the background daemon as it is installed; the daemon's "
+            "options are set when it is enabled",
+            how="`stt mic enable <options>` installs the daemon with them, then run "
+            "`stt mic --fix`",
+        )
+
+
+def _fix(
+    *,
+    yes: bool,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    confirm: Callable[[str], bool] | None = None,
+) -> int:
+    """`stt mic --fix`: everything but the click (#98).
+
+    Alex: "Я просил сделать --fix чтобы мне было достаточно только кнопку нажать и все что
+    нужно само сделается". So: the daemon is turned on if it is off, restarted if it is
+    down, and told to ask macOS again (`permissions.rearm` — the daemon's waiting loop
+    re-reads its ledger every tick, so a live one asks within ten seconds, no restart).
+    The asking is the DAEMON's: a prompt raised from here would be attributed to the
+    terminal (#80). This then watches the daemon's own record and launchd's liveness
+    probe (#54) until it is ready, printing each click the user is waiting on once.
+    """
+    if sys.platform != "darwin":
+        raise UsageError(
+            what="`stt mic --fix` only applies on macOS",
+            why="it has the background daemon ask macOS for Accessibility and Microphone, "
+            "which other systems do not gate this way",
+            how="`stt mic enable` starts the background daemon",
+        )
+    from .. import config
+    from ..live import mic_service, permissions
+
+    try:
+        manager = _default_manager()
+    except ImportError as missing:
+        raise MissingDependencyError(
+            what="`stt mic --fix` needs the shared 'agenttools_service' lib",
+            why="the background daemon is installed and started through it",
+            how="pip install -e <agent-tools>/lib/agenttools_daemon "
+            "-e <agent-tools>/lib/agenttools_service",
+        ) from missing
+    label = manager.service.label
+    # Asked before the lock, never inside it: a person reading a y/N question must not hold
+    # up a concurrent `stt config set` or ad-hoc dictation waiting on the same lock.
+    if (
+        not yes
+        and not manager.status().enabled
+        and config.load_settings().mic_daemon_autostart is False
+        and not (confirm or _confirm)(
+            "the background daemon was turned off with `stt mic disable` — turn it back on, "
+            "with its default settings? [y/N] "
+        )
+    ):
+        print("mic: left off — nothing changed")
+        return EXIT_OK
+    with config.locked_for_daemon_decision():
+        st = manager.status()
+        permissions.rearm()
+        if not st.enabled:
+            # The same refusal `stt mic enable` gives: a daemon with no usable hotkey can
+            # never start, and installing it would only buy launchd's restart loop.
+            _refuse_colliding_hotkey_flags(
+                argparse.Namespace(action="enable", hotkey_press=None, hotkey_hold=None)
+            )
+            manager.enable()
+            if not manager.autostart_active():
+                raise PermissionDeniedError(
+                    what="macOS did not accept the background daemon",
+                    why="`launchctl load` of its LaunchAgent failed",
+                    how=f"run `stt mic enable` to see launchctl's answer; the log is "
+                    f"{manager.service.logfile}",
+                )
+            config.save_setting("mic_daemon_autostart", True)
+        else:
+            probe = mic_service.probe_launchd(label)
+            if (probe is None or not probe.alive) and not mic_service.kickstart(label):
+                raise PermissionDeniedError(
+                    what="macOS did not restart the background daemon",
+                    why="`launchctl kickstart` of its LaunchAgent failed",
+                    how="`stt mic disable && stt mic enable` reinstalls it; the log is "
+                    f"{manager.service.logfile}",
+                )
+    return _await_ready(label, str(manager.service.logfile), clock=clock, sleep=sleep)
+
+
+def _await_ready(
+    label: str, logfile: str, *, clock: Callable[[], float], sleep: Callable[[float], None]
+) -> int:
+    """Watch the daemon until its own record says ready, saying each wait once."""
+    from ..live import mic_service, permissions
+
+    deadline = clock() + _FIX_TIMEOUT_SECONDS
+    said: str | None = None
+    unrecorded: tuple[int, float] | None = None
+    up: tuple[int, float] | None = None
+    first_down: float | None = None
+    kicked = False
+    while True:
+        probe = mic_service.probe_launchd(label)
+        pid = probe.pid if probe is not None and probe.alive else None
+        record = permissions.state_for(pid)
+        if pid is not None and (up is None or up[0] != pid):
+            up = (pid, clock())
+        if up is not None and pid == up[0] and clock() - up[1] >= _FIX_RESTART_LOOP_SECONDS:
+            # Up longer than a restart loop lets it stay up: a later exit is a new failure,
+            # not more of an old one.
+            first_down = None
+        if pid is None and probe is not None and probe.last_exit_code not in (None, EXIT_OK):
+            # Down after a failed exit. Once is a restart in progress; still or again down
+            # this long after is launchd's restart loop, which a brief sighting of each new
+            # process does not end. Waiting on it would take the whole ten minutes to say
+            # what is already certain.
+            if first_down is None:
+                first_down = clock()
+            elif clock() - first_down >= _FIX_RESTART_LOOP_SECONDS:
+                if probe.last_exit_code == EXIT_PERMISSION:
+                    # The current daemon waits for the click and never exits with this
+                    # code; only one from before #98 does.
+                    raise PermissionDeniedError(
+                        what="the background daemon is an older stt that exits instead of "
+                        "waiting for the click",
+                        why=f"it keeps exiting denied Accessibility{_exit_note(probe)}; it "
+                        "was enabled from a stt before this one, and restarting it only "
+                        "brings the same code back",
+                        how="`stt mic disable && stt mic enable` reinstalls it from this "
+                        "stt, which asks macOS and waits; then run `stt mic --fix` again",
+                    )
+                raise EngineError(
+                    what="the background daemon keeps exiting",
+                    why=f"launchd restarts it and it fails again{_exit_note(probe)}, and not "
+                    "for want of a permission",
+                    how=f"its log says why: {logfile}",
+                )
+        if record is not None:
+            if record.state == "ready":
+                print(
+                    f"mic: ready — the background daemon (pid {pid}) has its permissions; "
+                    f"{_press_hint()}"
+                )
+                return EXIT_OK
+            line = permissions.waiting_text(record.state, record.principal) or (
+                "permissions granted — loading the models (up to a minute)"
+            )
+            if line != said:
+                print(f"mic: {line}")
+                said = line
+        elif pid is not None:
+            if unrecorded is None or unrecorded[0] != pid:
+                unrecorded = (pid, clock())
+            elif clock() - unrecorded[1] >= _FIX_LEGACY_GRACE_SECONDS:
+                if kicked:
+                    # Still alive after a restart, so it got past its own Accessibility
+                    # check (older code exits when it is missing) — it works, it just
+                    # cannot say so. Killing it again would change nothing.
+                    print(
+                        f"mic: running (pid {pid}), but it is an older stt that cannot "
+                        "report its permissions — `stt mic disable && stt mic enable` "
+                        "reinstalls it from this one"
+                    )
+                    return EXIT_OK
+                mic_service.kickstart(label)
+                kicked = True
+                unrecorded = None
+                first_down = None  # the restart just made is not a failure of its own
+        if clock() >= deadline:
+            if said is None:
+                last_exit = "" if probe is None or probe.alive else _exit_note(probe)
+                said = f"not running{last_exit}"
+            raise PermissionDeniedError(
+                what="the background daemon is not ready yet",
+                why=f"after ten minutes it is still: {said}",
+                how="it keeps waiting by itself and carries on after the click — "
+                f"`stt mic status` shows where it is; the log is {logfile}",
+            )
+        sleep(_FIX_POLL_SECONDS)
+
+
+def _press_hint() -> str:
+    """ "press cmd+shift+space in any application" — or a pointer when it cannot be read."""
+    from .. import config
+
+    try:
+        combo = hotkey_mod.resolve_press(config.load_settings().hotkey_press)
+    except (hotkey_mod.HotkeyError, SttError):
+        combo = None
+    return (
+        f"press {combo.spec} in any application to dictate"
+        if combo is not None
+        else "press your hotkey in any application to dictate"
+    )
+
+
+def _confirm(question: str) -> bool:
+    """A yes/no on the terminal; no terminal, no yes — `-y` is how a script says yes."""
+    if not sys.stdin.isatty():
+        return False
+    return input(question).strip().lower() in {"y", "yes"}
 
 
 def _add_dictation_flags(parser: argparse.ArgumentParser, *, daemon: bool) -> None:
@@ -532,7 +812,9 @@ def _parse(argv: list[str]) -> argparse.Namespace:
             "stt itself) — System Settings > Privacy & Security. if nothing appears at all, "
             "`stt mic --check` shows what the microphone actually hears against the bar it "
             "has to clear. run/start/status/stop/enable/disable run the same dictation as a "
-            "background daemon behind a hotkey instead — see `stt mic run --help`"
+            "background daemon behind a hotkey instead — see `stt mic run --help`. the "
+            "daemon asks macOS for its OWN Accessibility and Microphone and waits for your "
+            "click; `stt mic --fix` turns it on and makes it ask again if you missed it"
         ),
     )
     _add_dictation_flags(parser, daemon=False)
@@ -542,6 +824,15 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         help="open the microphone, show what it hears, and say whether that is enough",
     )
     parser.add_argument("--list-devices", action="store_true", help="show microphones and exit")
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="make the background daemon work: turn it on, have it ask macOS for its own "
+        "permissions, open System Settings on the toggle to click, and wait until it is ready",
+    )
+    parser.add_argument(
+        "-y", "--yes", action="store_true", help="with --fix: never ask a question first"
+    )
     return parser.parse_args(argv)
 
 
@@ -586,16 +877,20 @@ def _daemon_parser() -> argparse.ArgumentParser:
             "reports it; the hotkey itself always works regardless). "
             "`stt mic stop` ends the daemon itself. needs Accessibility "
             "and Microphone: granted to the TERMINAL for `run` (foreground, this shell) — "
-            "but `start`/`enable` detach into a launchd-spawned process with its OWN grant, "
-            "separate from any terminal's, so `stt mic status` names that process "
-            "specifically if it is what is missing the grant. System Settings > Privacy & "
-            "Security. the pidfile lives at $XDG_STATE_HOME/stt/mic.pid (default "
+            "but `enable` hands the daemon to launchd, which runs it as its OWN principal "
+            "(the python interpreter), separate from any terminal's: that daemon asks macOS "
+            "for both itself, opens System Settings on the toggle, and waits for your click "
+            "— `stt mic status` says what it is waiting for, and `stt mic --fix` makes it "
+            "ask again. the pidfile lives at $XDG_STATE_HOME/stt/mic.pid (default "
             "~/.local/state/stt/mic.pid), the log at $XDG_CACHE_HOME/stt/mic.log (default "
             "~/.cache/stt/mic.log) — the first place to look if `stt mic status` says it is "
             "enabled but dictation never actually starts."
         ),
     )
     _add_dictation_flags(parser, daemon=True)
+    # Baked in by `mic_service._serve_argv`, never typed: the PATH the daemon finds its
+    # tools on once launchd, with its own bare PATH, is the one running it.
+    parser.add_argument(PATH_FLAG, dest="search_path", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--hotkey-press",
         type=_hotkey_press_spec,
@@ -833,6 +1128,10 @@ def _status(ns: argparse.Namespace) -> int:
     # paths below, not a bug: cheap, and the alternative is reimplementing its formatting.
     st = manager.status()
     if st.state != "autostart":
+        waiting = _waiting_line(st.pid) if st.running else None
+        if waiting is not None:
+            print(f"mic: {waiting}")
+            return EXIT_PERMISSION
         return int(run_action(manager, "status"))
 
     probe = mic_service.probe_launchd(manager.service.label)
@@ -841,28 +1140,27 @@ def _status(ns: argparse.Namespace) -> int:
         # lib's own OS-managed-is-presumed-running read.
         return int(run_action(manager, "status"))
     if probe.alive:
-        # The shared lib's own status() has no pid here (an OS-managed instance has no
-        # pidfile to read one from) — launchctl just gave us a better answer than
-        # `run_action` would print, so use it instead of discarding it.
+        # A live process may still be holding for a permission click (#98) — its own
+        # record says so; otherwise the shared lib has no pid for an OS-managed instance
+        # and launchctl's is the better answer.
+        waiting = _waiting_line(probe.pid)
+        if waiting is not None:
+            print(f"mic: {waiting}")
+            print(f"     pid {probe.pid} [autostart on] — it carries on by itself after the click")
+            return EXIT_PERMISSION
         print(f"mic: running (pid {probe.pid}) [autostart on]")
         return EXIT_OK
 
-    # Registered and enabled, but launchd has no live process for it right now — exactly
-    # the crash-loop #54 was filed from. The reason, when known, comes from the DAEMON's
-    # own diagnosed exit code — NOT `quartz.trusted()` of this CLI process: a launchd job
-    # execs a different binary under a different TCC identity than the terminal `status`
-    # runs in, so a terminal already granted Accessibility (the common case: ad-hoc `stt
-    # mic` already works, which is why someone ran `enable` at all) would make
-    # `quartz.trusted()` here answer for the WRONG process and miss the diagnosis
-    # entirely. `require_accessibility` (`live/quartz.py`) is the only place anywhere
-    # `dictate_daemon` can reach that raises `PermissionDeniedError`, so the daemon's own
-    # `last exit code == EXIT_PERMISSION` is unambiguous evidence about THAT process.
+    # Registered and enabled, but launchd has no live process for it right now (#54). The
+    # reason, when known, comes from the DAEMON's own exit code — never `quartz.trusted()`
+    # of this CLI process, which answers for the terminal's principal, not the daemon's.
+    # A daemon from before #98 still exits with `EXIT_PERMISSION` when not trusted.
     exit_note = _exit_note(probe)
     if probe.last_exit_code == EXIT_PERMISSION:
         print(
             f"mic: not running — crash-looping{exit_note}: the daemon exited denied Accessibility"
         )
-        print(f"     fix: {_DAEMON_ACCESSIBILITY_FIX}, then `stt mic disable && stt mic enable`")
+        print(f"     fix: {_DAEMON_ACCESSIBILITY_FIX}")
         return EXIT_PERMISSION
     print(f"mic: not running — enabled, but currently down between restarts{exit_note}")
     print(f"     check the log: {manager.service.logfile}")
@@ -903,6 +1201,8 @@ def _serve(rest: list[str]) -> int:
     `start` a daemon whose detached child still lands here regardless.
     """
     args = _daemon_parser().parse_args(rest)
+    if args.search_path:
+        os.environ["PATH"] = args.search_path
     from ..live import dictation
 
     asyncio.run(dictation.dictate_daemon(args))

@@ -275,6 +275,21 @@ because that is the level macOS grants them at: **Accessibility**, to type at al
 Accessibility consent flow if it has not been granted yet — stt cannot complete that flow
 for you, so finishing it is still yours to do.
 
+The background daemon (below) is a different process to macOS — the Python interpreter
+launchd runs, not your terminal — so it needs its own two grants, and it asks for them
+itself: when it starts without Accessibility it raises macOS's prompt, opens System
+Settings on Privacy & Security > Accessibility, and waits there, carrying on by itself
+within two seconds of the toggle being turned on (ten, once the prompt is over five minutes
+old); then it asks for the Microphone the same
+way (one Allow click). It asks each interpreter once, however often it restarts. If you
+missed the window, `stt mic --fix` (`-y` to skip any question) turns the daemon on, makes
+it ask again, and waits with you until it reports ready — your only action is the click.
+A daemon enabled from an older stt still exits instead of waiting; `--fix` says so within
+seconds, and `stt mic disable && stt mic enable` reinstalls it from this one. A daemon that
+keeps failing for any other reason is also named within seconds, with its log. Only the
+launchd daemon waits: `stt mic run` in a terminal asks on the terminal's behalf, so it
+still refuses at once and says what to turn on.
+
 `stt mic --check` is what to run when dictation appears to do nothing, which is a real way
 for it to fail: if every frame the microphone delivers is below the bar the detector sets,
 there is no text, no error and no exit code. It opens the microphone, draws what it hears
@@ -340,11 +355,12 @@ yourself. That automatic enable is only confirmed once the daemon it just instal
 verified genuinely alive, not merely once the OS accepted the install: a launchd-spawned
 process runs under a separate permission identity from the ad-hoc one that just proved
 Accessibility/the microphone work, and the two can genuinely disagree (see `stt mic
-status` below). If it comes up crash-looping instead — most commonly denied Accessibility
-for that separate process — stt says so immediately, names the exact process to grant it
-to, and leaves the decision retryable rather than either falsely confirmed or silently
-abandoned; the next successful ad-hoc dictation tries again automatically once that is
-granted. These six lifecycle subcommands come from the same
+status` below). If that separate process has not been granted Accessibility yet, it does
+not crash: it asks macOS for it and waits, and `stt mic status` (and the banner before an
+ad-hoc dictation) says "waiting for Accessibility — turn on 'python3.14' in System
+Settings > Privacy & Security > Accessibility" until you click. If it cannot be verified alive at all, stt says
+so immediately and leaves the decision retryable rather than either falsely confirmed or
+silently abandoned; the next successful ad-hoc dictation tries again automatically. These six lifecycle subcommands come from the same
 `agenttools_service` library every other long-running agent-tools server uses (the review-cli
 dashboard, spec-web) — not reimplemented here — so it needs a small additional install:
 

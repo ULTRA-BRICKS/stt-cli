@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import contextlib
 import signal
+import sys
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +22,7 @@ from typing import Any
 from .. import config, dictionary, phrases, portable
 from .._errors import EXIT_OK, EngineError, MissingDependencyError, UsageError
 from ..backends import whispercpp
-from . import capture, hotkey, quartz, status, tap
+from . import capture, hotkey, permissions, quartz, status, tap
 from .gate import Gate
 from .server import Transcriber, Voice, WhisperServer
 from .session import IDLE_MINUTES, Progress, Session
@@ -547,15 +548,49 @@ async def dictate_daemon(args: argparse.Namespace) -> None:
     process, and a burst already in flight is allowed to finish (idle-timeout still applies
     to it) before it does.
     """
-    quartz.require_accessibility()
-    settings = config.load_settings().merged(
-        hotkey_press=args.hotkey_press, hotkey_hold=args.hotkey_hold
+    await _permissions()
+    try:
+        settings = config.load_settings().merged(
+            hotkey_press=args.hotkey_press, hotkey_hold=args.hotkey_hold
+        )
+        press, hold = _resolved_hotkeys(settings)
+        device = await capture.resolve(args.device)
+        with _the_only_session():
+            async with _models(args, settings) as models:
+                await _idle_loop(args, device, models, settings, press, hold)
+    finally:
+        permissions.clear_state()
+
+
+async def _permissions() -> None:
+    """Accessibility and the microphone, asked for by THIS process and waited for — for the
+    launchd daemon only (#98). It is the one process macOS attributes the request to the
+    right principal for (see `permissions.py`), nobody is at a terminal to read a refusal,
+    and exiting instead of waiting is what had launchd restart it every ten seconds
+    forever. Started from a terminal — `stt mic run`, `start`'s detached child — the
+    terminal is the principal and someone (or a script, or an ssh session nobody can click
+    for) is waiting on an answer, so the immediate refusal naming the terminal stands, as
+    it does off macOS."""
+    if sys.platform != "darwin" or not permissions.under_launchd(_daemon_label()):
+        quartz.require_accessibility()
+        return
+    await permissions.await_grants(
+        permissions.default_grants(),
+        principal=permissions.principal_name(),
+        key=permissions.principal_key(),
+        note=lambda line: status.note(line, quiet=False),
     )
-    press, hold = _resolved_hotkeys(settings)
-    device = await capture.resolve(args.device)
-    with _the_only_session():
-        async with _models(args, settings) as models:
-            await _idle_loop(args, device, models, settings, press, hold)
+
+
+def _daemon_label() -> str | None:
+    """The launchd label `stt mic enable` installs, or None without the service lib — in
+    which case nothing could have installed a launchd job to be running under."""
+    try:
+        from .mic_service import mic_service
+
+        return str(mic_service().label)
+    except ImportError:
+        return None
 
 
 def _resolved_hotkeys(settings: config.Settings) -> tuple[hotkey.Combo | None, hotkey.Combo | None]:
@@ -731,6 +766,7 @@ async def _idle_loop(
     hotkeys = [combo for combo in (press, hold) if combo is not None]
     watcher = _watch_daemon(marker, hotkeys, bus, active)
     try:
+        permissions.mark_ready()
         status.note(
             f"stt mic daemon ready — {_ready_hint(press, hold)}; `stt mic stop` to quit"
             f"{_notification_absence_note()}",

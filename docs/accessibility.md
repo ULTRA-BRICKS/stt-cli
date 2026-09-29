@@ -100,6 +100,38 @@ That one guided click — attributed to the actual application asking — is the
 tool, or any comparable tool, can reach without help from the user or their organization's
 MDM.
 
+### The background daemon asks for itself
+
+A prompt is attributed to the process that raises it, and `stt doctor --fix` runs in a
+terminal — so it asks for the terminal. The daemon `stt mic enable` hands to launchd is a
+different principal: the interpreter launchd execs (on a Homebrew Mac,
+`/opt/homebrew/Cellar/python@3.14/<version>/Frameworks/Python.framework/Versions/3.14/bin/python3.14`,
+listed in System Settings as `python3.14`). Measured on 2026-09-29 from a one-shot launchd
+job versus the terminal it was submitted from: `AXIsProcessTrusted()` false in both, and
+`AVCaptureDevice authorizationStatusForMediaType:` for audio `0` (not determined) under
+launchd against `3` (authorized) in the terminal. A terminal grant says nothing about the
+daemon.
+
+So the daemon asks (`live/permissions.py`, ticket
+[#98](https://git.hyperide.ai/ultrabricks/stt-cli/issues/98)). Started without
+Accessibility, it calls `AXIsProcessTrustedWithOptions` with the prompt option — which is
+what adds its interpreter to the Accessibility list, so there is a toggle to click — opens
+System Settings on Privacy & Security > Accessibility, and stays alive. It re-reads
+Accessibility from a fresh child process — every two seconds for five minutes after each
+prompt, every ten after that — because a process never sees
+its own answer change: on 2026-09-29 the toggle for the waiting daemon was turned on at
+12:10:51 (TCC.db), the daemon's own `AXIsProcessTrusted()` still said no at 12:14, and it
+never noticed before the reboot at 12:47. A child runs under the daemon's principal, so its
+answer is the daemon's grant; the moment it says yes, the daemon replaces itself with a
+fresh run of the same command (`execv`: same pid, so launchd sees no restart), which sees
+the grant and carries on. Then the
+microphone: `requestAccessForMediaType:` when macOS has never asked (its own dialog has the
+Allow button), or the Microphone pane when the answer was already no (macOS never asks
+twice). Each principal is asked at most once — a ledger under `STT_HOME` records it before
+the prompt is shown — so a restart never shows it again; `stt mic --fix` clears the ledger,
+and the waiting daemon asks again within one poll, no restart. Before this, the daemon
+exited with code 8 and launchd restarted it every ten seconds: 7273 times on one machine.
+
 ## When a grant may not carry over
 
 The espanso row above is not a hazard unique to a different tool: `bin/stt`'s shebang
@@ -140,10 +172,9 @@ confirmed.
 
 `stt doctor` and `stt mic --check` print the same "NOT granted" line whether a grant was
 never made or was made and later stopped applying, and name only "the terminal application
-running stt"; for the background daemon, `stt mic status` says only that "the daemon exited
-denied Accessibility" and names "its python interpreter, or bin/stt". None of them names the
-concrete executable or application macOS actually evaluated. Until that changes, grant
-Accessibility (the same single guided toggle described above) to:
+running stt". The background daemon is the exception: it waits instead of exiting, and
+`stt mic status` names the entry it is waiting on as System Settings lists it (for example
+`'python3.14'`). Grant Accessibility (the same single guided toggle described above) to:
 
 - **for `stt mic` in a terminal** — the terminal application you ran it from;
 - **for the background daemon** — the interpreter launchd starts, which is the first entry

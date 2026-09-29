@@ -55,9 +55,18 @@ def _fix_section() -> None:
     whoever is at the machine to do that, then reports whichever state it settled in; it
     never blocks indefinitely on an action that may not come.
     """
+    print("\nfix")
+    _fix_terminal_accessibility()
+    if sys.platform == "darwin":
+        print(
+            "  the background dictation daemon is a separate principal to macOS and asks for "
+            "its own — `stt mic --fix` turns it on and makes it ask"
+        )
+
+
+def _fix_terminal_accessibility() -> None:
     from ..live import quartz
 
-    print("\nfix")
     if quartz.trusted():
         print(f"  {_mark(True)} Accessibility: already granted, nothing to fix")
         return

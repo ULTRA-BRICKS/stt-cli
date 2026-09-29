@@ -1337,7 +1337,7 @@ def test_run_dispatches_the_hidden_serve_token_to_the_daemon(monkeypatch) -> Non
     assert called[0].hotkey_press == "cmd+shift+d"  # type: ignore[attr-defined]
 
 
-def test_mic_service_serve_argv_points_at_bin_stt_in_a_source_checkout() -> None:
+def test_mic_service_serve_argv_points_at_bin_stt_in_a_source_checkout(monkeypatch) -> None:
     """In THIS repo — a source checkout, where `stt_cli` is only importable via `bin/stt`'s
     own `sys.path` insertion — the persisted daemon argv must re-invoke `bin/stt` itself,
     not `-m stt_cli.cli`: the bare module form only worked when `enable` ran interactively
@@ -1350,6 +1350,7 @@ def test_mic_service_serve_argv_points_at_bin_stt_in_a_source_checkout() -> None
 
     from stt_cli.live.mic_service import SERVE_TOKEN, _serve_argv
 
+    monkeypatch.setenv("PATH", "/opt/homebrew/bin:/usr/bin")
     argv = _serve_argv(["--hotkey-press", "cmd+shift+d"])
     repo_root = Path(__file__).resolve().parent.parent
     assert argv == [
@@ -1357,6 +1358,7 @@ def test_mic_service_serve_argv_points_at_bin_stt_in_a_source_checkout() -> None
         str(repo_root / "bin" / "stt"),
         "mic",
         SERVE_TOKEN,
+        "--search-path=/opt/homebrew/bin:/usr/bin",
         "--hotkey-press",
         "cmd+shift+d",
     ]
@@ -1374,6 +1376,7 @@ def test_mic_service_serve_argv_falls_back_to_the_module_form_for_a_real_install
     from stt_cli.live import mic_service
 
     monkeypatch.setattr(mic_service, "_dev_wrapper", lambda: None)
+    monkeypatch.delenv("PATH")
     argv = mic_service._serve_argv(["--hotkey-press", "cmd+shift+d"])
     assert argv == [
         sys.executable,
@@ -1514,16 +1517,18 @@ def _fake_add_subcommands(subs, *, manager_factory, service_name):
 
 
 def test_status_falls_through_to_the_shared_lib_for_a_pidfile_tracked_instance(
-    monkeypatch,
+    monkeypatch, tmp_path
 ) -> None:
     """Any state other than `"autostart"` (a real pidfile-tracked instance, a genuinely
     stopped one, a foreign listener) is already reported correctly by the shared lib —
     `_status` must not second-guess those, only the one gap #54 names."""
     from stt_cli.commands import mic
 
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+
     class _FakeManager:
         def status(self) -> object:
-            return argparse.Namespace(state="running")
+            return argparse.Namespace(state="running", running=True, pid=424242)
 
     calls: list[str] = []
     monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
@@ -2424,11 +2429,10 @@ def test_a_crash_looping_daemon_after_autostart_is_never_recorded_as_confirmed(
     assert notes, "the user must be told immediately, not left to discover this later"
     message = notes[0]
     assert "Accessibility" in message
-    assert "python interpreter" in message or "bin/stt" in message, (
-        "must name the real permission principal (the launchd-spawned process), not a "
-        "generic hint about the terminal"
+    assert "stt mic --fix" in message, (
+        "must name the one command that makes the daemon itself ask (#98), not a generic "
+        "hint about the terminal"
     )
-    assert "launchd-spawned process" in message
 
 
 def test_a_crash_looping_daemon_can_be_retried_by_a_later_successful_dictation(

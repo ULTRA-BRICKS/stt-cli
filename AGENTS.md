@@ -50,6 +50,7 @@ invariants of its own on top of the ones below.
 | `typist.py` | what is on screen, what is ours, and the smallest edit between the two |
 | `session.py` | the two-speed loop; `dictation.py` wires it up, `status.py` reports |
 | `mic_service.py` | the `agenttools_service.Service` descriptor for `stt mic`'s daemon lifecycle |
+| `permissions.py` | the daemon asks macOS for its OWN Accessibility and Microphone, once, then waits for the click |
 
 - **stt deletes only characters stt typed, and only while it still owns them.** Ownership
   ends the instant the user presses a key or clicks — see `Typist.disown`, which deliberately
@@ -122,7 +123,10 @@ invariants of its own on top of the ones below.
   timeout, turns a missing binary into a diagnosed error, and is `async` so independent work
   overlaps. The deliberate exceptions are all synchronous, interactive and outside that
   path: the `pip install` in `commands/diarize_cmd.py` (streams progress to the user's
-  terminal), the `open` in `commands/archive.py` (fire-and-forget Finder reveal), and the
+  terminal), the `open` in `commands/archive.py` (fire-and-forget Finder reveal), the `open` of a System
+  Settings pane and the fresh-interpreter Accessibility probe in `live/permissions.py` (the
+  daemon showing the user the one toggle to click, and noticing the click), `launchctl
+  kickstart` in `live/mic_service.py` (`stt mic --fix` restarting a down daemon), and the
   `urllib` calls plus `pbpaste` poll in `hf.py`/`auth.py` (a login is a conversation with a
   human, and `urllib` keeps the token out of an argument vector that `curl` would expose).
 - **Every failure is an `SttError` subclass** with what/why/how and a stable exit code

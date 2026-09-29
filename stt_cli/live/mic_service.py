@@ -34,6 +34,8 @@ if TYPE_CHECKING:
 # as a constant here so the argv the descriptor builds and the argv the CLI recognises as
 # "this is the hidden entry, not a real user command" can never drift apart.
 SERVE_TOKEN = "__serve"
+# The hidden daemon flag carrying the enabling shell's PATH — see `_serve_argv`.
+PATH_FLAG = "--search-path"
 
 
 def mic_service(*, extra_argv: list[str] | None = None) -> Service:
@@ -87,7 +89,13 @@ def _serve_argv(extra_argv: list[str]) -> list[str]:
         if wrapper is not None
         else [sys.executable, "-m", "stt_cli.cli"]
     )
-    return [*entry, "mic", SERVE_TOKEN, *extra_argv]
+    # launchd runs the job with PATH=/usr/bin:/bin:/usr/sbin:/sbin, where neither a Homebrew
+    # ffmpeg nor whisper-server is found — a daemon granted its permissions would then die
+    # on "required tool not found: ffmpeg". The PATH of whoever enabled it is where those
+    # tools were found, so it travels with the argv (`commands/mic.py::_serve` applies it).
+    search_path = os.environ.get("PATH")
+    path_flag = [f"{PATH_FLAG}={search_path}"] if search_path else []
+    return [*entry, "mic", SERVE_TOKEN, *path_flag, *extra_argv]
 
 
 def _dev_wrapper() -> Path | None:
@@ -176,6 +184,23 @@ def probe_launchd(
         pid=int(pid_match.group(1)) if pid_match else None,
         last_exit_code=int(exit_match.group(1)) if exit_match else None,
     )
+
+
+def kickstart(
+    label: str,
+    *,
+    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> bool:
+    """Have launchd (re)start ``label`` NOW — ``launchctl kickstart -k`` — rather than
+    after its restart throttle. `stt mic --fix` uses it on a daemon that is down, or that
+    is running code from before it could ask for its own permissions (#98), so the process
+    that asks is one running the current code. True when launchctl accepted it."""
+    run = runner or _default_launchctl_runner
+    try:
+        result = run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"])
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _default_launchctl_runner(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
