@@ -37,8 +37,10 @@ diarize = ["pyannote.audio>=3.1", "torch>=2.2"]
 # NOTE: this extra intentionally lists no PyPI packages — the dep is an in-ecosystem local
 # install. `stt mic run` (ad-hoc, foreground) and a bare `stt mic` work without it regardless.
 service = []
-test = ["pytest", "pytest-asyncio"]
-dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+# setuptools is here for the one test that builds the wheel and looks inside it: the bundled
+# dictionaries are data files, and a packaging rule that misses them fails only in a wheel.
+test = ["pytest", "pytest-asyncio", "setuptools>=70.1"]
+dev = ["pytest", "pytest-asyncio", "setuptools>=70.1", "ruff", "mypy"]
 
 [project.scripts]
 stt = "stt_cli.cli:main"
@@ -49,6 +51,11 @@ Issues = "https://git.hyperide.ai/ultrabricks/stt-cli/issues"
 
 [tool.setuptools.packages.find]
 include = ["stt_cli*"]
+
+# The curated dictionaries, their tag vocabulary and the catalog index are data, not modules:
+# without this they are left out of the wheel and `stt_cli.catalog` finds an empty directory.
+[tool.setuptools.package-data]
+stt_cli = ["dictionaries/*.json"]
 
 [tool.ruff]
 line-length = 100

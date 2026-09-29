@@ -1,0 +1,376 @@
+{
+  "dictionaries": [
+    {
+      "id": "accounting-tax",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "61ee43f85dcba3d1c9b0f26ea395ff85765da8b0934f8f6b1f75256370af55d1",
+      "source": "curated by hand from US/UK/EU/Serbian/Russian tax forms, regimes and agencies, accounting standards and bookkeeping software vendors; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "accounting-tax",
+        "abbreviations"
+      ],
+      "term_count": 59,
+      "title": "Accounting and tax terms, forms and agencies (US, UK, EU, Russia)",
+      "version": 1
+    },
+    {
+      "id": "ai-ml",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "22efa39e8baa148f4973e6ad7097a8b158eb1e37b0126e58e22cd9384a1e5d02",
+      "source": "curated by hand from AI vendor and model names, open-source ML library docs and common LLM jargon; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "ai-ml",
+        "vendor-names",
+        "jargon"
+      ],
+      "term_count": 47,
+      "title": "AI and machine learning models, vendors, tools and jargon",
+      "version": 1
+    },
+    {
+      "id": "automotive",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "9d3482d3883b1781e3ce82b4e0d600f3bde1941785dd75801cd39522472d3e26",
+      "source": "curated by hand from car brand and model line-ups sold in Russia and the US plus common car service and insurance vocabulary; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "automotive",
+        "vendor-names",
+        "abbreviations",
+        "jargon"
+      ],
+      "term_count": 46,
+      "title": "Car brands and models plus Russian and English car service jargon",
+      "version": 1
+    },
+    {
+      "id": "devops-cloud",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "11713b637e3b24f0d127bcce3dda380a3d8d4f3470157de61b2273404de68e48",
+      "source": "curated by hand from cloud provider service lists, CNCF and infrastructure tool docs and common ops abbreviations; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "devops-cloud",
+        "vendor-names",
+        "abbreviations"
+      ],
+      "term_count": 60,
+      "title": "DevOps, infrastructure and cloud vendor names and abbreviations",
+      "version": 1
+    },
+    {
+      "id": "education",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "85ceb901bcdd419d542c4dd66f2070436624b90e6756cf22b7313781589f2728",
+      "source": "hand-picked well-known online learning platforms, English and Russian exams, universities and degree terms; aka spellings are real stt (whisper large-v3-turbo) misrenders of macOS say voices Samantha (en) and Milena (ru) reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "education",
+        "vendor-names",
+        "abbreviations"
+      ],
+      "term_count": 60,
+      "title": "Education platforms exams and institutions",
+      "version": 1
+    },
+    {
+      "id": "gaming",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "2a73298dc4ba6aded8290bff01092840b268d5a70c231f06f4744f8e717ffd90",
+      "source": "hand-picked well-known game titles, studios, engines, platforms and player jargon; aka spellings are real stt (whisper large-v3-turbo) misrenders of macOS say voices Samantha (en) and Milena (ru) reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "gaming",
+        "vendor-names",
+        "jargon"
+      ],
+      "term_count": 44,
+      "title": "Video game titles studios platforms and player jargon",
+      "version": 1
+    },
+    {
+      "id": "legal-contracts",
+      "languages": [
+        "en"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "a3107842a3f3cc9d864364f611c2222491aa03c15d4923e4b28f1d7b8c34755a",
+      "source": "curated by hand from common contract clauses, US/UK legal glossaries and Latin legal maxims; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Daniel reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "legal-contracts",
+        "latin-terms",
+        "jargon",
+        "abbreviations"
+      ],
+      "term_count": 43,
+      "title": "Legal and contract vocabulary (English)",
+      "version": 1
+    },
+    {
+      "id": "legal-contracts-ru",
+      "languages": [
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "6207ee40410193f33f12fbedf0b087673f792fb4c341b65f7c73953fdb452143",
+      "source": "curated by hand from the Russian Civil Code, procedural codes and common contract and court vocabulary; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of the macOS say voice Milena reading each term in a Russian sentence, reviewed by hand",
+      "tags": [
+        "legal-contracts",
+        "abbreviations",
+        "jargon"
+      ],
+      "term_count": 39,
+      "title": "Law and contracts (Russian)",
+      "version": 1
+    },
+    {
+      "id": "marketing-analytics",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "03b3a9d42889696c9e4a3abdd16605d6acc9bee6e81ba3ef6f647924e6cc55a6",
+      "source": "hand-picked well-known marketing metrics and ad, CRM and analytics tool names; aka spellings are real stt (whisper large-v3-turbo) misrenders of macOS say voices Samantha (en) and Milena (ru) reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "marketing-analytics",
+        "vendor-names",
+        "abbreviations"
+      ],
+      "term_count": 60,
+      "title": "Marketing metrics and analytics tools",
+      "version": 1
+    },
+    {
+      "id": "medical-general",
+      "languages": [
+        "en"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "660f36207969d2d5b02d7d6a5a37452efa3f6e747d95f7917ee7c45ee0e591ff",
+      "source": "curated by hand from English clinical vocabulary (diagnoses, signs, eponyms, procedures, labs, chart abbreviations); aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Daniel reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "medical-general",
+        "abbreviations",
+        "latin-terms"
+      ],
+      "term_count": 59,
+      "title": "General medicine: clinical terms, eponyms and abbreviations",
+      "version": 1
+    },
+    {
+      "id": "medical-general-ru",
+      "languages": [
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "5f278af9bd9319b1ba49e10f9b21c71ff7614a7887d0219bf2be0cbe036735f4",
+      "source": "curated by hand from Russian clinical vocabulary (diagnoses, lab tests, procedures, discharge-summary abbreviations); aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of the macOS say voice Milena reading each term in a Russian sentence, reviewed by hand",
+      "tags": [
+        "medical-general",
+        "abbreviations"
+      ],
+      "term_count": 60,
+      "title": "General medicine (Russian)",
+      "version": 1
+    },
+    {
+      "id": "music-production",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "d41b2402dd605e1946593467f61510cc0b7ca6fdd7ba4107adaf44c606c29d52",
+      "source": "curated by hand from DAW plugin and studio hardware vendor line-ups and Russian and English mixing jargon; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "music-production",
+        "vendor-names",
+        "jargon"
+      ],
+      "term_count": 49,
+      "title": "Music production DAWs plugins hardware and studio jargon",
+      "version": 1
+    },
+    {
+      "id": "personal-finance-banking",
+      "languages": [
+        "en"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "427b0891f8a324457d89ff56f6bc8f6e7c7c85595dbbdf8c60f2a3d26ef4c503",
+      "source": "banks, apps and merchants from the ExpenseSyncBot project (ZenPlugins bank scrapers) plus other banks, apps and banking terms, curated by hand; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voice Samantha reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "personal-finance-banking",
+        "vendor-names",
+        "abbreviations"
+      ],
+      "term_count": 65,
+      "title": "Personal finance, banks, payment apps and banking abbreviations",
+      "version": 1
+    },
+    {
+      "id": "personal-finance-banking-ru",
+      "languages": [
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "13ce9a4cb2d5aabdca3fd4c118828593b6c156c03f0ee43982a51ae9ad54ff30",
+      "source": "banks, apps and merchants from the ExpenseSyncBot project (ZenPlugins bank scrapers) plus other banks, apps and Russian banking terms, curated by hand; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voice Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "personal-finance-banking",
+        "vendor-names",
+        "abbreviations"
+      ],
+      "term_count": 51,
+      "title": "Personal finance and banking (Russian)",
+      "version": 1
+    },
+    {
+      "id": "pharmacology",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "50b2ea30fff4c8d4bb8b88b7979acca5a898867c34f88c42d4deae5f812ff5a9",
+      "source": "curated by hand from widely prescribed INN generics and brands (US/UK and Russian markets); aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha (English) and Milena (Russian) reading each name in a sentence, reviewed by hand",
+      "tags": [
+        "pharmacology",
+        "drug-names"
+      ],
+      "term_count": 187,
+      "title": "Drug names: INN generics and common brands",
+      "version": 1
+    },
+    {
+      "id": "product-design-ux",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "8b1a34d245b14c51d555e7b1eb732b5730f4c5fef4a5766b1f2e81edf580377e",
+      "source": "hand-picked well-known product management and UX tool names, frameworks and jargon; aka spellings are real stt (whisper large-v3-turbo) misrenders of macOS say voices Samantha (en) and Milena (ru) reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "product-design-ux",
+        "vendor-names",
+        "jargon",
+        "abbreviations"
+      ],
+      "term_count": 63,
+      "title": "Product management and UX design terms and tools",
+      "version": 1
+    },
+    {
+      "id": "real-estate",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "160942e10725241c142edf37087cfba05d932a6309c75172c4396186f1784df7",
+      "source": "curated by hand from US/UK property glossaries, listing sites and Russian housing law and new-build market vocabulary; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "real-estate",
+        "vendor-names",
+        "abbreviations",
+        "jargon"
+      ],
+      "term_count": 45,
+      "title": "Real estate and property vocabulary (English and Russian)",
+      "version": 1
+    },
+    {
+      "id": "russian-it-anglicisms",
+      "languages": [
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "25feddc11c56a8df389fb7afdd94a1ae7e6ea7f04213fae1bace2c387de529a1",
+      "source": "curated by hand from Russian developer slang in everyday team use; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of the macOS say voice Milena reading each term in a Russian sentence, reviewed by hand",
+      "tags": [
+        "russian-it-anglicisms",
+        "anglicisms",
+        "jargon"
+      ],
+      "term_count": 54,
+      "title": "Russian IT anglicisms (developer slang)",
+      "version": 1
+    },
+    {
+      "id": "science-math",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "2fc039ed38a761f045f69f2b5371907f5aac48875d82a7c8a8279edeac4c4f4c",
+      "source": "curated by hand from standard university math statistics physics chemistry and biology course vocabulary and research tools; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "science-math",
+        "jargon"
+      ],
+      "term_count": 61,
+      "title": "Mathematics statistics physics chemistry and biology names and terms",
+      "version": 1
+    },
+    {
+      "id": "software-engineering-tools",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "8da3a05c0ff3318005bdd5af0fb66e1234ed3ec67f844eac126858617bc29b9e",
+      "source": "curated by hand from vendor docs and common developer tool lists; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence plus earlier recorded stt output, reviewed by hand",
+      "tags": [
+        "software-engineering-tools",
+        "vendor-names",
+        "project-names"
+      ],
+      "term_count": 73,
+      "title": "Software engineering tool and vendor names",
+      "version": 1
+    },
+    {
+      "id": "web-frontend",
+      "languages": [
+        "en",
+        "ru"
+      ],
+      "license": "CC0-1.0",
+      "sha256": "0a7dc52f61a68b8311100ad71f853a570dc4e0c21e20a8936b0d339a0d4918a8",
+      "source": "curated by hand from vendor docs and common developer tool lists; aka spellings are real stt (whisper large-v3-turbo) mis-transcriptions of macOS say voices Samantha and Milena reading each term in a sentence, reviewed by hand",
+      "tags": [
+        "web-frontend",
+        "vendor-names",
+        "jargon"
+      ],
+      "term_count": 55,
+      "title": "Web frontend frameworks, libraries, build tools and jargon",
+      "version": 1
+    }
+  ],
+  "format": 1
+}

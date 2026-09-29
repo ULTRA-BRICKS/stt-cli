@@ -28,6 +28,7 @@ async. Zero required third-party runtime dependencies.
 | `diarize.py` | optional pyannote speaker diarization |
 | `hf.py`, `auth.py` | Hugging Face credentials and the `stt login` browser flow |
 | `dictionary.py`, `fuzzy.py` | terminology: prompt biasing, exact fixes, phonetic flags |
+| `catalog.py`, `dictionaries/` | distributable dictionaries: the format's validator, the curated bundled set, the catalog index |
 | `archive.py` | content-addressed store plus a SQLite index |
 | `formats.py`, `timestamps.py` | renderers and the three timestamp modes |
 | `registry.py` | the model pool: one human name per model, per-engine ids, sizes |
@@ -189,6 +190,12 @@ invariants of its own on top of the ones below.
 - **A hallucination phrase**: `phrases.ALWAYS` for unmistakable artefacts,
   `phrases.CONTEXTUAL` for ordinary speech that is only suspicious over silence. Users
   extend the first tier via `<STT_HOME>/hallucinations.txt`.
+- **A bundled dictionary**: add `stt_cli/dictionaries/<id>.json` in the format `catalog.py`
+  documents (one topic tag from `tags.json`, a stable id per term), then run
+  `python -m stt_cli.catalog` to validate every file and rewrite `index.json`; the tests
+  fail on a stale index. An `aka` is substituted without asking, so it must be a wrong
+  spelling that actually occurs — the shipped ones are real stt output — and never an
+  ordinary word in the dictionary's languages. No spelling may belong to two dictionaries.
 
 ## Checks
 

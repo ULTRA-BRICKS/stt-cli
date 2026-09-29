@@ -9,9 +9,11 @@ citation was verified against main [e10967b](https://git.hyperide.ai/ultrabricks
 today is one hand-maintained personal dictionary: `dictionary.json` under the application home
 (`stt_cli/dictionary.py:43`, `:438-441`), shaped `{"terms": [{term, aka, note}]}`
 (`stt_cli/dictionary.py:149-166`), keyed only by casefolded term text (`stt_cli/dictionary.py:252-254`),
-and edited through `stt dict list/add/rm/import/check` (`stt_cli/commands/dict_cmd.py:34-48`). None of
-the following is built yet: the distributable format, the `stt_cli/dictionaries/` content and its
-catalog index, any dictionary source, the `search`/`install`/`installed`/`remove`/`show` commands,
+and edited through `stt dict list/add/rm/import/check` (`stt_cli/commands/dict_cmd.py:34-48`).
+**Shipped by [#81](https://git.hyperide.ai/ultrabricks/stt-cli/issues/81):** the distributable format
+and its validator (`stt_cli/catalog.py`), the 21 curated dictionaries of section 4 with `tags.json`, and
+the committed catalog index. Nothing in the transcription path reads them yet. None of the following is
+built yet: any dictionary source, the `search`/`install`/`installed`/`remove`/`show` commands,
 installed-dictionary merging, overlays, the marketplace website, and usage-based suggestions. Build order,
 as recorded on the epic: [#81](https://git.hyperide.ai/ultrabricks/stt-cli/issues/81) (format, catalog
 contract, curated content), then [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) (sources,
@@ -99,7 +101,8 @@ character the loader would silently rewrite. In addition: the file is at most `M
 (`stt_cli/dictionary.py:124`); unknown fields are an error — stricter than the personal file, whose
 loader refuses a malformed entry (`stt_cli/dictionary.py:470-477`) but ignores keys it does not know
 (`Term.from_dict`, `:158-166`), so this check is new code with its own tests; `languages`, `license` and
-`tags` are checked against ISO 639-1, the SPDX list and the tag vocabulary.
+`tags` are checked against ISO 639-1, the SPDX list and the tag vocabulary; `title`, `source` and tag
+labels must be one line with no control characters, because they are printed on listings.
 
 **Versioning: an integer.** [#81](https://git.hyperide.ai/ultrabricks/stt-cli/issues/81)'s prose says "a semantic version", but its own sketch writes
 `"version": 1` and [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84)'s overlay writes `base_version: 3`. The only consumers ask "is the installed copy
@@ -111,17 +114,19 @@ patch for no reader's benefit.
 ## 4. Catalog and tags
 
 **Where files live.** `stt_cli/dictionaries/`: one `<id>.json` per dictionary, `tags.json` (the tag
-vocabulary) and `index.json` (the catalog index). They ship inside the package, so `pyproject.toml` must
-gain a `[tool.setuptools.package-data]` entry for `dictionaries/*.json`; today it has only
-`packages.find` (`pyproject.toml:50-51`), and the wheel would ship without them.
+vocabulary) and `index.json` (the catalog index). They ship inside the package through the
+`[tool.setuptools.package-data]` entry for `dictionaries/*.json` (`pyproject.toml:57-58`); a test builds
+a wheel and fails if any of the files is missing from it.
 
-**Catalog index.** Produced by a standard-library function in the package (run as a module by
-publishers); a test regenerates it and compares it byte for byte with the committed file.
+**Catalog index.** Produced by `catalog.write_index` (`python -m stt_cli.catalog`, run by publishers);
+a test regenerates it and compares it byte for byte with the committed file. It refuses a directory with
+no dictionaries rather than writing an empty index.
 
 ```json
 {"format": 1, "dictionaries": [
   {"id": "medical-general", "version": 1, "title": "General medicine", "tags": ["medical-general"],
-   "languages": ["en"], "license": "CC0-1.0", "term_count": 42, "sha256": "<hex of the file's bytes>"}]}
+   "languages": ["en"], "license": "CC0-1.0", "source": "curated by hand from ...", "term_count": 42,
+   "sha256": "<hex of the file's bytes>"}]}
 ```
 
 Determinism: entries sorted by `id`; written with `json.dumps(..., sort_keys=True, ensure_ascii=False,

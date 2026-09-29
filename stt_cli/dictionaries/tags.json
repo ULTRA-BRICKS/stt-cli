@@ -1,0 +1,102 @@
+{
+  "abbreviations": {
+    "kind": "facet",
+    "label": "Abbreviations and acronyms"
+  },
+  "accounting-tax": {
+    "kind": "topic",
+    "label": "Accounting and tax"
+  },
+  "ai-ml": {
+    "kind": "topic",
+    "label": "AI and machine learning"
+  },
+  "anglicisms": {
+    "kind": "facet",
+    "label": "Anglicisms"
+  },
+  "automotive": {
+    "kind": "topic",
+    "label": "Automotive"
+  },
+  "devops-cloud": {
+    "kind": "topic",
+    "label": "DevOps and cloud infrastructure"
+  },
+  "drug-names": {
+    "kind": "facet",
+    "label": "Drug names"
+  },
+  "education": {
+    "kind": "topic",
+    "label": "Education"
+  },
+  "gaming": {
+    "kind": "topic",
+    "label": "Gaming"
+  },
+  "jargon": {
+    "kind": "facet",
+    "label": "Professional jargon"
+  },
+  "latin-terms": {
+    "kind": "facet",
+    "label": "Latin terms"
+  },
+  "legal-contracts": {
+    "kind": "topic",
+    "label": "Law and contracts"
+  },
+  "marketing-analytics": {
+    "kind": "topic",
+    "label": "Marketing and analytics"
+  },
+  "medical-general": {
+    "kind": "topic",
+    "label": "General medicine"
+  },
+  "music-production": {
+    "kind": "topic",
+    "label": "Music production"
+  },
+  "personal-finance-banking": {
+    "kind": "topic",
+    "label": "Personal finance and banking"
+  },
+  "pharmacology": {
+    "kind": "topic",
+    "label": "Pharmacology"
+  },
+  "product-design-ux": {
+    "kind": "topic",
+    "label": "Product, design and UX"
+  },
+  "project-names": {
+    "kind": "facet",
+    "label": "Project names"
+  },
+  "real-estate": {
+    "kind": "topic",
+    "label": "Real estate"
+  },
+  "russian-it-anglicisms": {
+    "kind": "topic",
+    "label": "Russian IT anglicisms"
+  },
+  "science-math": {
+    "kind": "topic",
+    "label": "Science and mathematics"
+  },
+  "software-engineering-tools": {
+    "kind": "topic",
+    "label": "Software engineering tools"
+  },
+  "vendor-names": {
+    "kind": "facet",
+    "label": "Vendor and product names"
+  },
+  "web-frontend": {
+    "kind": "topic",
+    "label": "Web frontend"
+  }
+}
