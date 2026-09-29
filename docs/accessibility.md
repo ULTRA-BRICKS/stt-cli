@@ -100,35 +100,58 @@ That one guided click — attributed to the actual application asking — is the
 tool, or any comparable tool, can reach without help from the user or their organization's
 MDM.
 
-## When a working grant goes stale
+## When a grant may not carry over
 
 The espanso row above is not a hazard unique to a different tool: `bin/stt`'s shebang
 (`#!/usr/bin/env python3`) resolves to the exact same ad-hoc/Homebrew-signed shape. On a
 Homebrew-managed Mac that resolves to something like
 `/opt/homebrew/Cellar/python@3.14/<version>/Frameworks/Python.framework/Versions/3.14/bin/python3.14`
 — an ad-hoc-signed binary whose TCC identity is tied to that exact content hash, not a
-stable Team ID. Any future rebuild of that binary (a `brew upgrade`/`reinstall` that
-repours the bottle) makes macOS treat the post-rebuild `python3.14` as a brand-new,
-never-before-granted principal at the same file path — even though nothing about how you
-invoke `stt` changed.
+stable Team ID. *If* that binary is the principal macOS evaluates, any future rebuild of it
+(a `brew upgrade`/`reinstall` that repours the bottle) would make macOS treat the
+post-rebuild `python3.14` as a brand-new, never-before-granted principal at the same file
+path. That is a documented risk for this class of binary, not something observed for `stt`
+yet.
 
-This is not theoretical. A user reported granting Accessibility, seeing `stt mic --check`
-succeed, and later finding it silently denied again with no warning. The system `TCC.db`
-(`/Library/Application Support/com.apple.TCC/TCC.db`) held exactly one Accessibility row
-for the resolved `python3.14` path: `auth_value=0` (denied), `auth_reason=4` ("System
-Set" — not `2`/User Consent or `3`/User Set, i.e. produced by `tccd` itself, not an
-explicit click), `last_modified` matching the moment the regression was noticed.
-Investigating whether a Homebrew rebuild caused *that specific* incident found that it did
-not: the Cellar held a single `python@3.14` build, installed seven months before the
-reset, with no `brew upgrade`/`reinstall` of it anywhere in shell history and no macOS
-reboot or software update recorded on the day in question — so that incident's exact
-trigger stayed unconfirmed. What stayed confirmed either way: the rebuild-changes-identity
-mechanism above is real, this machine's `python@3.14` was already stale and overdue for
-one, and `stt doctor`/`stt mic status` print the identical "Accessibility NOT granted"
-message for "never granted" and "was granted, then silently revoked" — nothing today tells
-a user which one they are looking at. Re-granting Accessibility (the same one guided
-toggle described above) is the fix either way; see
-[ticket #80](https://git.hyperide.ai/ultrabricks/stt-cli/issues/80) for the tracked
-follow-up to make `stt doctor` distinguish the two cases where that is technically
-possible.
+### What was actually observed, and what is still unresolved
+
+On the maintainer's own Mac (Alex's; 2026-09-24 to 2026-09-28) two
+invocation contexts disagreed about whether `stt` was trusted:
+
+- **Alex's own terminal** repeatedly reported Accessibility as **granted** — including
+  before anyone had suggested a permission was needed.
+- **An automation agent's shell on the same machine** (a tmux/agent-harness process tree,
+  not a terminal application) reported **NOT granted**. The system `TCC.db`
+  (`/Library/Application Support/com.apple.TCC/TCC.db`) held one Accessibility row for the
+  resolved `python3.14` path, with `auth_value=0` (denied) and `auth_reason=4` ("System
+  Set", i.e. written by `tccd` itself rather than by a click in System Settings).
+
+That discrepancy is **observed**. Its cause is **unresolved**. The agent-shell result lines
+up with that denied `python3.14` row; what macOS evaluated in Alex's terminal — the
+terminal application as the "responsible" process, or the `python3.14` binary itself (the
+skhd row in the table above shows both shapes happen for Homebrew CLIs) — is the open
+question, and so is what wrote the denied row. Nothing observed so far shows that a grant
+Alex made went stale: the Homebrew rebuild explanation was checked and ruled out (a single
+`python@3.14` build in the Cellar, installed seven months earlier, with no
+`brew upgrade`/`reinstall` of it in shell history), and no other trigger has been
+confirmed.
+
+### What `stt`'s own messages can and cannot tell you
+
+`stt doctor` and `stt mic --check` print the same "NOT granted" line whether a grant was
+never made or was made and later stopped applying, and name only "the terminal application
+running stt"; for the background daemon, `stt mic status` says only that "the daemon exited
+denied Accessibility" and names "its python interpreter, or bin/stt". None of them names the
+concrete executable or application macOS actually evaluated. Until that changes, grant
+Accessibility (the same single guided toggle described above) to:
+
+- **for `stt mic` in a terminal** — the terminal application you ran it from;
+- **for the background daemon** — the interpreter launchd starts, which is the first entry
+  of `ProgramArguments` in `~/Library/LaunchAgents/com.agenttools.stt.mic.plist`
+  (`plutil -p` prints it).
+
+[Ticket #80](https://git.hyperide.ai/ultrabricks/stt-cli/issues/80) tracks both halves: the
+diagnostics from Alex's own terminal that would settle the discrepancy above, and naming the
+concrete principal in `stt`'s messages — telling the two cases apart where that is
+technically possible.
 
