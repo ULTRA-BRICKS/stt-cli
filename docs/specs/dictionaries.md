@@ -166,7 +166,7 @@ prompt-injection surface (`stt_cli/dictionary.py:127-132`), so review treats the
 
 ```python
 class DictionarySource(Protocol):
-    def index(self) -> Catalog: ...                     # the parsed index.json of section 4
+    def index(self) -> Catalog: ...  # the parsed index.json of section 4
     def fetch(self, entry: CatalogEntry) -> bytes: ...  # exact file bytes, SHA-256 verified
 ```
 
