@@ -7,6 +7,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Re-run the suite on any ref without a new commit, e.g. to prove main green after
+  # a queued run was cancelled or never dispatched.
+  workflow_dispatch:
 
 permissions:
   contents: read
