@@ -59,8 +59,9 @@ include = ["stt_cli*"]
 
 # The curated dictionaries, their tag vocabulary and the catalog index are data, not modules:
 # without this they are left out of the wheel and `stt_cli.catalog` finds an empty directory.
+# The helper app's Swift source is data too: `stt mic helper` compiles it on the user's Mac.
 [tool.setuptools.package-data]
-stt_cli = ["dictionaries/*.json"]
+stt_cli = ["dictionaries/*.json", "helper_app/*.swift"]
 
 [tool.ruff]
 line-length = 100

@@ -285,8 +285,9 @@ async def _dictate_until_stopped(
     )
     watcher = _watch(dictating, marker)
     try:
+        hint = status.stop_hint("Ctrl-C in the terminal")
         status.note(
-            f"listening on {device.name} — {status.stop_hint('Ctrl-C')}",
+            f"listening on {device.name} — {hint}{_notification_absence_note()}",
             quiet=args.quiet,
         )
         mic = asyncio.create_task(
@@ -300,7 +301,7 @@ async def _dictate_until_stopped(
             )
         )
         notif = asyncio.create_task(
-            status.stop_notification("listening — click Stop to finish", quiet=args.quiet)
+            status.stop_notification(f"listening on {device.name} — {hint}", quiet=args.quiet)
         )
         try:
             return await _race_burst_signals(dictating, mic, notif)
@@ -415,11 +416,11 @@ async def _through_the_microphone(
             )
             idle.hint = hint
             line.show(status.render(listening=True, text="", settled=False, hint=hint))
-            # Announced beside the session, not in front of it. The sound and the banner
-            # are each a subprocess, and `afplay` alone takes a second and a half to play a
-            # noise a fifth of that long — waited on, that is a second and a half of somebody
-            # talking into a microphone that is open but not being read yet.
-            saying = asyncio.create_task(status.opened(device.name, quiet=quiet))
+            # Announced beside the session, not in front of it. The sound is a subprocess,
+            # and `afplay` alone takes a second and a half to play a noise a fifth of that
+            # long — waited on, that is a second and a half of somebody talking into a
+            # microphone that is open but not being read yet.
+            saying = asyncio.create_task(status.opened(quiet=quiet))
             blink = asyncio.create_task(_blink_while_idle(line, idle, hint)) if hint else None
             try:
                 return await dictating.run(audio)
@@ -437,7 +438,7 @@ async def _race_burst_signals(
     """Run ``mic`` (the open-microphone loop) to completion, calling ``dictating.stop()``
     the moment any of ``signals`` resolves ``True`` — a GENUINE request to stop, not merely
     "finished": `status.stop_notification` can finish ``False`` (dismissed, closed, or
-    `terminal-notifier` not installed), none of which mean stop, so a false result is
+    no Stop button on this machine), none of which mean stop, so a false result is
     dropped and whatever is left keeps racing rather than ending the burst early. Every
     signal task still pending once the race is decided is cancelled and awaited so nothing
     outlives the burst that started it — an outstanding notification subprocess left running
@@ -1018,7 +1019,9 @@ async def _burst(ctx: _BurstContext, armed: hotkey.Combo, kind: hotkey.BindingKi
         )
         off = asyncio.create_task(_await_release(ctx.bus, armed, kind, ctx.stop))
         notif = asyncio.create_task(
-            status.stop_notification(f"listening — {hint}", quiet=ctx.args.quiet)
+            status.stop_notification(
+                f"listening on {ctx.device.name} — {hint}", quiet=ctx.args.quiet
+            )
         )
         try:
             return await _race_burst_signals(dictating, mic, off, notif)
@@ -1070,17 +1073,15 @@ def _off_hint(
 
 
 def _notification_absence_note() -> str:
-    """Appended to the daemon-ready line ONLY when `terminal-notifier` is missing. Alex's
-    stated baseline expectation is a Stop button that is ALWAYS there (ticket #79), so its
-    absence has to be a visible fact about THIS run, printed once before any burst — not
-    something discovered only when a burst starts and no notification ever appears. Empty
-    (no clause at all) when it IS available: a working optional feature needs no extra
-    announcement beyond working, only a missing one does — `_off_hint`'s per-burst
-    `status.stop_hint` already covers the "how to stop" line either way.
+    """Appended to the daemon-ready line and the ad-hoc session's first line ONLY when no
+    Stop button can be drawn (no `stt.app`, no terminal-notifier). Alex asked for a Stop
+    button that is ALWAYS there (#79, #99), so its absence has to be a visible fact about
+    THIS run, printed once before any burst, together with the command that adds it. Empty
+    when there is one: the notification itself then says "or click Stop".
     """
-    if status.notifier_available():
+    if status.stop_button_available():
         return ""
-    return f" (no notification Stop button — {status.INSTALL_HINT} adds one)"
+    return f" (no Stop button on the notification — `{status.INSTALL_HINT}` adds one)"
 
 
 def _ready_hint(
