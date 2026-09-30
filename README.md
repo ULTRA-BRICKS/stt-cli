@@ -360,6 +360,8 @@ types nothing until it is final.
 ```bash
 stt config set hotkey_press "cmd+shift+space"  # press once to start, again to stop
 stt config set hotkey_hold "ctrl+opt+d"        # dictate only while held (push-to-talk)
+stt config set hotkey_hold fn                  # ...or hold the fn (Globe) key alone
+stt config set hotkey_stop "cmd+shift+x"       # optional extra chord that ends a toggle burst
 stt mic enable                                 # start now, and start at every login
 stt mic status                                 # is it running?
 stt mic stop                                   # stop it
@@ -381,6 +383,20 @@ and the ad-hoc path above, when `terminal-notifier` is installed (`brew install
 terminal-notifier` — optional; `stt doctor` reports whether it is present); the hotkey
 itself (press again, or release) always works regardless of whether that optional tool is
 installed.
+
+Every chord needs cmd or ctrl, plus any of shift, opt and fn, and one key (a letter, digit,
+punctuation, space, tab, return, delete, an arrow, f1-f12): stt only listens to the
+keyboard and cannot stop a keystroke reaching your document, so anything without cmd or
+ctrl would also be ordinary typing. The one exception is `fn` alone, for `hotkey_hold`
+only, on macOS only — the Mac push-to-talk convention. It opens the microphone after fn has
+been held on its own for a moment, and any other key pressed with it (fn+arrow, fn+delete)
+means it was navigation, not dictation. macOS still runs its own Globe-key action on every
+press of fn, so set System Settings > Keyboard > "Press 🌐 key to" to "Do Nothing"; stt says
+so whenever fn is bound and that setting is anything else. A toggle chord (`hotkey_press`,
+`hotkey_stop`) may not be an editing shortcut you press while dictating (cmd+z, cmd+c,
+cmd+v, cmd+a, cmd+s, the cmd+arrow jumps, cmd+delete). `hotkey_stop` defaults to `same`:
+press the toggle chord again. It never ends a hold burst, which ends when you let go. No two
+bindings may share a key.
 
 `enable` also installs OS autostart (a launchd `LaunchAgent`) so the daemon comes back after
 a restart; `disable` removes it and must be run explicitly to turn it back off — the first

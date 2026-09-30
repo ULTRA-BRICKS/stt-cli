@@ -144,6 +144,11 @@ class Settings:
     # again at daemon-start time for a hand-edited config.json.
     hotkey_press: str | None = None
     hotkey_hold: str | None = None
+    # An extra chord that ends a PRESS burst (`hotkey.resolve_stop`). Unset — or `same` —
+    # means none: pressing the press chord again is the stop, as it always is anyway. It
+    # never ends a hold burst, which ends on release. Checked with the press rule and never
+    # on the same key as either binding above (`hotkey.validate`).
+    hotkey_stop: str | None = None
     # A DECISION RECORD, not a direct control — `stt config set mic_daemon_autostart true`
     # stores the record without touching the daemon itself (use `stt mic enable`/`disable`
     # for that); this only ever affects what `commands/mic.py::_maybe_autostart_daemon`

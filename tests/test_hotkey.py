@@ -52,68 +52,149 @@ def test_modifier_aliases_and_case_are_normalized() -> None:
     assert signature(parse("control+a")) == signature(parse("ctrl+a"))
 
 
-def test_a_hotkey_with_no_modifier_is_refused() -> None:
+BINDING_NAMES = ("hotkey_press", "hotkey_hold", "hotkey_stop")
+
+
+@pytest.fixture
+def on_macos(monkeypatch):
+    """fn alone is a macOS-only hold (CI also runs on Linux, where it is refused)."""
+    from stt_cli.live import hotkey as hotkey_mod
+
+    monkeypatch.setattr(hotkey_mod.sys, "platform", "darwin")
+
+
+# ── the shared floor: every chord with a key, whichever binding ─────────────
+
+
+@pytest.mark.parametrize("binding", BINDING_NAMES)
+def test_the_floor_refuses_a_bare_key_for_every_binding(binding) -> None:
     """The whole design rests on telling a command from ordinary typing — a bare key would
-    fire on every letter the user types while the daemon is idle. True for either binding
-    kind: a missing modifier is refused before `kind` is ever consulted."""
-    with pytest.raises(HotkeyError, match="no modifier"):
-        parse("d")
-    with pytest.raises(HotkeyError, match="no modifier"):
-        parse("d", kind="hold")
+    fire on every letter the user types while the daemon is idle."""
+    with pytest.raises(HotkeyError, match=f"^{binding}: 'd' has no modifier"):
+        parse("d", binding=binding)
 
 
-def test_a_press_binding_refuses_shift_opt_or_fn_alone() -> None:
-    """A press/toggle binding fires on a single, momentary key-down — indistinguishable from
-    one ordinary keystroke of the exact same key+modifiers, so shift, opt and fn are all
-    refused alone: every capital letter is shift+key, opt+e types an accent, fn+arrow is
-    Home/End/PageUp/PageDown — all constant, ordinary events with no modifier at all."""
-    for spec in ("shift+a", "opt+space", "opt+e", "opt+shift+a", "fn+left", "fn+d"):
-        with pytest.raises(HotkeyError, match="cmd or ctrl"):
-            parse(spec, kind="press")
-    parse("cmd+shift+a", kind="press")  # shift is fine ALONGSIDE a real modifier
-    parse("cmd+opt+space", kind="press")
-    parse("cmd+fn+d", kind="press")
+@pytest.mark.parametrize("binding", BINDING_NAMES)
+@pytest.mark.parametrize(
+    "spec", ["shift+a", "opt+space", "opt+e", "opt+shift+a", "fn+left", "fn+delete", "fn+d"]
+)
+def test_the_floor_refuses_a_chord_without_cmd_or_ctrl_for_every_binding(spec, binding) -> None:
+    """The tap is listen-only, so shift/opt/fn chords are also ordinary typing or navigation
+    (shift+d types D, opt+e starts é, fn+left is Home) — and a HELD shift+d types D into the
+    document for the whole burst, which is why hold was never allowed the relaxation."""
+    with pytest.raises(HotkeyError, match=f"^{binding}: .* has no cmd or ctrl"):
+        parse(spec, binding=binding)
 
 
-def test_a_hold_binding_refuses_shift_alone_same_as_a_press_binding() -> None:
-    """`hotkey_hold` once relaxed this rule to accept shift alone, reasoning that nobody
-    sustains shift+key for a burst-length few seconds by ACCIDENT (the OS's own key-repeat
-    spams the capital letter instantly, self-correcting garbage). An independent review
-    caught the real problem: `tap.py`'s tap is listen-only, so a sustained `shift+d` hold
-    does not just risk an accidental collision, it reliably TYPES "d" (then repeats it) into
-    the document being dictated into on every single INTENTIONAL use — cmd/ctrl have no such
-    self-typing behaviour, held or not. The relaxation was reverted: both binding kinds now
-    require cmd or ctrl, full stop (see the module docstring's "WHY HOLD DOES NOT RELAX THE
-    MODIFIER RULE EITHER" section)."""
-    with pytest.raises(HotkeyError, match="cmd or ctrl"):
-        parse("shift+d", kind="hold")
-    with pytest.raises(HotkeyError, match="cmd or ctrl"):
-        parse("shift+d", kind="press")
-
-    parse("cmd+shift+d", kind="hold")  # shift is fine ALONGSIDE a real modifier, same as press
+@pytest.mark.parametrize("binding", BINDING_NAMES)
+@pytest.mark.parametrize("spec", ["cmd+d", "ctrl+d", "cmd+shift+a", "cmd+opt+space", "ctrl+fn+d"])
+def test_cmd_or_ctrl_with_any_other_modifiers_passes_the_floor(spec, binding) -> None:
+    parse(spec, binding=binding)
 
 
-def test_a_hold_binding_still_refuses_option_and_fn_alone() -> None:
-    """Option and Fn were never candidates for the relaxation shift briefly got: opt+letter
-    types a dead-key accent/symbol (identical self-typing problem to shift), and both
-    opt+arrow/opt+delete and fn+arrow/fn+delete repeat a word-jump/word-delete or
-    page-scroll/forward-delete during ordinary, burst-length sustained use — so both stay
-    exactly as forbidden-alone for hold as they are for press."""
-    for spec in ("opt+left", "opt+delete", "opt+e", "fn+left", "fn+delete", "fn+d"):
-        with pytest.raises(HotkeyError, match="cmd or ctrl"):
-            parse(spec, kind="hold")
-    parse("cmd+opt+d", kind="hold")  # opt/fn are fine ALONGSIDE a real modifier, same as press
-    parse("ctrl+fn+d", kind="hold")
+@pytest.mark.parametrize("binding", BINDING_NAMES)
+@pytest.mark.parametrize("spec", ["d", "shift+d", "cmd+escape", "super+d", "cmd", "", "cmd++d"])
+def test_every_refusal_names_its_binding_and_lists_the_allowed_modifiers(spec, binding) -> None:
+    from stt_cli.live.hotkey import MODIFIER_RULE
+
+    with pytest.raises(HotkeyError) as refused:
+        parse(spec, binding=binding)
+    assert str(refused.value).startswith(f"{binding}: ")
+    assert MODIFIER_RULE in str(refused.value)
 
 
-@pytest.mark.parametrize("spec", ["cmd+d", "ctrl+d"])
-def test_each_strong_modifier_alone_is_valid_for_either_binding_kind(spec: str) -> None:
-    """Only cmd and ctrl are never, on their own, how macOS itself produces a character or a
-    navigation event, and never, held down, sustain a self-typing chord either — valid for
-    both press and hold, unlike shift/opt (which type a character) or fn (which sustains a
-    scroll/forward-delete)."""
-    parse(spec, kind="press")
-    parse(spec, kind="hold")
+@pytest.mark.parametrize("binding", BINDING_NAMES)
+@pytest.mark.parametrize(
+    "spec",
+    ["z", "shift+z", "v", "opt+s", "left", "fn+left", "fn", "cmd", "cmd+v", "shift+cmd+z", ""],
+)
+def test_a_refusal_never_suggests_a_chord_that_is_itself_refused(spec, binding, on_macos) -> None:
+    """The bug #101 was filed for: bare `fn` suggested `cmd+shift+fn`, refused in turn. The
+    same shape hid in the floor — bare `z` suggested `cmd+shift+z`, which is redo and
+    refused for a toggle — so every `e.g.` chord of every refusal is parsed back."""
+    import re
+
+    try:
+        parse(spec, binding=binding)
+    except HotkeyError as refused:
+        message = str(refused)
+    else:
+        return  # accepted for this binding (`fn`, `cmd+v` as a hold): nothing to suggest
+    suggestions = re.findall(r"e\.g\. `([^`]+)`", message)
+    assert suggestions, "every refusal here offers an example"
+    for suggestion in suggestions:
+        parse(suggestion, binding=binding)
+
+
+# ── the press rule: hotkey_press and hotkey_stop ─────────────────────────────
+
+
+@pytest.mark.parametrize("binding", ["hotkey_press", "hotkey_stop"])
+@pytest.mark.parametrize("spec", ["fn", "cmd", "ctrl+shift", "cmd+shift+fn"])
+def test_a_toggle_refuses_a_modifier_with_no_key(spec, binding, on_macos) -> None:
+    """A toggle fires on every tap, and modifiers are tapped alone constantly. The refusal
+    for bare fn used to suggest `cmd+shift+fn`, which was itself refused — the message must
+    now point at a chord that is actually accepted, and at hotkey_hold for fn alone."""
+    with pytest.raises(HotkeyError, match=f"^{binding}: .* is a modifier with no key") as refused:
+        parse(spec, binding=binding)
+    message = str(refused.value)
+    assert "`cmd+shift+space`" in message and "hotkey_hold" in message
+    assert "cmd+shift+fn`" not in message, "never suggest a chord that is itself refused"
+    parse("cmd+shift+space", binding=binding)  # the suggestion really is accepted
+
+
+@pytest.mark.parametrize("binding", ["hotkey_press", "hotkey_stop"])
+@pytest.mark.parametrize(
+    ("spec", "what"),
+    [("cmd+v", "paste"), ("command+z", "undo"), ("cmd+backspace", "delete to the start")],
+)
+def test_a_toggle_refuses_an_editing_chord_pressed_while_dictating(spec, what, binding) -> None:
+    with pytest.raises(HotkeyError, match=f"^{binding}: .* is {what}"):
+        parse(spec, binding=binding)
+
+
+# ── the hold rule: hotkey_hold ───────────────────────────────────────────────
+
+
+def test_fn_alone_is_accepted_for_hold_and_refused_for_press(on_macos) -> None:
+    from stt_cli.live.hotkey import MODIFIER_ONLY
+
+    combo = parse("fn", binding="hotkey_hold")
+    assert combo.lone_modifier and combo.keycode == MODIFIER_ONLY
+    assert combo.modifiers == _FN_BIT
+    assert not any(combo.matches(code, _FN_BIT) for code in range(256)), (
+        "fn alone must never fire on a fn+key key-down — only through flagsChanged"
+    )
+    with pytest.raises(HotkeyError, match=r"^hotkey_press: 'fn' is a modifier with no key"):
+        parse("fn", binding="hotkey_press")
+
+
+def test_an_editing_chord_is_accepted_for_hold_and_refused_for_press() -> None:
+    """Held for push-to-talk, cmd+v repeats where the user is looking and they let go; as a
+    toggle it opens a microphone silently on every paste — only press refuses it."""
+    parse("cmd+v", binding="hotkey_hold")
+    with pytest.raises(HotkeyError, match="is paste"):
+        parse("cmd+v", binding="hotkey_press")
+
+
+@pytest.mark.parametrize("spec", ["fn+fn", "cmd+command+d", "cmd+shift+shift+space"])
+def test_a_modifier_named_twice_is_refused_not_stored_as_typed(spec, on_macos) -> None:
+    with pytest.raises(HotkeyError, match="names the same modifier twice"):
+        parse(spec, binding="hotkey_hold")
+
+
+@pytest.mark.parametrize("spec", ["cmd", "ctrl", "shift", "opt", "cmd+fn", "shift+fn"])
+def test_hold_refuses_every_lone_modifier_but_fn(spec, on_macos) -> None:
+    with pytest.raises(HotkeyError, match=r"^hotkey_hold: .* fn is the only modifier"):
+        parse(spec, binding="hotkey_hold")
+
+
+def test_fn_alone_is_refused_off_macos(monkeypatch) -> None:
+    from stt_cli.live import hotkey as hotkey_mod
+
+    monkeypatch.setattr(hotkey_mod.sys, "platform", "linux")
+    with pytest.raises(HotkeyError, match=r"^hotkey_hold: `fn` alone works only on macOS"):
+        parse("fn", binding="hotkey_hold")
 
 
 def test_an_unknown_modifier_is_refused() -> None:
@@ -126,13 +207,12 @@ def test_an_unknown_key_is_refused() -> None:
         parse("cmd+doesnotexist")
 
 
-def test_escape_is_not_a_valid_hotkey_key() -> None:
-    """`tap.py` already owns Escape for stop-correcting; a hotkey sharing it would fight
-    that, so it is not in the table at all — for either binding kind."""
-    with pytest.raises(HotkeyError):
-        parse("cmd+escape")
-    with pytest.raises(HotkeyError):
-        parse("cmd+escape", kind="hold")
+@pytest.mark.parametrize("binding", BINDING_NAMES)
+def test_escape_is_not_a_valid_hotkey_key(binding) -> None:
+    """Escape is pressed constantly for unrelated reasons — the double-Escape stop was
+    removed for exactly that (#79) — so it is not in the key table at all."""
+    with pytest.raises(HotkeyError, match="not a key"):
+        parse("cmd+escape", binding=binding)
 
 
 @pytest.mark.parametrize("spec", ["", "   ", "cmd+", "+d", "cmd++d"])
@@ -438,29 +518,268 @@ def test_two_configured_hotkeys_are_each_routed_by_their_own_identity(monkeypatc
         on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
     )
     watcher2._handle(0, tap._KEY_DOWN, 1, 0)
-    assert hotkey_events == [(press, True)], "and the press binding's own key-down, not hold's"
+    assert hotkey_events == [(press, True)], "the press binding's own key-down, not hold's"
 
 
-def test_key_up_is_only_added_to_the_mask_when_a_hotkey_is_configured() -> None:
+def test_key_up_and_flags_changed_are_only_added_to_the_mask_when_a_hotkey_is_configured() -> None:
     """A watcher with no hotkeys must ask for exactly the same events it always did — adding
-    key-up unconditionally would be a behaviour change to the ad-hoc path for no reason."""
+    key-up or flagsChanged unconditionally would be a behaviour change to the ad-hoc path
+    for no reason. With a hotkey, flagsChanged is what sees a modifier let go before the key
+    (the end of a hold) and fn alone at all."""
     from stt_cli.live import tap
 
     no_hotkey_mask = tap._event_mask(())
     with_hotkey_mask = tap._event_mask([parse("cmd+shift+space")])
     assert not no_hotkey_mask & (1 << tap._KEY_UP), "no hotkey: key-up is not requested"
+    assert not no_hotkey_mask & (1 << tap._FLAGS_CHANGED), "no hotkey: no modifier events"
     assert with_hotkey_mask & (1 << tap._KEY_UP), "a hotkey: key-up IS requested"
+    assert with_hotkey_mask & (1 << tap._FLAGS_CHANGED), "a hotkey: flagsChanged IS requested"
     assert no_hotkey_mask & (1 << tap._KEY_DOWN), "key-down is always requested"
     assert with_hotkey_mask & (1 << tap._KEY_DOWN), "adding key-up never drops key-down"
     for button in tap._MOUSE_DOWN:
         assert no_hotkey_mask & (1 << button) and with_hotkey_mask & (1 << button)
-    assert with_hotkey_mask == no_hotkey_mask | (1 << tap._KEY_UP), (
-        "a hotkey adds exactly one bit to the ad-hoc mask, nothing else changes"
+    assert with_hotkey_mask == no_hotkey_mask | (1 << tap._KEY_UP) | (1 << tap._FLAGS_CHANGED), (
+        "a hotkey adds exactly those two bits to the ad-hoc mask, nothing else changes"
     )
-    # Two hotkeys ask for exactly the same mask as one — key-up is a single bit, not one
-    # per configured binding.
+    # Two hotkeys ask for exactly the same mask as one — not one bit per configured binding.
     both = tap._event_mask([parse("cmd+shift+space"), parse("ctrl+opt+d")])
     assert both == with_hotkey_mask
+
+
+# ── tap.Holds — releases that are not a key-up, and fn alone ────────────────
+
+_CMD_BIT, _SHIFT_BIT, _FN_BIT = 1 << 20, 1 << 17, 1 << 23
+_CAPS_LOCK_BIT = 1 << 16
+_LEFT_ARROW, _FN_KEY = 123, 63
+
+
+def _fn_hold():
+    return parse("fn", binding="hotkey_hold")
+
+
+def test_fn_down_then_up_alone_is_one_clean_hold(on_macos) -> None:
+    from stt_cli.live import tap
+
+    fn = _fn_hold()
+    holds = tap.Holds([fn])
+    assert holds.flags_changed(_FN_BIT) == [(fn, True)]
+    assert holds.flags_changed(0) == [(fn, False)]
+
+
+def test_a_key_down_while_fn_is_held_cancels_the_hold_once(on_macos) -> None:
+    """fn+arrow is navigation, not push-to-talk: the arrow's key-down ends the hold at once,
+    its autorepeat and fn's own release add nothing, and only fn going down AGAIN arms."""
+    from stt_cli.live import tap
+
+    fn = _fn_hold()
+    holds = tap.Holds([fn])
+    assert holds.flags_changed(_FN_BIT) == [(fn, True)]
+    assert holds.key_down(_LEFT_ARROW, _FN_BIT, autorepeat=False) == [(fn, False)]
+    assert holds.key_down(_LEFT_ARROW, _FN_BIT, autorepeat=True) == []
+    assert holds.flags_changed(0) == [], "already released by the cancel"
+    assert holds.flags_changed(_FN_BIT) == [(fn, True)], "a new press arms again"
+
+
+def test_another_modifier_joining_fn_cancels_it_until_fn_comes_up(on_macos) -> None:
+    from stt_cli.live import tap
+
+    fn = _fn_hold()
+    holds = tap.Holds([fn])
+    holds.flags_changed(_FN_BIT)
+    assert holds.flags_changed(_FN_BIT | _CMD_BIT) == [(fn, False)]
+    assert holds.flags_changed(_FN_BIT) == [], "fn alone again, still the same press: no re-arm"
+    assert holds.flags_changed(0) == []
+
+
+def test_fn_alone_ignores_its_own_key_code_and_irrelevant_flag_bits(on_macos) -> None:
+    """The Globe key's own key-down is fn itself, not navigation; caps lock toggling while
+    fn is held changes no modifier this hold cares about — neither ends nor re-arms it."""
+    from stt_cli.live import tap
+
+    fn = _fn_hold()
+    holds = tap.Holds([fn])
+    holds.flags_changed(_FN_BIT)
+    assert holds.key_down(_FN_KEY, _FN_BIT, autorepeat=False) == []
+    assert holds.flags_changed(_FN_BIT | _CAPS_LOCK_BIT) == []
+    assert holds.flags_changed(_CAPS_LOCK_BIT) == [(fn, False)]
+
+
+def test_letting_go_of_a_chords_modifier_first_ends_the_hold_and_autorepeat_never_rearms() -> None:
+    """Releasing cmd before "d" used to leave the burst open while "d" kept auto-repeating
+    into the document; pressing cmd again over the still-repeating "d" must not re-arm."""
+    from stt_cli.live import tap
+
+    hold = parse("cmd+shift+d", binding="hotkey_hold")
+    holds = tap.Holds([hold])
+    assert holds.key_down(hold.keycode, _CMD_BIT | _SHIFT_BIT, autorepeat=False) == [(hold, True)]
+    assert holds.flags_changed(_SHIFT_BIT) == [(hold, False)]
+    assert holds.key_down(hold.keycode, _CMD_BIT | _SHIFT_BIT, autorepeat=True) == []
+
+
+def test_an_extra_modifier_does_not_end_a_chord_hold() -> None:
+    from stt_cli.live import tap
+
+    hold = parse("cmd+d", binding="hotkey_hold")
+    holds = tap.Holds([hold])
+    holds.key_down(hold.keycode, _CMD_BIT, autorepeat=False)
+    assert holds.flags_changed(_CMD_BIT | _SHIFT_BIT) == []
+    assert holds.key_up(hold.keycode) == [(hold, False)]
+
+
+def test_a_flags_changed_event_reaches_on_hotkey_but_never_on_key(monkeypatch, on_macos) -> None:
+    from stt_cli.live import tap
+
+    fn = _fn_hold()
+    hotkey_events: list[tuple[Combo, bool]] = []
+    watcher, fired = _watcher_with_fake_events(
+        monkeypatch,
+        keycode=_FN_KEY,
+        flags=_FN_BIT,
+        hotkeys=[fn],
+        on_hotkey=lambda c, pressed: hotkey_events.append((c, pressed)),
+    )
+    watcher._handle(0, tap._FLAGS_CHANGED, 1, 0)
+    assert hotkey_events == [(fn, True)]
+    assert fired == [], "a modifier going down is not the user typing something"
+
+
+# ── the Globe-key advice ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("usage", "advised"), [(0, False), (1, True), (2, True), (3, True), (None, True)]
+)
+def test_globe_key_advice_unless_it_is_set_to_do_nothing(usage, advised, on_macos) -> None:
+    """0 is Do Nothing; 1-3 switch input source, show emoji, start Dictation; unset (None)
+    is the system default, which is not Do Nothing either."""
+    from stt_cli.live.hotkey import GLOBE_KEY_ADVICE, globe_key_advice
+
+    advice = globe_key_advice(_fn_hold(), read=lambda: usage)
+    assert advice == (GLOBE_KEY_ADVICE if advised else None)
+
+
+def test_globe_key_advice_never_reads_the_preference_for_a_chord_hold() -> None:
+    from stt_cli.live.hotkey import globe_key_advice
+
+    def must_not_read() -> int:
+        raise AssertionError("no fn-alone binding, nothing to read")
+
+    assert globe_key_advice(parse("ctrl+opt+d", binding="hotkey_hold"), read=must_not_read) is None
+    assert globe_key_advice(None, read=must_not_read) is None
+
+
+def test_setting_fn_alone_as_hold_tells_the_user_about_the_globe_key(
+    tmp_path, monkeypatch, capsys, on_macos
+) -> None:
+    from stt_cli.commands._configtui import apply_edit
+    from stt_cli.commands.config_cmd import _set
+    from stt_cli.live import hotkey as hotkey_mod
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setattr(hotkey_mod, "read_fn_usage", lambda: 2)
+    _set("hotkey_hold", "fn")
+    assert hotkey_mod.GLOBE_KEY_ADVICE in capsys.readouterr().out
+    ok, message = apply_edit("hotkey_hold", "fn")
+    assert ok and hotkey_mod.GLOBE_KEY_ADVICE in message
+
+    monkeypatch.setattr(hotkey_mod, "read_fn_usage", lambda: 0)
+    _set("hotkey_hold", "fn")
+    assert hotkey_mod.GLOBE_KEY_ADVICE not in capsys.readouterr().out, "Do Nothing: no advice"
+
+
+# ── hotkey_stop ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("word", [None, "same", " SAME ", "none", ""])
+def test_hotkey_stop_defaults_to_same_which_adds_no_chord(word) -> None:
+    from stt_cli.live.hotkey import resolve_stop
+
+    assert resolve_stop(word) is None
+
+
+async def test_a_stop_chord_ends_a_press_burst() -> None:
+    from stt_cli.live.dictation import _await_release, _HotkeyBus
+
+    press = parse("cmd+shift+space")
+    stop = parse("cmd+shift+x", binding="hotkey_stop")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    task = asyncio.create_task(_await_release(bus, press, "press", stop))
+    bus(stop, False)  # its release means nothing
+    await asyncio.sleep(0.02)
+    assert not task.done()
+    bus(stop, True)
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+
+async def test_a_stop_chord_never_ends_a_hold_burst() -> None:
+    from stt_cli.live.dictation import _await_release, _HotkeyBus
+
+    hold = parse("ctrl+opt+d", binding="hotkey_hold")
+    stop = parse("cmd+shift+x", binding="hotkey_stop")
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    task = asyncio.create_task(_await_release(bus, hold, "hold", stop))
+    bus(stop, True)
+    await asyncio.sleep(0.02)
+    assert not task.done(), "a hold burst ends on release, never on the stop chord"
+    bus(hold, False)
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+
+@pytest.mark.parametrize(
+    ("sibling", "chord"), [("hotkey_press", "ctrl+x"), ("hotkey_hold", "ctrl+x")]
+)
+def test_a_stop_chord_sharing_a_key_with_either_binding_is_refused(
+    sibling, chord, tmp_path, monkeypatch
+) -> None:
+    from stt_cli._errors import SttError
+    from stt_cli.commands.config_cmd import _set
+    from stt_cli.live.hotkey import validate
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    _set(sibling, chord)
+    with pytest.raises(SttError, match="same key"):
+        validate("hotkey_stop", "cmd+shift+x")
+    validate("hotkey_stop", "cmd+shift+y")  # its own key: accepted
+
+
+@pytest.mark.parametrize("sibling", ["hotkey_press", "hotkey_hold"])
+def test_a_binding_sharing_a_key_with_a_stored_stop_chord_is_refused(
+    sibling, tmp_path, monkeypatch
+) -> None:
+    from stt_cli._errors import SttError
+    from stt_cli.commands.config_cmd import _set
+    from stt_cli.live.hotkey import validate
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    _set("hotkey_stop", "cmd+shift+x")
+    with pytest.raises(SttError, match="same key") as refused:
+        validate(sibling, "ctrl+x")
+    assert "`stt config set hotkey_stop same`" in refused.value.how, (
+        "a stop chord is turned off with `same`, not `none`"
+    )
+    assert f"`stt config set {sibling} none`" in refused.value.how
+
+
+def test_a_stop_chord_on_the_default_press_key_is_refused_with_nothing_stored(
+    tmp_path, monkeypatch
+) -> None:
+    """An unset hotkey_press is still `cmd+shift+space`, and still owns the space key."""
+    from stt_cli._errors import SttError
+    from stt_cli.live.hotkey import validate
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    with pytest.raises(SttError, match="hotkey_press and hotkey_stop cannot use the same key"):
+        validate("hotkey_stop", "ctrl+opt+space")
+
+
+def test_a_stop_chord_is_checked_with_the_press_rule(tmp_path, monkeypatch) -> None:
+    from stt_cli._errors import SttError
+    from stt_cli.live.hotkey import validate
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    with pytest.raises(SttError) as refused:
+        validate("hotkey_stop", "cmd+z")
+    assert refused.value.why.startswith("hotkey_stop: ") and "is undo" in refused.value.why
 
 
 # ── config round-trip ────────────────────────────────────────────────────────
@@ -524,7 +843,7 @@ def test_validate_attributes_a_bad_error_to_the_stored_sibling_not_the_field_bei
     value inside ONE shared `try`, so a `HotkeyError` raised by the sibling's already-
     stored, unrelated bad value (a hand-edited `config.json`) was blamed on whichever field
     was being SET — `stt config set hotkey_press cmd+shift+space` (a perfectly valid value)
-    would have been refused with a message saying `hotkey_press is not a valid...` when the
+    would have been refused as `not a valid hotkey chord` for hotkey_press when the
     real problem was a broken `hotkey_hold` already sitting in the file. Each field's
     failure must be attributed to the field that actually caused it."""
     from stt_cli import config
@@ -538,7 +857,7 @@ def test_validate_attributes_a_bad_error_to_the_stored_sibling_not_the_field_bei
     with pytest.raises(SttError) as raised:
         validate("hotkey_press", "cmd+shift+space")  # value itself is perfectly valid
     assert "the stored hotkey_hold is invalid" in raised.value.what
-    assert "hotkey_press is not a valid" not in raised.value.what
+    assert "not a valid hotkey chord" not in raised.value.what
 
     # The symmetric case: a broken stored hotkey_press, a valid hotkey_hold being set.
     config.unset_setting("hotkey_hold")
@@ -546,7 +865,7 @@ def test_validate_attributes_a_bad_error_to_the_stored_sibling_not_the_field_bei
     with pytest.raises(SttError) as raised:
         validate("hotkey_hold", "ctrl+opt+d")
     assert "the stored hotkey_press is invalid" in raised.value.what
-    assert "hotkey_hold is not a valid" not in raised.value.what
+    assert "not a valid hotkey chord" not in raised.value.what
 
 
 def test_validate_refuses_hotkey_press_and_hotkey_hold_sharing_a_key(tmp_path, monkeypatch) -> None:
@@ -831,6 +1150,242 @@ async def test_the_daemon_watches_both_bindings_concurrently(monkeypatch) -> Non
     assert watcher.stopped
 
 
+async def _until(predicate, *, seconds: float = 5.0) -> None:
+    """Wait for ``predicate`` — generously, since a loaded machine is slow and a pass costs
+    only as long as the predicate takes to come true."""
+    for _ in range(int(seconds / 0.005)):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+
+
+@contextlib.asynccontextmanager
+async def _running(coro):
+    """``coro`` as a task, cancelled on the way out even when an assertion fails — a burst
+    left open streams fake audio as fast as the loop allows, and must not outlive its test."""
+    task = asyncio.create_task(coro)
+    try:
+        yield task
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_a_quick_fn_tap_never_opens_the_microphone_but_a_held_fn_does(
+    monkeypatch, on_macos
+) -> None:
+    """fn+arrow starts with fn going down alone; its cancel arrives inside the arm window,
+    so no burst ever starts. Held past the window, fn alone is push-to-talk: it dictates
+    and its release ends the burst."""
+    from stt_cli.live import capture as capture_mod
+    from stt_cli.live import dictation
+    from stt_cli.live import hotkey as hotkey_mod
+
+    monkeypatch.setattr(hotkey_mod, "LONE_MODIFIER_ARM_SECONDS", 0.05)
+    opened: list[str] = []
+    monkeypatch.setattr(dictation, "Session", _recording_sessions(dictation.Session, opened))
+    typed, watchers = _wire_fakes(monkeypatch)
+    models = dictation.Models(settled=_Answering("Привет!"), draft=None)
+    device = capture_mod.Device(index=0, name="fake mic")
+    fn = _fn_hold()
+    args = argparse.Namespace(quiet=True, idle_minutes=None)
+    settings = config.Settings(dictionary=False)
+    async with _running(dictation._idle_loop(args, device, models, settings, None, fn)):
+        await _until(lambda: bool(watchers))
+        watcher = watchers[0]
+
+        watcher.on_hotkey(fn, True)
+        watcher.on_hotkey(fn, False)  # the arrow's cancel, a few ms later
+        await asyncio.sleep(0.15)
+        assert opened == [], "fn+arrow must never open the microphone"
+
+        watcher.on_hotkey(fn, True)
+        await _until(lambda: typed)
+        assert opened == ["burst"] and typed == ["Привет!"]
+        watcher.on_hotkey(fn, False)
+
+
+def _recording_sessions(real, opened: list[str]):
+    def make(**kw):
+        opened.append("burst")
+        return real(**kw)
+
+    return make
+
+
+@pytest.mark.parametrize(("usage", "advised"), [(None, True), (0, False)])
+async def test_the_daemon_says_the_globe_advice_when_it_comes_up_with_fn_bound(
+    usage, advised, monkeypatch, capsys, on_macos
+) -> None:
+    """A daemon started with `hotkey_hold = fn` is the moment fn starts doing two things at
+    once, so its ready line is followed by the Globe-key advice — unless the preference
+    already says Do Nothing."""
+    from stt_cli.live import capture as capture_mod
+    from stt_cli.live import dictation
+    from stt_cli.live import hotkey as hotkey_mod
+
+    reads: list[int | None] = []
+
+    def read() -> int | None:
+        reads.append(usage)
+        return usage
+
+    monkeypatch.setattr(hotkey_mod, "read_fn_usage", read)
+    _wire_fakes(monkeypatch)
+    models = dictation.Models(settled=_Answering("Привет!"), draft=None)
+    device = capture_mod.Device(index=0, name="fake mic")
+    args = argparse.Namespace(quiet=False, idle_minutes=None)
+    settings = config.Settings(dictionary=False)
+    async with _running(dictation._idle_loop(args, device, models, settings, None, _fn_hold())):
+        await _until(lambda: bool(reads))  # read in a thread, beside the idle loop
+        await asyncio.sleep(0.1)
+    err = capsys.readouterr().err
+    assert "stt mic daemon ready" in err
+    assert (hotkey_mod.GLOBE_KEY_ADVICE in err) is advised
+
+
+async def test_the_stop_chord_ends_a_press_burst_in_the_daemon_and_never_starts_one(
+    monkeypatch,
+) -> None:
+    from stt_cli.live import capture as capture_mod
+    from stt_cli.live import dictation
+
+    opened: list[str] = []
+    monkeypatch.setattr(dictation, "Session", _recording_sessions(dictation.Session, opened))
+    typed, watchers = _wire_fakes(monkeypatch)
+    models = dictation.Models(settled=_Answering("Привет!"), draft=None)
+    device = capture_mod.Device(index=0, name="fake mic")
+    press = parse("cmd+shift+space")
+    stop = parse("cmd+shift+x", binding="hotkey_stop")
+    args = argparse.Namespace(quiet=True, idle_minutes=None)
+    settings = config.Settings(dictionary=False)
+    async with _running(dictation._idle_loop(args, device, models, settings, press, None, stop)):
+        await _until(lambda: bool(watchers))
+        watcher = watchers[0]
+
+        watcher.on_hotkey(stop, True)  # idle: nothing to stop, and it must not start anything
+        await asyncio.sleep(0.05)
+        assert opened == []
+
+        watcher.on_hotkey(press, True)
+        await _until(lambda: typed)
+        assert opened == ["burst"]
+        watcher.on_hotkey(stop, True)  # ends the press burst
+        await asyncio.sleep(0.05)
+        watcher.on_hotkey(press, True)  # so this press starts a SECOND burst, not a stop
+        await _until(lambda: len(opened) == 2)
+        assert opened == ["burst", "burst"]
+
+
+async def test_held_alone_answers_no_on_a_release_or_shutdown_inside_the_window(
+    on_macos,
+) -> None:
+    from stt_cli.live.dictation import _held_alone, _HotkeyBus
+
+    fn = _fn_hold()
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    shutdown = asyncio.Event()
+    bus(parse("cmd+shift+space"), False)  # another binding's release: means nothing idle
+    bus(fn, False)
+    assert await _held_alone(bus, fn, shutdown, 1.0) == (False, None)
+    assert await _held_alone(bus, fn, shutdown, 0.01) == (True, None), "still held"
+    shutdown.set()
+    assert await _held_alone(bus, fn, shutdown, 1.0) == (False, None)
+
+
+@pytest.mark.parametrize("binding", ["hotkey_press", "hotkey_stop"])
+async def test_another_bindings_press_in_the_fn_window_is_handed_back_not_dropped(
+    binding, on_macos
+) -> None:
+    """`_held_alone` is the only reader of the queue while fn arms. A press chord that
+    includes fn (`ctrl+fn+f1`) fires with fn down; swallowed, it would be a toggle the user
+    made that never opened the microphone (or a stop `_idle_loop` never got to drop)."""
+    from stt_cli.live.dictation import _held_alone, _HotkeyBus
+
+    fn, chord = _fn_hold(), parse("ctrl+fn+f1", binding=binding)
+    bus = _HotkeyBus(asyncio.get_running_loop())
+    bus(chord, True)
+    assert await _held_alone(bus, fn, asyncio.Event(), 1.0) == (False, (chord, True))
+
+
+def _recording_bursts(monkeypatch) -> list[tuple[str, str]]:
+    """Replaces `_burst` with a recorder of (chord, kind) — which binding started what."""
+    from stt_cli.live import dictation
+
+    started: list[tuple[str, str]] = []
+
+    async def fake_burst(ctx, armed, kind):
+        started.append((armed.spec, kind))
+        return ""
+
+    monkeypatch.setattr(dictation, "_burst", fake_burst)
+    return started
+
+
+async def test_a_toggle_pressed_while_fn_arms_starts_a_press_burst(monkeypatch, on_macos) -> None:
+    from stt_cli.live import capture as capture_mod
+    from stt_cli.live import dictation
+    from stt_cli.live import hotkey as hotkey_mod
+
+    monkeypatch.setattr(hotkey_mod, "LONE_MODIFIER_ARM_SECONDS", 0.2)
+    monkeypatch.setattr(hotkey_mod, "read_fn_usage", lambda: 0)
+    started = _recording_bursts(monkeypatch)
+    _typed, watchers = _wire_fakes(monkeypatch)
+    models = dictation.Models(settled=_Answering("Привет!"), draft=None)
+    device = capture_mod.Device(index=0, name="fake mic")
+    fn, press = _fn_hold(), parse("ctrl+fn+f1")  # fires with fn down: its mask includes fn
+    args = argparse.Namespace(quiet=True, idle_minutes=None)
+    settings = config.Settings(dictionary=False)
+    async with _running(dictation._idle_loop(args, device, models, settings, press, fn)):
+        await _until(lambda: bool(watchers))
+        watcher = watchers[0]
+        watcher.on_hotkey(fn, True)
+        watcher.on_hotkey(press, True)  # inside the arm window, fn's own release not yet seen
+        await _until(lambda: bool(started))
+        await asyncio.sleep(0.3)  # past the window: fn alone must not have armed as well
+    assert started == [("ctrl+fn+f1", "press")]
+
+
+async def test_a_hung_globe_preference_read_never_holds_up_the_first_press(
+    monkeypatch, on_macos
+) -> None:
+    """`defaults read` runs when the daemon comes up with fn bound; a stuck `cfprefsd` must
+    not stall the event loop that answers hotkeys, `stt mic stop` and Ctrl-C."""
+    import threading
+
+    from stt_cli.live import capture as capture_mod
+    from stt_cli.live import dictation
+    from stt_cli.live import hotkey as hotkey_mod
+
+    answered = threading.Event()
+    reading_finished: list[bool] = []
+
+    def hung_read() -> int:
+        answered.wait(timeout=2)
+        reading_finished.append(True)
+        return 0
+
+    monkeypatch.setattr(hotkey_mod, "read_fn_usage", hung_read)
+    started = _recording_bursts(monkeypatch)
+    _typed, watchers = _wire_fakes(monkeypatch)
+    models = dictation.Models(settled=_Answering("Привет!"), draft=None)
+    device = capture_mod.Device(index=0, name="fake mic")
+    press = parse("cmd+shift+space")
+    args = argparse.Namespace(quiet=True, idle_minutes=None)
+    settings = config.Settings(dictionary=False)
+    try:
+        async with _running(
+            dictation._idle_loop(args, device, models, settings, press, _fn_hold())
+        ):
+            await _until(lambda: bool(watchers))
+            watchers[0].on_hotkey(press, True)
+            await _until(lambda: bool(started), seconds=1.0)
+            assert started and not reading_finished, "the press waited for `defaults read`"
+    finally:
+        answered.set()
+
+
 async def test_a_key_press_reaches_the_live_session_but_not_a_dead_one(
     monkeypatch,
 ) -> None:
@@ -1011,6 +1566,9 @@ def test_ready_hint_lists_only_the_bindings_that_are_actually_configured() -> No
     press_only = _ready_hint(press, None)
     assert "cmd+shift+space" in press_only and "ctrl+opt+d" not in press_only
 
+    stop = hotkey_mod.parse("cmd+shift+x", binding="hotkey_stop")
+    assert "(cmd+shift+x also stops it)" in _ready_hint(press, hold, stop)
+
 
 def test_notification_absence_note_is_empty_when_available_and_explicit_when_not(
     monkeypatch,
@@ -1043,6 +1601,9 @@ def test_off_hint_uses_the_shared_stop_hint_for_press_and_hold(monkeypatch) -> N
         _off_hint("hold", hold)
         == "release ctrl+opt+d, or click Stop on the notification, to finish"
     )
+    stop = hotkey_mod.parse("cmd+shift+x", binding="hotkey_stop")
+    assert _off_hint("press", press, stop).startswith("press cmd+shift+space again or cmd+shift+x")
+    assert _off_hint("hold", hold, stop).startswith("release ctrl+opt+d,"), "a hold ignores stop"
 
 
 def test_refuse_colliding_hotkey_flags_catches_shared_keycode_before_enable_installs_anything(
@@ -1171,6 +1732,8 @@ def test_daemon_flags_round_trip_into_the_serve_argv() -> None:
             "cmd+shift+d",
             "--hotkey-hold",
             "ctrl+opt+d",
+            "--hotkey-stop",
+            "cmd+shift+x",
             "--model",
             "small",
             "--quiet",
@@ -1186,6 +1749,8 @@ def test_daemon_flags_round_trip_into_the_serve_argv() -> None:
         "cmd+shift+d",
         "--hotkey-hold",
         "ctrl+opt+d",
+        "--hotkey-stop",
+        "cmd+shift+x",
         "--quiet",
     ]
 
@@ -1223,17 +1788,19 @@ def test_an_invalid_hotkey_hold_flag_is_refused_at_parse_time_same_as_press(
     assert "cmd or ctrl" in capsys.readouterr().err
 
 
-def test_a_hotkey_thats_invalid_only_in_stored_config_is_a_diagnosed_refusal() -> None:
-    """argparse only guards `--hotkey-press`/`--hotkey-hold`; a hand-edited config.json can
-    still store a bad value, and that path must fail the same clean way — a raw
-    `HotkeyError` is a `ValueError` subclass `guard()` does not catch, which would surface
-    as an unhandled traceback."""
+@pytest.mark.parametrize("name", ["hotkey_press", "hotkey_hold", "hotkey_stop"])
+def test_a_hotkey_thats_invalid_only_in_stored_config_is_a_diagnosed_refusal(name) -> None:
+    """argparse only guards the `--hotkey-*` flags; a hand-edited config.json can still
+    store a bad value, and that path must fail the same clean way — a raw `HotkeyError` is a
+    `ValueError` subclass `guard()` does not catch, which would surface as an unhandled
+    traceback, and under launchd's KeepAlive a restart loop reloading both models."""
     from stt_cli import config
     from stt_cli._errors import UsageError
     from stt_cli.live.dictation import _resolved_hotkeys
 
-    with pytest.raises(UsageError, match="hotkey"):
-        _resolved_hotkeys(config.Settings(hotkey_press="d"))
+    with pytest.raises(UsageError) as refused:
+        _resolved_hotkeys(config.Settings(**{name: "d"}))
+    assert refused.value.why.startswith(f"{name}: ") and f"unset {name}" in refused.value.how
 
 
 def test_a_stored_hotkey_press_and_hold_that_share_a_key_is_a_diagnosed_refusal() -> None:
@@ -1682,6 +2249,23 @@ def test_a_bare_invocation_is_a_literal_alias_for_help(capsys) -> None:
     assert "run/start/status/stop/enable/disable" in bare_out.out
 
 
+@pytest.mark.parametrize("argv", [["--help"], ["run", "--help"]])
+def test_both_help_screens_list_the_allowed_modifiers(argv, monkeypatch, capsys) -> None:
+    """The rules are something to read before being refused, not after (#101): `stt mic
+    --help` and `stt mic run --help` both print `MODIFIER_RULE`, and the daemon's help also
+    names the stop chord and its `same` default."""
+    from stt_cli.commands import mic
+    from stt_cli.live.hotkey import MODIFIER_RULE
+
+    monkeypatch.setenv("COLUMNS", "400")  # argparse wraps at the terminal width
+    with contextlib.suppress(SystemExit):
+        mic.run(argv)
+    out = " ".join(capsys.readouterr().out.split())
+    assert " ".join(MODIFIER_RULE.split()) in out
+    if argv[0] == "run":
+        assert "--hotkey-stop" in out and "`same`" in out
+
+
 def test_an_explicit_flag_still_dictates_ad_hoc_exactly_as_before(monkeypatch) -> None:
     """Only the truly bare invocation changes meaning — any flag at all (`--device 1`,
     `--check`, ...) must still reach dictation exactly as it always has (#85)."""
@@ -1943,6 +2527,27 @@ def test_hotkey_lines_degrades_on_a_hand_edited_unusable_chord(tmp_path, monkeyp
     lines = mic._hotkey_lines()
     assert "invalid stored hotkey_press" in lines
     assert "stt config set hotkey_press" in lines
+
+
+def test_hotkey_lines_show_the_stop_chord_the_allowed_modifiers_and_the_globe_advice(
+    tmp_path, monkeypatch, on_macos
+) -> None:
+    from stt_cli.commands import mic
+    from stt_cli.live import hotkey as hotkey_mod
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setattr(hotkey_mod, "read_fn_usage", lambda: None)
+    lines = mic._hotkey_lines()
+    assert "stop — press the toggle chord again" in lines
+    assert hotkey_mod.MODIFIER_RULE in lines
+    assert hotkey_mod.GLOBE_KEY_ADVICE not in lines, "no fn binding, no Globe advice"
+
+    config.save_setting("hotkey_stop", "cmd+shift+x")
+    config.save_setting("hotkey_hold", "fn")
+    lines = mic._hotkey_lines()
+    assert "cmd+shift+x (stop)" in lines
+    assert "fn (hold)" in lines
+    assert hotkey_mod.GLOBE_KEY_ADVICE in lines
 
 
 # ── daemon default-on after the first successful ad-hoc dictation (#87) ─────────
@@ -2655,6 +3260,28 @@ def test_a_failed_enable_does_not_falsely_record_success(tmp_path, monkeypatch) 
 
     assert mic._lifecycle(["enable"]) == 4
     assert config.load_settings().mic_daemon_autostart is None
+
+
+@pytest.mark.parametrize("action", ["enable", "start"])
+def test_enabling_the_daemon_with_fn_as_hold_says_the_globe_advice_in_this_terminal(
+    action, tmp_path, monkeypatch, capsys, on_macos
+) -> None:
+    """A detached daemon says the advice only to its log file, which nobody reads at the
+    moment they bind fn — so `enable`/`start --hotkey-hold fn` say it here, in the shell."""
+    from stt_cli.commands import mic
+    from stt_cli.live import hotkey as hotkey_mod
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setattr(hotkey_mod, "read_fn_usage", lambda: 1)
+    _fake_service_lib(
+        monkeypatch,
+        run_action=lambda manager, action: 0,
+        add_service_subcommands=_fake_add_subcommands,
+        dispatch=lambda ns, on_no_subcommand: 0,
+    )
+
+    assert mic._lifecycle([action, "--hotkey-hold", "fn"]) == 0
+    assert hotkey_mod.GLOBE_KEY_ADVICE in capsys.readouterr().err
 
 
 def test_a_successful_enable_that_fails_to_persist_still_reports_ok_but_warns(

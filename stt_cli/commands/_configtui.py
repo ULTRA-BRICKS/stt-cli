@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import curses
+import textwrap
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -52,7 +53,10 @@ from ._keycodes import (
 GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("engine", ("backend", "model", "language", "threads", "whispercpp_root")),
     ("context", ("context", "context_compare")),
-    ("push-to-talk", ("hotkey_press", "hotkey_hold", "mic_threshold", "mic_daemon_autostart")),
+    (
+        "push-to-talk",
+        ("hotkey_press", "hotkey_hold", "hotkey_stop", "mic_threshold", "mic_daemon_autostart"),
+    ),
     (
         "voice detection",
         ("vad", "vad_threshold", "vad_min_silence_ms", "vad_speech_pad_ms", "vad_min_speech_ms"),
@@ -74,8 +78,9 @@ HELP: dict[str, str] = {
     "whispercpp_root": "path to a whisper.cpp checkout, if it is not on PATH",
     "context": "how much of the model's own previous output feeds back as context",
     "context_compare": "cross-check against a context-off decode to catch a self-reinforcing loop",
-    "hotkey_press": "press-style chord for the `stt mic` daemon (press again to stop)",
-    "hotkey_hold": "hold-style chord for push-to-talk; unset disables it (no default)",
+    "hotkey_press": "toggle chord (press again to stop): cmd or ctrl, any of shift/opt/fn, a key",
+    "hotkey_hold": "push-to-talk: fn alone, or cmd or ctrl, any of shift/opt/fn, a key; unset=off",
+    "hotkey_stop": "extra chord that ends a toggle burst; same = press the toggle chord again",
     "mic_threshold": "how loud a frame must be to count as speech; 0 uses the built-in bar",
     "mic_daemon_autostart": "record only: use `stt mic enable`/`disable` to change the daemon",
     "vad": "which voice activity detector finds speech in the audio",
@@ -112,7 +117,8 @@ EXAMPLES: dict[str, tuple[str, ...]] = {
     "model": ("large-v3-turbo", "small", "base"),
     "language": ("ru", "en", "auto"),
     "hotkey_press": ("cmd+shift+space", "ctrl+opt+d", "cmd+shift+semicolon", "none"),
-    "hotkey_hold": ("ctrl+opt+d", "cmd+shift+semicolon", "none"),
+    "hotkey_hold": ("fn", "ctrl+opt+d", "cmd+shift+semicolon", "none"),
+    "hotkey_stop": ("same", "cmd+shift+x", "ctrl+opt+s"),
     "timezone": ("Europe/Belgrade", "UTC", "America/New_York"),
     "variant_models": ("small,medium",),
     "formats": ("txt,md", "txt,srt,vtt"),
@@ -230,15 +236,20 @@ def apply_edit(key: str, raw: str) -> tuple[bool, str]:
     message, instead of only failing later when a daemon tries to start), so an edit here
     can never accept something `stt config set` would refuse, or vice versa."""
     from .._errors import SttError
-    from .config_cmd import validate_extra
+    from .config_cmd import binding_advice, validate_extra
 
     try:
         value = config.coerce(key, raw)
         validate_extra(key, value)
         config.save_setting(key, value)
     except SttError as failed:
-        return False, failed.what
-    return True, f"{key} = {_shown(value)}"
+        # The reason too, not only the headline: for a hotkey that is where the binding and
+        # the allowed modifiers are, and "not a valid hotkey chord" alone leaves a person
+        # guessing again.
+        return False, (f"{failed.what}: {failed.why}" if failed.why else failed.what)
+    advice = binding_advice(key, value)
+    stored = f"{key} = {_shown(value)}"
+    return True, stored if advice is None else f"{stored} — {advice}"
 
 
 def apply_toggle(key: str, current: bool) -> tuple[bool, str]:
@@ -562,10 +573,29 @@ def _draw(
             line = command_line(selected, getattr(settings, selected))
             _safe_addstr(stdscr, detail_top + 3, 1, line[: width - 2], curses.A_DIM)
 
-    footer = state.message or _HELP_BAR
     if not state.message:
-        attr = curses.A_DIM
+        _safe_addstr(stdscr, height - 1, 0, _HELP_BAR[: width - 1], curses.A_DIM)
     else:
         attr = curses.color_pair(3) if state.message_ok else curses.color_pair(4)
-    _safe_addstr(stdscr, height - 1, 0, footer[: width - 1], attr)
+        free = height - _ROW_TOP - len(names)
+        lines = footer_lines(state.message, width=width - 1, rows=free)
+        for y, line in enumerate(lines, start=height - len(lines)):
+            _safe_addstr(stdscr, y, 0, " " * (width - 1))
+            _safe_addstr(stdscr, y, 0, line, attr)
     stdscr.refresh()
+
+
+def footer_lines(message: str, *, width: int, rows: int) -> list[str]:
+    """``message`` wrapped to ``width`` columns, at most ``rows`` of them (never fewer than
+    one), the last cut with an ellipsis when it still does not fit. `_draw` paints them
+    upward from the bottom row, over the detail rows and the empty space below the list.
+
+    One truncated row lost exactly the part that mattered: a refused hotkey's message ends
+    with the allowed modifiers, and binding fn ends with where to set the Globe key to "Do
+    Nothing" — both were cut off at the right edge of an ordinary window."""
+    lines = textwrap.wrap(message, max(1, width)) or [""]
+    limit = max(1, rows)
+    if len(lines) > limit:
+        lines = lines[:limit]
+        lines[-1] = lines[-1][: max(0, width - 1)] + "…"
+    return lines

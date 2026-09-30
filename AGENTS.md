@@ -77,7 +77,9 @@ invariants of its own on top of the ones below.
   dropped while idle; `on_hotkey` is always live. See `dictation._watch_daemon`.
 - **A hotkey must carry a modifier.** `hotkey.parse` refuses a bare key — without one it
   would fire on every ordinary letter typed while the daemon idles, which is not a hotkey,
-  it is a keylogger that occasionally opens a microphone.
+  it is a keylogger that occasionally opens a microphone. Every chord with a key needs cmd
+  or ctrl (the shared floor); the one exception is `fn` alone, for `hotkey_hold` only, on
+  macOS only, followed through flagsChanged by `tap.Holds` (see `hotkey.py`'s docstring).
 - **Never call `quartz.type_text` or `press_backspace` outside `stt mic` without first
   focusing a throwaway document.** They type into the frontmost window of whoever is at the
   machine; the per-session marker only tells our own tap to ignore them. A benchmark of the
@@ -128,10 +130,11 @@ invariants of its own on top of the ones below.
   path: the `pip install` in `commands/diarize_cmd.py` (streams progress to the user's
   terminal), the `open` in `commands/archive.py` (fire-and-forget Finder reveal), the `open` of a System
   Settings pane and the fresh-interpreter Accessibility probe in `live/permissions.py` (the
-  daemon showing the user the one toggle to click, and noticing the click), `launchctl
-  kickstart` in `live/mic_service.py` (`stt mic --fix` restarting a down daemon), and the
-  `urllib` calls plus `pbpaste` poll in `hf.py`/`auth.py` (a login is a conversation with a
-  human, and `urllib` keeps the token out of an argument vector that `curl` would expose),
+  daemon showing the user the one toggle to click, and noticing the click), the `defaults
+  read` of the Globe-key preference in `live/hotkey.py` (advice when `fn` alone is bound),
+  `launchctl kickstart` in `live/mic_service.py` (`stt mic --fix` restarting a down daemon),
+  the `urllib` calls plus `pbpaste` poll in `hf.py`/`auth.py` (a login is a conversation with
+  a human, and `urllib` keeps the token out of an argument vector that `curl` would expose),
   and the `urllib` GETs in `sources.py` (`stt dict search/install --remote` only, imported
   inside the function so neither `stt --help` nor a transcription loads the network stack).
 - **Every process that loads a speech model holds a `model_gate` slot and passes it to

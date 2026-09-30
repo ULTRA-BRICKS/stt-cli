@@ -20,13 +20,20 @@ TELLING OUR OWN KEYSTROKES APART
 WHAT THIS TAP IS NOT ALLOWED TO BECOME
     A system-wide key-down tap is a keylogger with a different name. The defence that
     actually holds is that a key code never leaves this file for anything but a comparison:
-    the session is told THAT a key was pressed and, for the hotkeys it listens for (zero,
-    one, or two — a press-style and a hold-style binding may both be configured at once),
-    WHICH ONE — each supplied by the caller, compared here and reported only as
+    the session is told THAT a key was pressed and, for the hotkeys it listens for (a
+    press-style, a hold-style and a stop binding may all be configured at once), WHICH ONE —
+    each supplied by the caller, compared here (`Holds`) and reported only as
     pressed/released, the same rule the original single hotkey (Escape) always followed.
     Nothing here writes a key code to a log, a file, or the archive, and nothing may start
     doing so. There is no reason live dictation needs the content of what the user typed by
     hand, and every reason it must not have it.
+
+RELEASES THAT DO NOT COME AS A KEY-UP
+    A hold binding ends when it is let go, and a key-up is not the only way to let go. The
+    hand can release a chord's modifier first while the key itself stays down, and `fn`
+    alone has no key at all. Both arrive as flagsChanged events, which the tap asks for
+    whenever a hotkey is configured; `Holds` turns them into the same pressed/released edges
+    a key produces.
 """
 
 from __future__ import annotations
@@ -36,7 +43,7 @@ import secrets
 import threading
 from collections.abc import Callable, Sequence
 
-from .hotkey import Combo
+from .hotkey import RELEVANT_FLAGS, Combo
 from .quartz import _Frameworks, frameworks
 
 _SESSION_TAP = 1
@@ -47,6 +54,10 @@ _KEY_DOWN = 10
 # correction-interrupt watcher never asks for key-up events at all, so its behaviour is
 # byte-for-byte what it was before hotkeys existed.
 _KEY_UP = 11
+# A modifier went down or up. Asked for alongside key-up and for the same reason: to see a
+# hotkey's release when it does not arrive as a key-up (see RELEASES THAT DO NOT COME AS A
+# KEY-UP) — and to see `fn` alone at all, since a modifier on its own never sends a key-down.
+_FLAGS_CHANGED = 12
 # Every button that can move the focus, not just the left one. A right-click opens a menu
 # somewhere else and an extra button is bound to whatever its owner chose; both put the caret
 # in a different window, and only the left one was being watched — so a correction after one
@@ -68,6 +79,10 @@ _DISABLED_BY_TIMEOUT = 0xFFFFFFFE
 _DISABLED_BY_USER_INPUT = 0xFFFFFFFF
 
 ESCAPE = 53
+# The fn / Globe key's own codes (`kVK_Function`, and the Globe code newer Apple keyboards
+# report). A key-down from either is fn itself, never the navigation key that turns a fn
+# hold into fn+arrow — so it must not cancel a fn-alone hold.
+_FN_KEYS = frozenset({63, 179})
 
 _CALLBACK = ctypes.CFUNCTYPE(
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p
@@ -81,17 +96,93 @@ def new_marker() -> int:
 
 def _event_mask(hotkeys: Sequence[Combo]) -> int:
     """The `CGEventTapCreate` mask for a watcher: key-down and every caret-moving button
-    always; key-up ONLY when at least one hotkey is configured (needed solely to notice its
-    release — see `_KEY_UP` and `_handle`). Pure and free of `_run`'s ctypes plumbing so a
-    test can check the actual bits a hotkey-less watcher asks for, not just assert the mask
-    constant differs from itself.
+    always; key-up and flagsChanged ONLY when at least one hotkey is configured (needed
+    solely to notice its release, and to see `fn` alone — see `_KEY_UP`/`_FLAGS_CHANGED`).
+    Pure and free of `_run`'s ctypes plumbing so a test can check the actual bits a
+    hotkey-less watcher asks for, not just assert the mask constant differs from itself.
     """
     mask = 1 << _KEY_DOWN
     for button in _MOUSE_DOWN:
         mask |= 1 << button
     if hotkeys:
-        mask |= 1 << _KEY_UP
+        mask |= 1 << _KEY_UP | 1 << _FLAGS_CHANGED
     return mask
+
+
+Edge = tuple[Combo, bool]
+
+
+class Holds:
+    """Which configured hotkeys are physically down, worked out from the tap's raw events
+    alone and turned into ``(combo, pressed)`` edges. Pure — no Quartz, no thread — so every
+    edge can be tested; `Watcher._handle` feeds it on the tap's own thread.
+
+    A chord with a key goes down on its key-down (never an autorepeat one: a repeat is still
+    holding, not a second press) and comes up on its key's key-up, whatever the modifiers say
+    by then (`Combo.released`) — OR the moment one of its own modifiers is let go, since a
+    hold must not survive its chord: cmd released first with "d" still down would otherwise
+    auto-repeat "d" into the document with the microphone open. A later autorepeat of the
+    same chord, cmd pressed again, does not re-arm it.
+
+    `fn` alone (`Combo.lone_modifier`) goes down when fn is the ONLY modifier held and comes
+    up when fn is released. It counts only while nothing joins it: any key-down, or any other
+    modifier, means this was fn+arrow / fn+delete navigation or the start of a chord, so a
+    release edge is sent at once (the cancel) and nothing more until fn itself comes up —
+    fn going down again is what arms the next one.
+    """
+
+    def __init__(self, hotkeys: Sequence[Combo]) -> None:
+        self._chords = tuple(combo for combo in hotkeys if not combo.lone_modifier)
+        self._lone = tuple(combo for combo in hotkeys if combo.lone_modifier)
+        self._chords_down: set[Combo] = set()
+        # A lone-modifier hotkey that is down -> whether it still counts (False once
+        # cancelled: it stays down, reporting nothing, until the modifier itself comes up).
+        self._lone_down: dict[Combo, bool] = {}
+
+    def key_down(self, keycode: int, flags: int, *, autorepeat: bool) -> list[Edge]:
+        edges: list[Edge] = []
+        if keycode not in _FN_KEYS:
+            for combo, counting in self._lone_down.items():
+                if counting:
+                    self._lone_down[combo] = False
+                    edges.append((combo, False))
+        for combo in self._chords:
+            if combo.matches(keycode, flags):
+                if not autorepeat:
+                    self._chords_down.add(combo)
+                    edges.append((combo, True))
+                break
+        return edges
+
+    def key_up(self, keycode: int) -> list[Edge]:
+        for combo in self._chords:
+            if combo.released(keycode):
+                self._chords_down.discard(combo)
+                # Configured hotkeys never share a keycode — see `hotkey.refuse_shared_key`.
+                return [(combo, False)]
+        return []
+
+    def flags_changed(self, flags: int) -> list[Edge]:
+        held = flags & RELEVANT_FLAGS
+        edges: list[Edge] = []
+        for combo in tuple(self._chords_down):
+            if held & combo.modifiers != combo.modifiers:
+                self._chords_down.discard(combo)
+                edges.append((combo, False))
+        for combo in self._lone:
+            counting = self._lone_down.get(combo)
+            if counting is None:
+                if held == combo.modifiers:
+                    self._lone_down[combo] = True
+                    edges.append((combo, True))
+            elif held & combo.modifiers != combo.modifiers:
+                del self._lone_down[combo]
+                if counting:
+                    edges.append((combo, False))
+            elif held != combo.modifiers and counting:
+                self._lone_down[combo] = False
+                edges.append((combo, False))
+        return edges
 
 
 class Watcher:
@@ -117,6 +208,7 @@ class Watcher:
         self._marker = marker
         self._on_key = on_key
         self._hotkeys = tuple(hotkeys)
+        self._holds = Holds(self._hotkeys)
         self._on_hotkey = on_hotkey
         self._loop: int | None = None
         self._ready = threading.Event()
@@ -181,7 +273,16 @@ class Watcher:
         if stamp == self._marker:
             return event
         code = int(api.services.CGEventGetIntegerValueField(ctypes.c_void_p(event), _KEYCODE_FIELD))
-        hotkeys, on_hotkey = self._hotkeys, self._on_hotkey
+        holds, on_hotkey = self._holds, self._on_hotkey
+        if kind == _FLAGS_CHANGED:
+            # Only reachable when `_run` put flagsChanged in the mask (a hotkey is configured).
+            # A modifier going up or down is never "the user typed something", so it never
+            # reaches `on_key`; it exists to notice a hold's release and `fn` alone.
+            if on_hotkey is not None:
+                flags = int(api.services.CGEventGetFlags(ctypes.c_void_p(event)))
+                for combo, pressed in holds.flags_changed(flags):
+                    on_hotkey(combo, pressed)
+            return event
         if kind == _KEY_UP:
             # Only reachable when `_run` put key-up in the mask, which it does only when at
             # least one hotkey is configured (see `_run`) — every watcher with none never
@@ -190,22 +291,17 @@ class Watcher:
             # and treating it as one would fire the correction-interrupt twice per
             # activation.
             if on_hotkey is not None:
-                for combo in hotkeys:
-                    if combo.released(code):
-                        on_hotkey(combo, False)
-                        break  # configured hotkeys never share a keycode — see hotkey.validate
+                for combo, pressed in holds.key_up(code):
+                    on_hotkey(combo, pressed)
             return event
         if kind == _KEY_DOWN and on_hotkey is not None:
             flags = int(api.services.CGEventGetFlags(ctypes.c_void_p(event)))
-            for combo in hotkeys:
-                if combo.matches(code, flags):
-                    autorepeat = api.services.CGEventGetIntegerValueField(
-                        ctypes.c_void_p(event), _AUTOREPEAT_FIELD
-                    )
-                    if not autorepeat:
-                        on_hotkey(combo, True)
-                    # Deliberately falls through to `on_key` below — see the docstring.
-                    break
+            autorepeat = bool(
+                api.services.CGEventGetIntegerValueField(ctypes.c_void_p(event), _AUTOREPEAT_FIELD)
+            )
+            for combo, pressed in holds.key_down(code, flags, autorepeat=autorepeat):
+                on_hotkey(combo, pressed)
+            # Deliberately falls through to `on_key` below — see the docstring.
         self._on_key(code if kind == _KEY_DOWN else -1)
         return event
 

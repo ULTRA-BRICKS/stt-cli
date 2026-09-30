@@ -31,11 +31,12 @@ The six lifecycle words are dispatched only when they are the first argument
 (`_LIFECYCLE`, `stt_cli/commands/mic.py:64`).
 
 **Help contents.** `stt mic --help` must name the lifecycle subcommands, the permissions
-needed and where to look when nothing appears (shipped). `stt mic run --help` must state both
-hotkey defaults (shipped: `--hotkey-press` default `cmd+shift+space`, `--hotkey-hold` unset).
+needed and where to look when nothing appears (shipped). `stt mic run --help` must state every
+hotkey default (shipped: `--hotkey-press` default `cmd+shift+space`, `--hotkey-hold` unset,
+`--hotkey-stop` default `same`). Both help screens list the **allowed modifiers**
+(`hotkey.MODIFIER_RULE`, shipped by
+[#101](https://git.hyperide.ai/ultrabricks/stt-cli/issues/101)).
 
-- Gap: neither help screen lists the **allowed modifiers** —
-  [#101](https://git.hyperide.ai/ultrabricks/stt-cli/issues/101).
 - Gap: `stt mic --help` promises "a notification's Stop button when `terminal-notifier` is
   installed", which does not currently work (section 6) —
   [#99](https://git.hyperide.ai/ultrabricks/stt-cli/issues/99).
@@ -46,45 +47,44 @@ hotkey defaults (shipped: `--hotkey-press` default `cmd+shift+space`, `--hotkey-
 
 | Key | Flag | Default | Unset means | Disable with |
 | --- | --- | --- | --- | --- |
-| `hotkey_press` | `--hotkey-press` | `cmd+shift+space` (`DEFAULT_PRESS_HOTKEY`, `stt_cli/live/hotkey.py:94`) | use the default | `none`, `off` or `""` (`_DISABLE_WORDS`, `hotkey.py:102`) |
+| `hotkey_press` | `--hotkey-press` | `cmd+shift+space` (`DEFAULT_PRESS_HOTKEY`, `stt_cli/live/hotkey.py:88`) | use the default | `none`, `off` or `""` (`_DISABLE_WORDS`, `hotkey.py:96`) |
 | `hotkey_hold` | `--hotkey-hold` | none | disabled | same words |
-| `hotkey_stop` (gap) | — | `same` | re-press of the chord that started a press burst | — |
+| `hotkey_stop` | `--hotkey-stop` | `same` (`STOP_SAME`, `hotkey.py:100`) | re-press of the chord that started a press burst | `same`, or the disable words (both mean "no extra chord") |
 
-`hotkey_press` and `hotkey_hold` are two independent bindings, both live in one daemon
-(`stt_cli/config.py:145-146`). A press binding arms on a press and disarms on the next press
-of the same chord; a hold binding arms on press and disarms on release. `hotkey_stop` is
-Alex's "configurable stop hotkey defaulting to the same as the trigger" and is not built yet
-(#101): when set to a chord it ends any press burst; it never applies to hold bursts, which
-end on release.
+`hotkey_press`, `hotkey_hold` and `hotkey_stop` are independent settings, all live in one
+daemon (`stt_cli/config.py:145-151`). A press binding arms on a press and disarms on the next
+press of the same chord; a hold binding arms on press and disarms on release. `hotkey_stop` is
+Alex's "configurable stop hotkey defaulting to the same as the trigger" (shipped, #101): set
+to a chord it also ends any press burst, is checked with the press rule, and never applies to
+a hold burst, which ends on release. While idle it starts nothing.
 
-**Cross-binding rule (shipped):** the two bindings may not share a physical key, even with
-different modifiers, because a key release reports only the key code
-(`same_keycode`, `hotkey.py:387`). Enforced at `stt config set` time (`hotkey.validate`,
-`hotkey.py:408`), at flag time for `enable`/`start`/`run`, and again at daemon start for a
-hand-edited config.
+**Cross-binding rule (shipped):** no two of the three bindings may share a physical key, even
+with different modifiers, because a key release reports only the key code
+(`same_keycode`, `hotkey.py:507`; `refuse_shared_key`, `:541`). Enforced at `stt config set`
+time (`hotkey.validate`, `hotkey.py:584`), at flag time for `enable`/`start`/`run`, and again
+at daemon start for a hand-edited config.
 
 ### 2.2 Validators
 
-**Shipped today:** one validator for both bindings — `hotkey.parse(spec, kind=...)`
-(`hotkey.py:287-331`) with `_STRONG_MODIFIERS_HOLD = _STRONG_MODIFIERS_PRESS`
-(`hotkey.py:152-153`) and one error text regardless of `kind`. A spec needs at least one
-modifier, at least one of them `cmd` or `ctrl`, and a key from the known US-ANSI key list.
-
-**Target ([#101](https://git.hyperide.ai/ultrabricks/stt-cli/issues/101)):**
+**Shipped ([#101](https://git.hyperide.ai/ultrabricks/stt-cli/issues/101)):**
+`hotkey.parse(spec, binding=...)` (`hotkey.py:315`) checks a spec in layers, and every
+refusal starts with the binding's name, says which rule it broke, and ends with the allowed
+modifiers (section 2.3):
 
 | Check | Applies to | Rule | Why |
 | --- | --- | --- | --- |
-| Shared floor | every key+modifier chord | at least one of `cmd`/`ctrl`; a bare key is refused | The tap is listen-only: it never swallows the real event, so a chord without `cmd`/`ctrl` is also ordinary typing or navigation (`shift+d` types "D", `opt+e` starts "é", `fn+left` is Home) |
-| Press rule | `hotkey_press`, `hotkey_stop` | fires once per physical press; autorepeat key-downs ignored; the re-press is the stop, so the chord must not be one the user presses while dictating | A toggle that re-fires on autorepeat opens and closes the microphone in a loop |
-| Hold rule | `hotkey_hold` | needs a reliable release: autorepeat never re-arms, releasing the modifier before the key still ends the burst; `shift`-only is refused | Holding `shift+key` with a listen-only tap types the letter into the document for the whole burst |
-| fn-alone hold | `hotkey_hold` only, macOS only (decided on #101, not built) | see 2.4 | The Mac push-to-talk convention |
+| Shared floor (`_check_floor`, `hotkey.py:366`) | every chord with a key | at least one of `cmd`/`ctrl`; a bare key is refused | The tap is listen-only: it never swallows the real event, so a chord without `cmd`/`ctrl` is also ordinary typing or navigation (`shift+d` types "D", `opt+e` starts "é", `fn+left` is Home) |
+| Press rule (`_check_press`, `:399`) | `hotkey_press`, `hotkey_stop` | a key is required (no lone modifier); not one of the editing chords people press while dictating (`cmd+z`, `cmd+shift+z`, `cmd+x`/`c`/`v`/`a`/`s`, the `cmd`+arrow jumps, `cmd+delete`); the tap never lets an autorepeat key-down toggle | Each press opens or closes the microphone, so an accidental one (a paste, a tap of fn) would silently open it |
+| Hold rule (`_check_hold`, `:420`) | `hotkey_hold` | a key chord needs only the floor; a lone modifier is allowed only when it is `fn`, and only on macOS | The release is the tap's job (`tap.Holds`, `stt_cli/live/tap.py:115`): it ends on the key's key-up whatever the modifiers say, also the moment one of the chord's modifiers is let go, and an autorepeat never re-arms |
 
-Each check has its own error message naming the binding and the rule, and its own tests. If
-the final decision is that press and hold need no different rule beyond the floor, that
-decision is written in `hotkey.py`'s docstring and tested — not left implicit.
+Decided on #101: beyond fn alone, press and hold need no different rule above the floor for a
+key chord — except that only press refuses the editing chords (held for push-to-talk, `cmd+v`
+repeats a paste the user sees and lets go of; as a toggle it opens the microphone silently).
+`hotkey.py`'s module docstring states this, and `tests/test_hotkey.py` has a case per rule,
+including a spec accepted for one binding and refused for the other (`fn`, `cmd+v`).
 
-A known wrong message today: bare `fn` is refused with "e.g. `cmd+shift+fn`", which is itself
-refused because `fn` is not a key (#101).
+The bare-`fn` refusal for a press binding now suggests `cmd+shift+space` (itself accepted)
+and points at `hotkey_hold` for fn alone; it used to suggest `cmd+shift+fn`, which was refused.
 
 ### 2.3 Allowed modifiers
 
@@ -97,35 +97,46 @@ refused because `fn` is not a key (#101).
 Keys: letters, digits, the punctuation row, `space`, `tab`, `return`, `delete`, arrows,
 `f1`–`f12`, named by US-ANSI physical position. `escape` is deliberately not a hotkey key.
 
-This list is printed in `stt mic --help`, `stt mic run --help`, the config screen's hint for
-both fields, and every refusal message (#101).
+This list is `hotkey.MODIFIER_RULE` (`hotkey.py:105`), printed in `stt mic --help`, `stt mic
+run --help`, the check banner, the config screen's hint for the hotkey fields, and every
+refusal message (#101).
 
 ### 2.4 `fn` policy
 
-`fn` is recognised as a modifier bit (`_FN = 1 << 23`, `hotkey.py:118`, entered as
-`_MODIFIERS["fn"]`, `:164`) and is accepted alongside `cmd`/`ctrl` (e.g. `ctrl+fn+f1`). It
-can never stand alone today: `parse` requires a trailing key, and the tap matches
-key-down/key-up events, not modifier-only `flagsChanged` events.
+`fn` is a modifier bit (`_FN = 1 << 23`, `hotkey.py:131`) accepted alongside `cmd`/`ctrl` in
+any chord (e.g. `ctrl+fn+f1`), and alone for `hotkey_hold`.
 
-**Decided — fn-alone hold push-to-talk** ([#101](https://git.hyperide.ai/ultrabricks/stt-cli/issues/101),
-2026-09-29, reversible; not built): hold the Globe/fn key alone, speak, release — the style of
+**Shipped — fn-alone hold push-to-talk** ([#101](https://git.hyperide.ai/ultrabricks/stt-cli/issues/101),
+decided 2026-09-29, reversible): hold the Globe/fn key alone, speak, release — the style of
 macOS Dictation and several open-source Mac dictation tools.
 
 - Scope: `fn` alone is allowed for `hotkey_hold` only, and on macOS only. `hotkey_press` (and
   `hotkey_stop`) still require `cmd` or `ctrl`: fn is tapped on its own far too often in
   ordinary use for a single tap to be a safe trigger.
-- Detection: add `kCGEventFlagsChanged` to the tap; a hold counts only if fn goes down and
-  back up with **no key-down in between**. Any key-down while fn is held means it was
-  `fn+arrow`/`fn+delete` navigation, and the burst is cancelled.
+- Detection: the tap asks for `kCGEventFlagsChanged` whenever a hotkey is configured.
+  `tap.Holds` reports fn alone as down when fn is the only modifier held, and as released when
+  fn comes up — or at once, as a cancel, when any key-down (other than fn's own key codes 63
+  and 179) or any other modifier joins it: that was `fn+arrow`/`fn+delete` navigation or the
+  start of a chord, and nothing more is reported until fn itself comes up.
+- Arming: the daemon opens the microphone only once fn has been held alone for
+  `LONE_MODIFIER_ARM_SECONDS` (0.3 s, `hotkey.py:115`; `dictation._held_alone`), so a quick
+  `fn+arrow` never flashes the microphone. The value is not yet tuned on real hands — that is
+  the live acceptance still open on #101.
+- Other bindings while fn is held: a chord matches only its exact modifier set, so with fn
+  down `cmd+shift+space` fires nothing (it only cancels the fn hold); a chord that includes
+  fn, such as `ctrl+fn+f1`, still fires. `tap.Holds` sends fn's cancel before any such
+  press, and `_held_alone` hands back a press it reads inside the window instead of
+  dropping it, so `_idle_loop` still acts on it.
 - The Globe key setting: the tap cannot suppress macOS's own Globe action (switch input
   source, emoji picker, or double-press Dictation), so fn-alone hold works cleanly only when
-  System Settings → Keyboard → "Press 🌐 key to" is **Do Nothing**, readable as
+  System Settings → Keyboard → "Press 🌐 key to" is **Do Nothing**, read with
   `defaults read com.apple.HIToolbox AppleFnUsageType` (`0` = Do Nothing; `1` input source,
-  `2` emoji, `3` dictation; absent = system default, not 0). When fn-alone hold is configured
-  and the value is not `0`, stt tells the user in plain words to set it to Do Nothing, naming
-  that exact place — when the binding is set, and in the check banner (section 3). It does not
-  refuse the binding and does not change the preference itself (that needs a logout or a
-  private API).
+  `2` emoji, `3` dictation; absent = system default, not 0; `hotkey.read_fn_usage`). When
+  fn-alone hold is configured and the value is not `0`, stt says so in plain words, naming
+  that exact place (`GLOBE_KEY_ADVICE`) — when the binding is set (`stt config set`, the
+  config screen, `stt mic enable`/`start --hotkey-hold fn`), in the check banner (section 3),
+  and when the daemon comes up. It does not refuse the binding and does not change the
+  preference itself (that needs a logout or a private API).
 
 ### 2.5 `fn` on Windows and Linux (research, 2026-09-29)
 
@@ -140,19 +151,25 @@ macOS Dictation and several open-source Mac dictation tools.
   [TongFang barebones](https://lkml.iu.edu/hypermail/linux/kernel/2503.2/01685.html)); most
   do not. Offer `fn` only if the device is seen to report it.
 
+So `fn` is a macOS-only entry in the allowed list (section 2.3): the Windows and Linux
+adapters ([#60](https://git.hyperide.ai/ultrabricks/stt-cli/issues/60),
+[#64](https://git.hyperide.ai/ultrabricks/stt-cli/issues/64),
+[#76](https://git.hyperide.ai/ultrabricks/stt-cli/issues/76)) must omit it unless a device
+proves it reports `KEY_FN`, and off macOS `parse` refuses `fn` alone today.
+
 ## 3. The check banner (run not as the daemon)
 
 Printed to standard error, once, right before an ad-hoc dictation or `--check` opens the
-microphone (`_adhoc_banner`, `stt_cli/commands/mic.py:126`). Not printed for
+microphone (`_adhoc_banner`, `stt_cli/commands/mic.py:134`). Not printed for
 `--list-devices` or bare `stt mic`; suppressed by `--quiet`. It must never crash the
 dictation behind it: every probe failure degrades to a plain line.
 
 | Line | Source | Shipped text (examples) |
 | --- | --- | --- |
-| Daemon state | `_daemon_status_line`, `mic.py:153` | `daemon:  running (pid N) [autostart on]` · `daemon:  not running` · `daemon:  enabled, but not currently running (last exit code 8) — see stt mic status` · `daemon:  status unavailable — …` (inner command quotes omitted here) |
-| One line per binding | `_hotkey_lines`, `mic.py:184` | `hotkey:  cmd+shift+space (toggle) — the built-in default, not yet configured`, then `change it with stt config set hotkey_press ..., or stt config for the interactive screen` · `hotkey:  hold disabled — stt config set hotkey_hold ... to arm it` |
-| Allowed modifiers | gap (#101) | e.g. `modifiers: cmd or ctrl, plus any of shift/opt/fn` |
-| Globe key setting | gap (#101) | only when fn-alone hold is configured and `AppleFnUsageType` is not `0`: set "Press 🌐 key to" to Do Nothing in System Settings → Keyboard |
+| Daemon state | `_daemon_status_line`, `mic.py:161` | `daemon:  running (pid N) [autostart on]` · `daemon:  not running` · `daemon:  enabled, but not currently running (last exit code 8) — see stt mic status` · `daemon:  status unavailable — …` (inner command quotes omitted here) |
+| One line per binding | `_hotkey_lines`, `mic.py:211` | `hotkey:  cmd+shift+space (toggle) — the built-in default, not yet configured`, then `change it with stt config set hotkey_press ..., or stt config for the interactive screen` · `hotkey:  hold disabled — stt config set hotkey_hold ... to arm it` · `hotkey:  stop — press the toggle chord again (hotkey_stop is same)` |
+| Allowed modifiers | `_hotkey_lines` (#101) | `hotkey:  allowed on macOS: cmd or ctrl (at least one), plus any of shift, opt, fn, and one key (…); fn alone only for hotkey_hold` |
+| Globe key setting | `_globe_key_line`, `mic.py:248` (#101) | only when fn-alone hold is configured and `AppleFnUsageType` is not `0`: `hotkey:  fn alone is your push-to-talk key: set System Settings > Keyboard > "Press 🌐 key to" to "Do Nothing" — …` |
 | How to stop this session | printed by the session's first status note today (`listening on <device> — Ctrl-C to finish …`) | must match section 6 |
 
 Tests: `tests/test_hotkey.py::test_check_flag_also_prints_the_ad_hoc_banner_but_never_triggers_autostart`
@@ -402,7 +419,7 @@ mechanism.
 | Bare `stt mic` = help | yes | yes (`cmp` of both outputs) | #85 |
 | Check banner on ad-hoc and `--check` | yes | unit tests only | #85 |
 | Two independent bindings, collision guard | yes | no | #79, #97 |
-| Different validators per binding, modifier list, fn | no | — | #101 |
+| Different validators per binding, modifier list, fn-alone hold, `hotkey_stop` | yes | no — [#124](https://git.hyperide.ai/ultrabricks/stt-cli/issues/124); typing while a hold's modifiers are held is [#125](https://git.hyperide.ai/ultrabricks/stt-cli/issues/125) | #101 |
 | Esc-Esc removed | yes | unit tests only | #79 |
 | Always-available Stop button + how-to-stop text | no | — | #99 |
 | Daemon on by default, liveness-verified | yes (after first successful dictation) | no — daemon crash-looping on Alex's Mac | #87, #98, #97 |
@@ -413,11 +430,10 @@ mechanism.
 
 ## 10. Open decisions
 
-- Beyond the fn-alone exception, do press and hold need different rules above the shared
-  floor, and which? — #101.
 - Signed helper application: Developer ID signing or ad-hoc; name; where it is built — #99.
 
 Decided on 2026-09-29 and recorded above (each reversible): fn alone for `hotkey_hold` only,
-with the Globe-key advice (2.4, #101); the daemon enables itself at the first `stt` run on
-macOS (section 4, #98); narrow-terminal corruption is a stt bug with no line-oriented mode
-needed (7.2, #100).
+with the Globe-key advice, and no other press/hold difference above the floor beyond the
+press-only editing-chord refusal (2.2, 2.4, #101); the daemon enables itself at the first
+`stt` run on macOS (section 4, #98); narrow-terminal corruption is a stt bug with no
+line-oriented mode needed (7.2, #100).

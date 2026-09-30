@@ -41,22 +41,19 @@ def test_examples_and_choices_only_name_real_settings() -> None:
     assert set(configtui._choices()) <= known
 
 
-def test_every_hotkey_example_is_a_spec_the_resolver_actually_accepts() -> None:
+def test_every_hotkey_example_is_a_spec_the_resolver_actually_accepts(monkeypatch) -> None:
     """A misleading example in the TUI is worse than no example: `cmd+shift+;` looked
     plausible and reads back from ``EXAMPLES`` verbatim, but `hotkey.parse` names the key
     `semicolon`, not `;`, so typing the example the screen itself suggested was refused.
-    Each field's examples are checked against ITS OWN resolver — `hotkey_press` and
-    `hotkey_hold` share the same strong-modifier rule (cmd or ctrl) after a shift-for-hold
-    relaxation was investigated, shipped, and reverted (see hotkey.py's module docstring),
-    so neither field's examples offer a shift-only chord any more — and both fields'
-    `"none"` example is a disable word, not a chord, so `resolve_*` (not raw `parse`) is
-    what has to accept it."""
-    from stt_cli.live.hotkey import resolve_hold, resolve_press
+    Each field's examples are checked against ITS OWN rule — `fn` is offered for
+    `hotkey_hold` only (macOS, pinned here since CI also runs on Linux), and `none`/`same`
+    are words, not chords, so the resolvers (not raw `parse`) are what has to accept them."""
+    from stt_cli.live import hotkey as hotkey_mod
 
-    for example in configtui.EXAMPLES["hotkey_press"]:
-        resolve_press(example)  # raises HotkeyError if this example would be refused
-    for example in configtui.EXAMPLES["hotkey_hold"]:
-        resolve_hold(example)
+    monkeypatch.setattr(hotkey_mod.sys, "platform", "darwin")
+    for binding in hotkey_mod.BINDINGS:
+        for example in configtui.EXAMPLES[binding]:
+            hotkey_mod.resolve(binding, example)  # raises HotkeyError if it would be refused
 
 
 def test_choices_are_internally_consistent_with_their_own_source_of_truth() -> None:
@@ -239,8 +236,30 @@ def test_apply_edit_reuses_config_cmds_validate_extra_for_a_bad_hotkey_chord(
     assert not ok
     with pytest.raises(SttError) as excinfo:
         _set("hotkey_press", "shift+a")
-    assert message == excinfo.value.what, "the TUI and `stt config set` must refuse identically"
+    assert message == f"{excinfo.value.what}: {excinfo.value.why}", (
+        "the TUI and `stt config set` must refuse identically"
+    )
+    assert "allowed on macOS: cmd or ctrl" in message, "the refusal names what IS allowed"
     assert config.load_settings().hotkey_press is None, "the invalid chord was never stored"
+
+
+def test_a_long_refusal_wraps_so_the_allowed_modifiers_stay_on_screen(
+    tmp_path, monkeypatch
+) -> None:
+    """A refused hotkey's message ends with the allowed modifiers; cut to one row at the
+    right edge of an ordinary window, that is exactly the part a person never saw."""
+    from stt_cli.live.hotkey import MODIFIER_RULE
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    ok, message = configtui.apply_edit("hotkey_press", "fn")
+    assert not ok and len(message) > 110
+    lines = configtui.footer_lines(message, width=109, rows=20)
+    assert all(len(line) <= 109 for line in lines)
+    assert " ".join(MODIFIER_RULE.split()) in " ".join(" ".join(lines).split())
+
+    squeezed = configtui.footer_lines(message, width=40, rows=2)
+    assert len(squeezed) == 2 and squeezed[-1].endswith("…") and len(squeezed[-1]) <= 40
+    assert configtui.footer_lines(message, width=40, rows=-3) != [], "always at least a row"
 
 
 def test_configtui_imports_the_public_validate_extra_not_a_private_name() -> None:

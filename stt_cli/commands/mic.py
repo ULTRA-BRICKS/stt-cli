@@ -209,13 +209,13 @@ def _waiting_line(pid: int | None) -> str | None:
 
 
 def _hotkey_lines() -> str:
-    """The two configured hotkey bindings — press (toggle) and hold (push-to-talk) — and
-    one command to change each.
+    """The configured hotkey bindings — press (toggle), hold (push-to-talk) and stop — with
+    one command to change each, then the allowed modifiers, then the Globe-key advice when
+    `fn` alone is the hold binding (#101).
 
-    `hotkey_press`/`hotkey_hold` are two INDEPENDENT bindings (`live/hotkey.py`'s own
-    module docstring; `_daemon_parser`'s `--hotkey-press`/`--hotkey-hold` help): either can
-    be armed or disabled on its own, so each gets its own line rather than the one line
-    this function reported before the two-binding redesign (#79) landed.
+    `hotkey_press`/`hotkey_hold`/`hotkey_stop` are INDEPENDENT bindings (`live/hotkey.py`'s
+    own module docstring; `_daemon_parser`'s `--hotkey-*` help): each can be set on its own,
+    so each gets its own line.
     """
     from .. import config
 
@@ -231,7 +231,29 @@ def _hotkey_lines() -> str:
         "press", settings.hotkey_press, hotkey_mod.resolve_press, style="toggle"
     )
     hold = _one_hotkey_line("hold", settings.hotkey_hold, hotkey_mod.resolve_hold, style="hold")
-    return f"{press}\n{hold}"
+    stop = _one_hotkey_line(
+        "stop",
+        settings.hotkey_stop,
+        hotkey_mod.resolve_stop,
+        style="stop",
+        when_unset="hotkey:  stop — press the toggle chord again (hotkey_stop is `same`)",
+    )
+    lines = [press, hold, stop, f"hotkey:  {hotkey_mod.MODIFIER_RULE}"]
+    advice = _globe_key_line(settings.hotkey_hold)
+    if advice is not None:
+        lines.append(advice)
+    return "\n".join(lines)
+
+
+def _globe_key_line(configured: str | None) -> str | None:
+    """The Globe-key advice when `fn` alone is the hold binding (see
+    `hotkey.globe_key_advice`), or nothing. An invalid stored hold already has its own line
+    above, so a spec that does not resolve simply gets no advice here."""
+    try:
+        advice = hotkey_mod.globe_key_advice(hotkey_mod.resolve_hold(configured))
+    except hotkey_mod.HotkeyError:
+        return None
+    return None if advice is None else f"hotkey:  {advice}"
 
 
 def _one_hotkey_line(
@@ -240,13 +262,14 @@ def _one_hotkey_line(
     resolve: Callable[[str | None], hotkey_mod.Combo | None],
     *,
     style: str,
+    when_unset: str | None = None,
 ) -> str:
-    """One `_hotkey_lines` line for a single binding (``"press"``/``"hold"``) — both
-    bindings need identical invalid-spec / disabled / armed handling against their own
-    field name and resolver, so this is written once rather than twice. Named ``style``,
-    not ``arm``: this banner's own help text already uses "arm"/"armed" as a VERB
-    ("`stt config set ... to arm it`"), and reusing it as the noun for "toggle"/"hold"
-    would read ambiguously right beside that verb.
+    """One `_hotkey_lines` line for a single binding (``"press"``/``"hold"``/``"stop"``) —
+    each needs identical invalid-spec / unset / armed handling against its own field name
+    and resolver, so this is written once. ``when_unset`` replaces the "disabled" line for a
+    binding whose unset value is not "off" (`hotkey_stop`'s `same`). Named ``style``, not
+    ``arm``: this banner's own help text already uses "arm"/"armed" as a VERB ("`stt config
+    set ... to arm it`"), and reusing it as the noun would read ambiguously beside it.
     """
     field = f"hotkey_{binding}"
     try:
@@ -270,6 +293,8 @@ def _one_hotkey_line(
         # to a plain line here too, not crash the ad-hoc dictation running right behind it.
         return f"hotkey:  {field} unavailable — see `stt config` for the interactive screen"
     if combo is None:
+        if when_unset is not None:
+            return when_unset
         return f"hotkey:  {binding} disabled — `stt config set {field} ...` to arm it"
     state = "configured" if configured is not None else "the built-in default, not yet configured"
     return (
@@ -623,7 +648,9 @@ def _fix(
             # The same refusal `stt mic enable` gives: a daemon with no usable hotkey can
             # never start, and installing it would only buy launchd's restart loop.
             _refuse_colliding_hotkey_flags(
-                argparse.Namespace(action="enable", hotkey_press=None, hotkey_hold=None)
+                argparse.Namespace(
+                    action="enable", hotkey_press=None, hotkey_hold=None, hotkey_stop=None
+                )
             )
             manager.enable()
             if not manager.autostart_active():
@@ -814,7 +841,8 @@ def _parse(argv: list[str]) -> argparse.Namespace:
             "has to clear. run/start/status/stop/enable/disable run the same dictation as a "
             "background daemon behind a hotkey instead — see `stt mic run --help`. the "
             "daemon asks macOS for its OWN Accessibility and Microphone and waits for your "
-            "click; `stt mic --fix` turns it on and makes it ask again if you missed it"
+            "click; `stt mic --fix` turns it on and makes it ask again if you missed it. "
+            f"the daemon's hotkeys — {hotkey_mod.MODIFIER_RULE} (`stt mic run --help`)"
         ),
     )
     _add_dictation_flags(parser, daemon=False)
@@ -870,11 +898,14 @@ def _daemon_parser() -> argparse.ArgumentParser:
             "then the accurate one retypes it corrected, same two-pass dictation as the "
             "ad-hoc path (see `stt mic --help`). any key you press yourself during a burst "
             "stops that second pass on the sentence in flight. --hotkey-press and "
-            "--hotkey-hold are two INDEPENDENT bindings, both settable at once: pressing "
-            "the press-chord again, or releasing the hold-chord, ends the burst it started "
-            "— and a system notification's Stop button works too, for either one, from "
-            "anywhere, when `terminal-notifier` is installed (optional — `stt doctor` "
-            "reports it; the hotkey itself always works regardless). "
+            "--hotkey-hold are INDEPENDENT bindings, both settable at once, and "
+            "--hotkey-stop is an optional third chord for press bursts only: pressing the "
+            "press-chord again (or --hotkey-stop), or releasing the hold-chord, ends the "
+            "burst it started — and a system notification's Stop button works too, for "
+            "either one, from anywhere, when `terminal-notifier` is installed (optional — "
+            "`stt doctor` reports it; the hotkey itself always works regardless). hotkeys — "
+            f"{hotkey_mod.MODIFIER_RULE}. a press chord may not be an editing shortcut you "
+            "press while dictating (cmd+z, cmd+c, cmd+v, cmd+a, cmd+s, cmd+arrows, ...). "
             "`stt mic stop` ends the daemon itself. needs Accessibility "
             "and Microphone: granted to the TERMINAL for `run` (foreground, this shell) — "
             "but `enable` hands the daemon to launchd, which runs it as its OWN principal "
@@ -903,8 +934,17 @@ def _daemon_parser() -> argparse.ArgumentParser:
         "--hotkey-hold",
         type=_hotkey_hold_spec,
         default=None,
-        help="hold-style chord: dictate only while held, push-to-talk (default: unset/"
-        "disabled; also settable with `stt config set hotkey_hold ...`)",
+        help="hold-style chord: dictate only while held, push-to-talk; `fn` alone works too "
+        '— set System Settings > Keyboard > "Press 🌐 key to" to "Do Nothing" first '
+        "(default: unset/disabled; also settable with `stt config set hotkey_hold ...`)",
+    )
+    parser.add_argument(
+        "--hotkey-stop",
+        type=_hotkey_stop_spec,
+        default=None,
+        help="an extra chord that ends a press-style burst, never a hold one (default: "
+        f"`{hotkey_mod.STOP_SAME}` — press the press chord again; also settable with "
+        "`stt config set hotkey_stop ...`)",
     )
     return parser
 
@@ -943,6 +983,12 @@ def _lifecycle(argv: list[str]) -> int:
     add_service_subcommands(subs, manager_factory=lambda: _manager(ns), service_name="mic")
     parser.parse_args(_reordered_for_argparse(argv), namespace=ns)
     _refuse_colliding_hotkey_flags(ns)
+    if ns.action in {"enable", "start"} and ns.hotkey_hold is not None:
+        # `run` says this itself when the daemon comes up; a detached one only says it to
+        # its log file, which nobody reads at the moment they bind fn.
+        advice = hotkey_mod.globe_key_advice(hotkey_mod.resolve_hold(ns.hotkey_hold))
+        if advice is not None:
+            print(advice, file=sys.stderr)
 
     def _print_help_ok() -> int:
         parser.print_help()
@@ -990,11 +1036,11 @@ def _lifecycle(argv: list[str]) -> int:
 
 
 def _refuse_colliding_hotkey_flags(ns: argparse.Namespace) -> None:
-    """`--hotkey-press`/`--hotkey-hold` are each validated individually by their own
-    `type=` callback (see `_hotkey_press_spec`/`_hotkey_hold_spec`), but a pair that shares
-    a KEYCODE only shows up once both are known together — checked here, right after
-    parsing, for every `_lifecycle` action (`enable`/`start`/`run`/...), not just `stt
-    config set` (`hotkey.validate`) and daemon-start time (`dictation._resolved_hotkeys`).
+    """`--hotkey-press`/`--hotkey-hold`/`--hotkey-stop` are each validated individually by
+    their own `type=` callback (the three `_hotkey_*_spec`), but two that share a KEYCODE only
+    show up once all are known together — checked here, right after parsing, for every
+    `_lifecycle` action (`enable`/`start`/`run`/...), not just `stt config set`
+    (`hotkey.validate`) and daemon-start time (`dictation._resolved_hotkeys`).
     Uncaught, `stt mic enable --hotkey-press cmd+d --hotkey-hold ctrl+d` would install a
     launchd `LaunchAgent` with `KeepAlive` for a daemon that can never actually start (see
     `_resolved_hotkeys`'s own identical check) — a restart loop diagnosable only after the
@@ -1027,38 +1073,34 @@ def _refuse_colliding_hotkey_flags(ns: argparse.Namespace) -> None:
     silent background crash loop, so it does not need this same preflight).
     """
     installing = ns.action in {"enable", "start"}
-    if not installing and ns.hotkey_press is None and ns.hotkey_hold is None:
+    given = {name: getattr(ns, name, None) for name in hotkey_mod.BINDINGS}
+    if not installing and all(spec is None for spec in given.values()):
         return
     from .. import config
 
     stored = config.load_settings()
-    press_spec = ns.hotkey_press if ns.hotkey_press is not None else stored.hotkey_press
-    hold_spec = ns.hotkey_hold if ns.hotkey_hold is not None else stored.hotkey_hold
-    try:
-        press = hotkey_mod.resolve_press(press_spec)
-        hold = hotkey_mod.resolve_hold(hold_spec)
-    except hotkey_mod.HotkeyError as broken:
-        # The side pulled from stored config, not the one just given on this command line
-        # (that one already passed its own `type=` callback) — a hand-edited `config.json`
-        # that reached an invalid state anyway. Diagnosed here rather than left to crash,
-        # same reasoning as `dictation._resolved_hotkeys`'s identical `try`/`except`.
-        raise UsageError(
-            what="the configured hotkey is invalid",
-            why=str(broken),
-            how="fix it with `stt config set hotkey_press ...` / "
-            "`stt config set hotkey_hold ...`, or `stt config unset` either to go back to "
-            "its default",
-        ) from broken
-    if press is not None and hold is not None and hotkey_mod.same_keycode(press, hold):
-        raise UsageError(
-            what="--hotkey-press and --hotkey-hold use the same key",
-            why=f"{press.spec!r} and {hold.spec!r} both use the same physical key — a key "
-            "release only reports which key was let go, not which modifiers were held "
-            "with it, so releasing either could be misattributed to the other binding and "
-            "leave the microphone open indefinitely",
-            how="pick two different keys for --hotkey-press and --hotkey-hold",
-        )
-    if installing and press is None and hold is None:
+    resolved: dict[str, hotkey_mod.Combo | None] = {}
+    for name in hotkey_mod.BINDINGS:
+        spec = given[name] if given[name] is not None else getattr(stored, name)
+        try:
+            combo = hotkey_mod.resolve(name, spec)
+        except hotkey_mod.HotkeyError as broken:
+            # The side pulled from stored config, not one just given on this command line
+            # (that one already passed its own `type=` callback) — a hand-edited
+            # `config.json` that reached an invalid state anyway. Diagnosed here rather than
+            # left to crash, same reasoning as `dictation._resolved_hotkeys`.
+            raise UsageError(
+                what="the configured hotkey is invalid",
+                why=str(broken),
+                how=f"fix it with {hotkey_mod.how_to_fix(name)}, or `stt config unset {name}` "
+                "to go back to its default",
+            ) from broken
+        resolved["--" + name.replace("_", "-")] = combo
+    hotkey_mod.refuse_shared_key(
+        resolved,
+        how="pick a different key for each of --hotkey-press, --hotkey-hold and --hotkey-stop",
+    )
+    if installing and resolved["--hotkey-press"] is None and resolved["--hotkey-hold"] is None:
         raise UsageError(
             what="no hotkey is configured",
             why="hotkey_press and hotkey_hold are both disabled, so the daemon would idle "
@@ -1188,6 +1230,8 @@ def _daemon_extra_argv(ns: argparse.Namespace) -> list[str]:
         argv += ["--hotkey-press", ns.hotkey_press]
     if ns.hotkey_hold is not None:
         argv += ["--hotkey-hold", ns.hotkey_hold]
+    if ns.hotkey_stop is not None:
+        argv += ["--hotkey-stop", ns.hotkey_stop]
     if ns.quiet:
         argv += ["--quiet"]
     return argv
@@ -1228,6 +1272,16 @@ def _hotkey_hold_spec(given: str) -> str:
     binding."""
     try:
         hotkey_mod.resolve_hold(given)
+    except hotkey_mod.HotkeyError as broken:
+        raise argparse.ArgumentTypeError(str(broken)) from broken
+    return given
+
+
+def _hotkey_stop_spec(given: str) -> str:
+    """`--hotkey-stop`'s own version of `_hotkey_press_spec` — checked with the press rule,
+    since a stop chord is pressed, not held."""
+    try:
+        hotkey_mod.resolve_stop(given)
     except hotkey_mod.HotkeyError as broken:
         raise argparse.ArgumentTypeError(str(broken)) from broken
     return given

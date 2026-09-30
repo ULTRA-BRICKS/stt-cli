@@ -112,6 +112,9 @@ def _set(key: str, raw: str) -> int:
     validate_extra(key, value)
     config.save_setting(key, value)
     print(f"{key} = {_show(value)}   ({config.config_path()})")
+    advice = binding_advice(key, value)
+    if advice is not None:
+        print(advice)
     return EXIT_OK
 
 
@@ -128,10 +131,22 @@ def validate_extra(key: str, value: object) -> None:
     was made public for the identical reason: the TUI reuses this module's logic, not just
     its own copy of it).
     """
-    if key in ("hotkey_press", "hotkey_hold") and value is not None:
-        from ..live import hotkey as hotkey_mod
+    from ..live import hotkey as hotkey_mod
 
+    if key in hotkey_mod.BINDINGS and value is not None:
         hotkey_mod.validate(key, str(value))
+
+
+def binding_advice(key: str, value: object) -> str | None:
+    """What a person should also do after binding ``value`` to ``key`` — today only the
+    Globe-key setting when `fn` alone becomes `hotkey_hold` (see `hotkey.globe_key_advice`).
+    Called only after `validate_extra` accepted ``value``; shared with the config screen so
+    both places say it."""
+    if key != "hotkey_hold" or not isinstance(value, str):
+        return None
+    from ..live import hotkey as hotkey_mod
+
+    return hotkey_mod.globe_key_advice(hotkey_mod.resolve_hold(value))
 
 
 def _unset(key: str) -> int:

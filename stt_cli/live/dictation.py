@@ -606,13 +606,15 @@ async def dictate_daemon(args: argparse.Namespace) -> None:
     await _permissions()
     try:
         settings = config.load_settings().merged(
-            hotkey_press=args.hotkey_press, hotkey_hold=args.hotkey_hold
+            hotkey_press=args.hotkey_press,
+            hotkey_hold=args.hotkey_hold,
+            hotkey_stop=args.hotkey_stop,
         )
-        press, hold = _resolved_hotkeys(settings)
+        press, hold, stop = _resolved_hotkeys(settings)
         device = await capture.resolve(args.device)
         with _the_only_session():
             async with _models(args, settings) as models:
-                await _idle_loop(args, device, models, settings, press, hold)
+                await _idle_loop(args, device, models, settings, press, hold, stop)
     finally:
         permissions.clear_state()
 
@@ -648,28 +650,31 @@ def _daemon_label() -> str | None:
         return None
 
 
-def _resolved_hotkeys(settings: config.Settings) -> tuple[hotkey.Combo | None, hotkey.Combo | None]:
-    """`hotkey.resolve_press`/`resolve_hold`, but a bad spec — or both bindings sharing a
-    KEYCODE — becomes a diagnosed `UsageError` instead of a raw exception or a silently
-    unendable hold burst. `--hotkey-press`/`--hotkey-hold` are already validated at the
-    argparse layer (see `commands/mic.py`), and the same collision is already refused at
-    `stt config set` time (see `hotkey.validate`), so this exists for the path neither can
-    reach: a hand-edited `config.json` whose stored `hotkey_press`/`hotkey_hold` reached one
-    of those states anyway. Uncaught, that crash is worse than an ordinary one — `stt mic
-    enable` bakes the daemon's argv into a launchd `LaunchAgent` with `KeepAlive`, so a
-    crash on every start is a restart loop, not a one-time failure.
+def _resolved_hotkeys(
+    settings: config.Settings,
+) -> tuple[hotkey.Combo | None, hotkey.Combo | None, hotkey.Combo | None]:
+    """`hotkey_press`, `hotkey_hold` and `hotkey_stop` resolved, but a bad spec — or two
+    bindings sharing a KEYCODE — becomes a diagnosed `UsageError` instead of a raw exception
+    or a silently unendable hold burst. `--hotkey-press`/`--hotkey-hold`/`--hotkey-stop` are
+    already validated at the argparse layer (see `commands/mic.py`), and the same collision
+    is already refused at `stt config set` time (see `hotkey.validate`), so this exists for
+    the path neither can reach: a hand-edited `config.json` that reached one of those states
+    anyway. Uncaught, that crash is worse than an ordinary one — `stt mic enable` bakes the
+    daemon's argv into a launchd `LaunchAgent` with `KeepAlive`, so a crash on every start is
+    a restart loop, not a one-time failure.
     """
-    try:
-        press = hotkey.resolve_press(settings.hotkey_press)
-        hold = hotkey.resolve_hold(settings.hotkey_hold)
-    except hotkey.HotkeyError as broken:
-        raise UsageError(
-            what="the configured hotkey is invalid",
-            why=str(broken),
-            how="fix it with `stt config set hotkey_press ...` / "
-            "`stt config set hotkey_hold ...`, or `stt config unset` either to go back to "
-            "its default",
-        ) from broken
+    resolved: dict[str, hotkey.Combo | None] = {}
+    for name in hotkey.BINDINGS:
+        try:
+            resolved[name] = hotkey.resolve(name, getattr(settings, name))
+        except hotkey.HotkeyError as broken:
+            raise UsageError(
+                what="the configured hotkey is invalid",
+                why=str(broken),
+                how=f"fix it with {hotkey.how_to_fix(name)}, or `stt config unset {name}` to "
+                "go back to its default",
+            ) from broken
+    press, hold = resolved["hotkey_press"], resolved["hotkey_hold"]
     if press is None and hold is None:
         raise UsageError(
             what="no hotkey is configured",
@@ -678,17 +683,8 @@ def _resolved_hotkeys(settings: config.Settings) -> tuple[hotkey.Combo | None, h
             how="`stt config unset hotkey_press` to restore the default (cmd+shift+space), "
             "or `stt config set hotkey_press ...`/`hotkey_hold ...` to choose one yourself",
         )
-    if press is not None and hold is not None and hotkey.same_keycode(press, hold):
-        raise UsageError(
-            what="hotkey_press and hotkey_hold use the same key",
-            why=f"{press.spec!r} and {hold.spec!r} both use the same physical key — a key "
-            "release only reports which key was let go, not which modifiers were held with "
-            "it (see `hotkey.same_keycode`), so releasing either could be misattributed to "
-            "the other binding and leave the microphone open indefinitely",
-            how="pick two different keys for hotkey_press and hotkey_hold, or `stt config "
-            "set hotkey_hold none` (or hotkey_press) to disable the one you do not need",
-        )
-    return press, hold
+    hotkey.refuse_shared_key(resolved)
+    return press, hold, resolved["hotkey_stop"]
 
 
 class _HotkeyBus:
@@ -777,6 +773,7 @@ class _BurstContext:
     bus: _HotkeyBus
     press: hotkey.Combo | None
     hold: hotkey.Combo | None
+    stop: hotkey.Combo | None
 
 
 async def _idle_loop(
@@ -786,10 +783,11 @@ async def _idle_loop(
     settings: config.Settings,
     press: hotkey.Combo | None,
     hold: hotkey.Combo | None,
+    stop: hotkey.Combo | None = None,
 ) -> None:
     """Idle with the microphone closed until either configured hotkey fires, dictate, and
     repeat. At least one of ``press``/``hold`` is non-``None`` — `_resolved_hotkeys` refuses
-    to return both `None`."""
+    to return both `None`. ``stop`` (`hotkey_stop`) only ever ends a press burst."""
     loop = asyncio.get_running_loop()
     marker = tap.new_marker()
     shutdown = asyncio.Event()
@@ -805,6 +803,7 @@ async def _idle_loop(
         bus=bus,
         press=press,
         hold=hold,
+        stop=stop,
     )
 
     def _stop_everything() -> None:
@@ -818,17 +817,21 @@ async def _idle_loop(
     handled = [
         sig for sig in (signal.SIGTERM, signal.SIGINT) if _try_handle(loop, sig, _stop_everything)
     ]
-    hotkeys = [combo for combo in (press, hold) if combo is not None]
+    hotkeys = [combo for combo in (press, hold, stop) if combo is not None]
     watcher = _watch_daemon(marker, hotkeys, bus, active)
+    advising: asyncio.Task[None] | None = None
     try:
         permissions.mark_ready()
         status.note(
-            f"stt mic daemon ready — {_ready_hint(press, hold)}; `stt mic stop` to quit"
+            f"stt mic daemon ready — {_ready_hint(press, hold, stop)}; `stt mic stop` to quit"
             f"{_notification_absence_note()}",
             quiet=args.quiet,
         )
+        advising = asyncio.create_task(_say_globe_key_advice(hold, quiet=args.quiet))
+        handed_back: tuple[hotkey.Combo, bool] | None = None
         while not shutdown.is_set():
-            edge = await _next_hotkey_edge(bus, shutdown)
+            edge = handed_back or await _next_hotkey_edge(bus, shutdown)
+            handed_back = None
             if edge is None or shutdown.is_set():
                 # The second check is belt-and-braces over `_next_hotkey_edge`'s own
                 # shutdown-wins-the-race guard: a burst must never start once stop has been
@@ -837,6 +840,13 @@ async def _idle_loop(
             combo, pressed = edge
             if not pressed:
                 continue  # a release while idle: nothing was armed, so nothing to end
+            if combo is stop:
+                continue  # `hotkey_stop` ends a press burst; while idle there is nothing to end
+            if combo.lone_modifier:
+                held = hotkey.LONE_MODIFIER_ARM_SECONDS
+                alone, handed_back = await _held_alone(bus, combo, shutdown, held)
+                if not alone:
+                    continue  # fn+arrow, fn+delete or a quick tap of fn: never push-to-talk
             # `is`, not `==`: `Combo.__eq__` also compares `spec` (see `same_chord`'s own
             # docstring for why that matters elsewhere) and TWO valid, distinct configured
             # combos could in principle compare structurally equal in some future change to
@@ -863,10 +873,21 @@ async def _idle_loop(
                 # for a failure that only needed to end one burst and return to idle.
                 status.note(f"a burst ended in an error: {failed}", quiet=args.quiet)
     finally:
+        if advising is not None:
+            advising.cancel()
         for sig in handled:
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.remove_signal_handler(sig)
         watcher.stop()
+
+
+async def _say_globe_key_advice(hold: hotkey.Combo | None, *, quiet: bool) -> None:
+    """`hotkey.globe_key_advice`, in a thread and beside the idle loop rather than ahead of
+    it: with fn bound it runs `defaults read`, and a hung `cfprefsd` must not hold up the
+    first hotkey press, `stt mic stop` or Ctrl-C behind it."""
+    advice = await asyncio.to_thread(hotkey.globe_key_advice, hold)
+    if advice is not None:
+        status.note(advice, quiet=quiet)
 
 
 def _try_handle(
@@ -910,6 +931,56 @@ async def _next_hotkey_edge(
                 task.cancel()
 
 
+async def _held_alone(
+    bus: _HotkeyBus,
+    combo: hotkey.Combo,
+    shutdown: asyncio.Event,
+    seconds: float,
+) -> tuple[bool, tuple[hotkey.Combo, bool] | None]:
+    """Whether a lone-modifier hold (`fn` alone) that just went down is still down, alone,
+    ``seconds`` later — what makes it push-to-talk rather than the first half of fn+arrow.
+    `tap.Holds` sends ``combo``'s release the moment a key or another modifier joins it, so
+    that release arriving inside the window is the answer "no"; shutdown is "no" too.
+
+    Another binding's press inside the window is also "no" — fn is no longer alone — and
+    it is returned with the answer so `_idle_loop` acts on it. `tap.Holds` sends fn's cancel
+    ahead of such a press, so this is a guard, not the usual path: this coroutine is the only
+    reader of the queue while it waits, and a press it dropped would be a toggle (e.g.
+    `ctrl+fn+f1`) the user made that never opened the microphone. Releases of other bindings
+    mean nothing while idle and are dropped.
+
+    Explicit tasks rather than `asyncio.wait_for` around a queue read: a timeout landing in
+    the same instant as the release would cancel a read that had already taken the release
+    off the queue, and the burst would then open for a key nobody is holding.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    get_task = asyncio.create_task(bus.events.get())
+    shutdown_task = asyncio.create_task(shutdown.wait())
+    try:
+        while True:
+            left = deadline - loop.time()
+            done, _pending = await asyncio.wait(
+                {get_task, shutdown_task},
+                timeout=max(0.0, left),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if shutdown_task in done:
+                return False, None
+            if get_task not in done:
+                return True, None
+            edged, pressed = get_task.result()
+            if edged is combo and not pressed:
+                return False, None
+            if pressed and edged is not combo:
+                return False, (edged, pressed)
+            get_task = asyncio.create_task(bus.events.get())
+    finally:
+        for task in (get_task, shutdown_task):
+            if not task.done():
+                task.cancel()
+
+
 async def _burst(ctx: _BurstContext, armed: hotkey.Combo, kind: hotkey.BindingKind) -> str:
     """One activation: open the microphone, dictate, close it, and hand control back to
     idle. ``armed`` is the specific chord that started THIS burst and ``kind`` is which
@@ -932,7 +1003,7 @@ async def _burst(ctx: _BurstContext, armed: hotkey.Combo, kind: hotkey.BindingKi
     )
     ctx.active.open(dictating)
     try:
-        hint = _off_hint(kind, armed)
+        hint = _off_hint(kind, armed, ctx.stop)
         status.note(f"listening on {ctx.device.name} — {hint}", quiet=ctx.args.quiet)
         mic = asyncio.create_task(
             _through_the_microphone(
@@ -945,7 +1016,7 @@ async def _burst(ctx: _BurstContext, armed: hotkey.Combo, kind: hotkey.BindingKi
                 interruptible=False,
             )
         )
-        off = asyncio.create_task(_await_release(ctx.bus, armed, kind))
+        off = asyncio.create_task(_await_release(ctx.bus, armed, kind, ctx.stop))
         notif = asyncio.create_task(
             status.stop_notification(f"listening — {hint}", quiet=ctx.args.quiet)
         )
@@ -959,17 +1030,25 @@ async def _burst(ctx: _BurstContext, armed: hotkey.Combo, kind: hotkey.BindingKi
         await status.closed(said=dictating.transcript, quiet=ctx.args.quiet)
 
 
-async def _await_release(bus: _HotkeyBus, armed: hotkey.Combo, kind: hotkey.BindingKind) -> bool:
+async def _await_release(
+    bus: _HotkeyBus,
+    armed: hotkey.Combo,
+    kind: hotkey.BindingKind,
+    stop: hotkey.Combo | None = None,
+) -> bool:
     """Wait for the ONE edge that ends a burst armed by ``armed``/``kind``: another press of
-    the SAME chord for a press-armed burst, a release of it for a hold-armed one. Any other
-    edge — the OTHER configured binding firing mid-burst, a release the daemon never asked
-    about, a spurious extra press mid-hold — is consumed here and ignored, rather than left
-    in the queue to misfire the NEXT burst. Always resolves ``True``: this coroutine only
-    ever completes on the edge that means stop, matching the ``bool``-signals contract
+    the SAME chord, or of ``stop`` (`hotkey_stop`), for a press-armed burst; a release of it
+    for a hold-armed one — a hold never ends on ``stop``, only on letting go. Any other edge
+    — the OTHER configured binding firing mid-burst, a release the daemon never asked about,
+    a spurious extra press mid-hold — is consumed here and ignored, rather than left in the
+    queue to misfire the NEXT burst. Always resolves ``True``: this coroutine only ever
+    completes on the edge that means stop, matching the ``bool``-signals contract
     `_race_burst_signals` races it under.
     """
     while True:
         combo, pressed = await bus.events.get()
+        if kind == "press" and pressed and stop is not None and combo is stop:
+            return True
         if combo != armed:
             continue  # the OTHER binding (or a stray queued edge) — not this burst's to end
         if kind == "hold" and not pressed:
@@ -978,8 +1057,15 @@ async def _await_release(bus: _HotkeyBus, armed: hotkey.Combo, kind: hotkey.Bind
             return True
 
 
-def _off_hint(kind: hotkey.BindingKind, combo: hotkey.Combo) -> str:
-    action = f"release {combo.spec}" if kind == "hold" else f"press {combo.spec} again"
+def _off_hint(
+    kind: hotkey.BindingKind, combo: hotkey.Combo, stop: hotkey.Combo | None = None
+) -> str:
+    if kind == "hold":
+        action = f"release {combo.spec}"
+    elif stop is not None:
+        action = f"press {combo.spec} again or {stop.spec}"
+    else:
+        action = f"press {combo.spec} again"
     return status.stop_hint(action)
 
 
@@ -997,13 +1083,16 @@ def _notification_absence_note() -> str:
     return f" (no notification Stop button — {status.INSTALL_HINT} adds one)"
 
 
-def _ready_hint(press: hotkey.Combo | None, hold: hotkey.Combo | None) -> str:
+def _ready_hint(
+    press: hotkey.Combo | None, hold: hotkey.Combo | None, stop: hotkey.Combo | None = None
+) -> str:
     """What the daemon's startup line says is configured — one clause per active binding, so
     a person with only one of the two set never reads a hint for a binding that is not
     there."""
     clauses = []
     if press is not None:
-        clauses.append(f"press {press.spec} to toggle dictation")
+        also = f" ({stop.spec} also stops it)" if stop is not None else ""
+        clauses.append(f"press {press.spec} to toggle dictation{also}")
     if hold is not None:
         clauses.append(f"hold {hold.spec} to push-to-talk")
     return ", or ".join(clauses)
