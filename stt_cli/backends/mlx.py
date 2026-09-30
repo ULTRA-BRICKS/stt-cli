@@ -25,7 +25,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .. import proc, registry
+from .. import model_gate, proc, registry
 from .._errors import EngineError
 from ..jsonio import JsonDict, as_dict, as_dicts, as_float, as_list, as_opt_float, as_str
 from ..models import Segment, Word
@@ -191,7 +191,12 @@ class MlxBackend:
             # half a minute of a two-hour recording and quietly do nothing after that.
             argv += ["--carry-prompt"]
 
-        result = await proc.run(argv, timeout=proc.DEFAULT_TIMEOUT)
+        # The flat limit stays here: the worker downloads the model itself on first use, and
+        # a download's length has nothing to do with the audio's. For the same reason the
+        # slot is sized from the registry, not from a file that may not be on disk yet.
+        size = registry.get(request.model).size_bytes
+        async with model_gate.slot(size, what=request.model) as held:
+            result = await proc.run(argv, timeout=proc.DEFAULT_TIMEOUT, hold=held)
         payload = _payload(result)
         for warning in as_list(payload.get("warnings")):
             warn_once(as_str(warning))

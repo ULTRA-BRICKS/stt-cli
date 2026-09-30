@@ -34,6 +34,8 @@ async. Zero required third-party runtime dependencies.
 | `formats.py`, `timestamps.py` | renderers and the three timestamp modes |
 | `registry.py` | the model pool: one human name per model, per-engine ids, sizes |
 | `resources.py` | disk and memory guards before any large download or write |
+| `model_gate.py` | the machine-wide cap on loaded speech models, shared by every process |
+| `_tether.py` | the watcher that kills a model process whose stt is gone, `kill -9` included |
 | `live/` | `stt mic`: microphone, gate, two persistent models, and the keyboard |
 
 ## Live dictation (`live/`)
@@ -132,6 +134,14 @@ invariants of its own on top of the ones below.
   human, and `urllib` keeps the token out of an argument vector that `curl` would expose),
   and the `urllib` GETs in `sources.py` (`stt dict search/install --remote` only, imported
   inside the function so neither `stt --help` nor a transcription loads the network stack).
+- **Every process that loads a speech model holds a `model_gate` slot and passes it to
+  `proc.run`/`proc.start` as `hold=`.** A model on Metal is wired memory that macOS neither
+  swaps nor counts as pressure, and on 2026-09-29 thirteen concurrent runs of it hard-reset
+  the Mac (#106). `hold=` is also what tethers the process to stt and gives it a process
+  group of its own, so a slot-less model is both uncounted and able to outlive its stt; every
+  other child stays in stt's own group, where a group kill of stt still reaches it. Its time
+  limit is `proc.budget` over its audio, never the flat `DEFAULT_TIMEOUT` — except mlx,
+  whose worker downloads on first use.
 - **Every failure is an `SttError` subclass** with what/why/how and a stable exit code
   (see `_errors.py`). Never `sys.exit(1)` with a bare message.
 - **Nothing durable in `/tmp`.** Audio and transcripts live in the archive under

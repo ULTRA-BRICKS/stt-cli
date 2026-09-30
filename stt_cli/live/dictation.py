@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import config, dictionary, phrases, portable
+from .. import config, dictionary, model_gate, phrases, portable
 from .._errors import EXIT_OK, EngineError, MissingDependencyError, UsageError
 from ..backends import whispercpp
 from . import capture, hotkey, permissions, quartz, status, tap
@@ -98,7 +98,7 @@ class Models:
 
 @contextlib.asynccontextmanager
 async def _models(args: argparse.Namespace, settings: config.Settings) -> AsyncIterator[Models]:
-    """Load both models, and unload them however the block ends."""
+    """Load both models, each under a slot of its own, and unload them however the block ends."""
     # The configured checkout, not just PATH. Someone whose whisper.cpp lives somewhere they
     # told stt about could transcribe files perfectly well and be told by `stt mic` that
     # whisper-server does not exist — the two commands disagreeing about an installation the
@@ -122,22 +122,71 @@ async def _models(args: argparse.Namespace, settings: config.Settings) -> AsyncI
     # discovered after `large-v3-turbo` has already spent ten seconds and two gigabytes
     # loading, and the run that was never going to work took the longest to say so.
     files = [engine.model_path(name) for name in wanted]
-    # Said after the files are found, not before: "loading models" followed immediately by
-    # "that model has no whisper.cpp build" reads like something went wrong during a load
-    # that never started.
-    # In the order they are loaded, which is the order they finish in. The note used to
-    # reverse them, so the model somebody was waiting on was named second.
-    status.note("loading " + " and ".join(wanted), quiet=args.quiet)
-    threads = settings.threads if args.threads is None else args.threads
-    started = await _load_together(binary, files, language, threads)
+    loads = await _model_slots(
+        list(zip(wanted, files, strict=True)), lambda said: status.note(said, quiet=args.quiet)
+    )
+    # The outer block releases the slots, the inner one stops the servers inside it, so a
+    # slot goes only after its model has left memory — and on every way out, including a
+    # load that failed.
     try:
-        yield Models(settled=started[0], draft=started[1] if drafting else None)
+        # Said after the files are found, not before: "loading models" followed immediately by
+        # "that model has no whisper.cpp build" reads like something went wrong during a load
+        # that never started.
+        # In the order they are loaded, which is the order they finish in. The note used to
+        # reverse them, so the model somebody was waiting on was named second.
+        status.note("loading " + " and ".join(load.name for load in loads), quiet=args.quiet)
+        threads = settings.threads if args.threads is None else args.threads
+        started = await _load_together(binary, loads, language, threads)
+        try:
+            yield Models(settled=started[0], draft=started[1] if len(started) > 1 else None)
+        finally:
+            await asyncio.gather(*(server.stop() for server in started))
     finally:
-        await asyncio.gather(*(server.stop() for server in started))
+        for load in loads:
+            model_gate.release(load.slot)
+
+
+@dataclass(frozen=True, slots=True)
+class _Load:
+    """One model about to be loaded: its name, its file, and the slot it loads under."""
+
+    name: str
+    file: Path
+    slot: model_gate.Slot
+
+
+async def _model_slots(models: list[tuple[str, Path]], note: Callable[[str], None]) -> list[_Load]:
+    """The models that will load, each with its machine-wide slot (`model_gate`), settled first.
+
+    The settled model waits for its slot like any other model. The draft takes one only if
+    one is free right now, and is left out if not: waiting for it would be waiting while
+    holding the settled model's slot, and when that is the slot being waited for — a machine
+    allowed one model of this size, RIG_GPU_SLOTS=1, a wrapper's single slot — the session
+    would wait half an hour on itself and then not dictate at all. The draft is a
+    convenience (see `_the_draft_is_installed`); dictating without it is the better trade.
+
+    Taken here, before either server starts, rather than by each server as it starts: two
+    loads racing for one slot could hand it to the draft and leave the settled model waiting.
+    """
+    (settled, settled_file), *drafts = models
+    slot = await model_gate.acquire(settled_file.stat().st_size, what=settled)
+    loads = [_Load(settled, settled_file, slot)]
+    try:
+        for name, file in drafts:
+            spare = model_gate.attempt(file.stat().st_size)
+            if spare is None:
+                note(f"no free speech-model slot for {name}, so no fast first guess this time")
+                break
+            loads.append(_Load(name, file, spare))
+    except BaseException:
+        for load in loads:
+            model_gate.release(load.slot)
+        raise
+    return loads
 
 
 async def _load_together(
-    binary: Path, files: list[Path], language: str, threads: int
+    binary: Path, loads: list[_Load], language: str, threads: int
 ) -> list[WhisperServer]:
     """Both models at once, and neither left running if the other cannot start.
 
@@ -152,7 +201,10 @@ async def _load_together(
     nobody left to use it, so every server that did start is stopped before the failure is
     allowed out.
     """
-    loading = [asyncio.create_task(_load(binary, path, language, threads)) for path in files]
+    loading = [
+        asyncio.create_task(_load(binary, load.file, load.slot, language, threads))
+        for load in loads
+    ]
     done = await asyncio.gather(*loading, return_exceptions=True)
     started = [server for server in done if isinstance(server, WhisperServer)]
     failed = [outcome for outcome in done if isinstance(outcome, BaseException)]
@@ -190,7 +242,9 @@ def _settled_model(args: argparse.Namespace, settings: config.Settings) -> str:
     return str(args.model or settings.model)
 
 
-async def _load(binary: Path, model: Path, language: str, threads: int) -> WhisperServer:
+async def _load(
+    binary: Path, model: Path, slot: model_gate.Slot, language: str, threads: int
+) -> WhisperServer:
     """One `whisper-server`, holding one model file open for the rest of the session.
 
     `threads` is the user's configured value, and zero keeps the meaning it has everywhere
@@ -198,7 +252,8 @@ async def _load(binary: Path, model: Path, language: str, threads: int) -> Whisp
     set eight got four, and somebody who asked for the engine default got four as well, with
     two servers between them oversubscribing the machine.
     """
-    return await WhisperServer.start(binary, Voice(model=model, language=language, threads=threads))
+    voice = Voice(model=model, language=language, threads=threads)
+    return await WhisperServer.start(binary, voice, slot)
 
 
 async def _dictate_until_stopped(

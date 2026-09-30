@@ -582,7 +582,7 @@ async def test_both_models_load_at_once_and_neither_is_left_behind(monkeypatch) 
         async def stop(self) -> None:
             stopped.append(self.name)
 
-    async def load(_binary, path, _language, _threads):
+    async def load(_binary, path, _slot, _language, _threads):
         running.append(path.name)
         await asyncio.sleep(0)  # both are in flight across this point
         if path.name == "broken":
@@ -592,13 +592,16 @@ async def test_both_models_load_at_once_and_neither_is_left_behind(monkeypatch) 
     monkeypatch.setattr(dictation, "_load", load)
     monkeypatch.setattr(dictation, "WhisperServer", Loaded)
 
-    both = await dictation._load_together(Path("bin"), [Path("big"), Path("small")], "ru", 0)
+    def loads(*names: str) -> list:
+        return [dictation._Load(name, Path(name), None) for name in names]
+
+    both = await dictation._load_together(Path("bin"), loads("big", "small"), "ru", 0)
     assert [server.name for server in both] == ["big", "small"], "in the order asked for"
     assert running == ["big", "small"], "and started before either had finished"
 
     running.clear()
     with pytest.raises(RuntimeError):
-        await dictation._load_together(Path("bin"), [Path("big"), Path("broken")], "ru", 0)
+        await dictation._load_together(Path("bin"), loads("big", "broken"), "ru", 0)
     assert stopped == ["big"], "the one that did start is not left holding memory"
 
 

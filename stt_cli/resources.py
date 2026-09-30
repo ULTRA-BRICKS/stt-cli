@@ -25,6 +25,9 @@ GIB = 1024**3
 # Keep this much free after any write. Below it macOS itself starts misbehaving, so
 # filling the disk to the brim is never worth a transcript.
 DISK_HEADROOM = 2 * GIB
+# Where Linux says how much memory there is. It has no `hw.memsize` to ask sysctl for, and
+# a machine that answers 0 is a machine the speech-model gate allows one model at a time.
+MEMINFO = Path("/proc/meminfo")
 
 
 @dataclass(slots=True, frozen=True)
@@ -46,7 +49,7 @@ def probe(path: Path | None = None) -> Resources:
     while not target.exists() and target != target.parent:
         target = target.parent
     usage = shutil.disk_usage(target)
-    return Resources(free_disk=usage.free, total_disk=usage.total, total_ram=_total_ram())
+    return Resources(free_disk=usage.free, total_disk=usage.total, total_ram=total_ram())
 
 
 def require_space(needed: int, *, path: Path, what: str) -> None:
@@ -76,8 +79,10 @@ def check_memory(model_bytes: int, *, model: str) -> list[str]:
     return warnings
 
 
-def _total_ram() -> int:
+def total_ram() -> int:
     """Physical memory in bytes; 0 when it cannot be determined (never fatal)."""
+    if MEMINFO.is_file():
+        return _meminfo_total()
     try:
         out = subprocess.run(
             ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5, check=True
@@ -85,3 +90,15 @@ def _total_ram() -> int:
         return int(out.stdout.strip())
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
+
+
+def _meminfo_total() -> int:
+    """``MemTotal`` from MEMINFO, which the kernel gives in kB."""
+    try:
+        for line in MEMINFO.read_text().splitlines():
+            name, _, value = line.partition(":")
+            if name == "MemTotal":
+                return int(value.split()[0]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0

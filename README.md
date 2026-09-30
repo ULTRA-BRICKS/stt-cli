@@ -479,6 +479,40 @@ Adding a model is one entry in `stt_cli/registry.py`, and adding an engine is on
 if something better than Whisper shows up, it is an addition rather than a rewrite. Downloads
 check free disk space and physical memory first, and refuse rather than fail at 94 percent.
 
+### Many runs at once
+
+Each whisper.cpp or mlx run loads its whole model onto the GPU, where it is wired memory:
+macOS cannot swap it out, and does not even report it as memory pressure. Thirteen `stt`
+runs started side by side by parallel agents once wired 24.65 of 25.77 GB this way and
+hard-reset the Mac. So every model load on the machine — a decode, the Silero VAD, the two
+models `stt mic` keeps loaded — takes one of a fixed number of **speech-model slots** first,
+and an `stt` that finds them all taken prints one line saying so and waits:
+
+```
+stt: all 2 speech-model slot(s) on this machine are in use (pid=81234 stt interview.m4a, pid=81240 stt mic run); waiting up to 30 min before loading large-v3-turbo
+```
+
+The number of slots comes from the machine and the model: a sixth of physical memory
+divided by the model file's size, between 1 and 8 — two `large-v3-turbo` on a 24 GB Mac,
+one `large-v3`. `RIG_GPU_SLOTS=<n>` sets it outright. A run still waiting after 30 minutes
+gives up with exit code `9`, naming the processes that hold the slots. The slots are lock
+files in `$RIG_GPU_SLOT_DIR` (default `~/.local/state/agent-tools/gpu-slots`), shared with
+anything else that takes GPU slots there; a lock belongs to the kernel, so a process that
+dies — however it dies — frees its slot, and nothing is ever left to clean up.
+
+`stt mic` waits for its main model's slot like any other run, but takes one for its fast
+draft model only if one is free right then. Otherwise it dictates without the draft and
+says so, rather than wait for a slot its own main model may be the one holding.
+
+A model process never outlives the `stt` that started it. It runs in a process group of its
+own that `stt` takes down on every way out — an error, Ctrl-C, `SIGTERM`, `SIGHUP`, a
+cancelled task — and a small watcher beside it kills the group if `stt` disappears without
+cleaning up, `kill -9` included. Each decode also has a time limit that fits its audio: two
+minutes to load the model plus five seconds per second of audio (the VAD gets a tenth of a
+second per second), so a whisper-cli that hangs on a ten-second clip is reaped in under
+three minutes instead of three hours. The mlx engine keeps a flat three-hour limit, because
+its worker downloads the model on first use.
+
 ## Exit codes
 
 `0` ok · `2` bad usage · `4` unknown model/format/command · `5` missing file · `7` network ·

@@ -38,6 +38,19 @@ ARCHIVE_SUFFIX = ".opus"
 ENGINE_RATE = 16_000
 
 
+def engine_wav_seconds(wav: Path) -> float:
+    """How much audio an engine WAV holds, read off its size; 0.0 if it is not there.
+
+    Every WAV an engine is handed is ENGINE_RATE mono 16-bit PCM, so the size is the length:
+    the 44-byte header only makes the answer a hair long, which is the safe direction for the
+    time limit it feeds (`proc.budget`). A missing file is the engine's to report.
+    """
+    try:
+        return wav.stat().st_size / (ENGINE_RATE * 2)
+    except OSError:
+        return 0.0
+
+
 async def probe(path: Path) -> JsonDict:
     """Raw ffprobe JSON for ``path`` (format + streams)."""
     if not path.exists():

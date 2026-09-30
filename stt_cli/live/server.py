@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, Protocol
 
-from .. import proc
+from .. import model_gate, proc
 from .._errors import EngineError, MissingDependencyError
 from ..jsonio import as_dict, as_str
 from .gate import RATE
@@ -126,14 +126,21 @@ class WhisperServer:
         return f"http://127.0.0.1:{self._port}/inference"
 
     @classmethod
-    async def start(cls, binary: Path, voice: Voice) -> WhisperServer:
-        """Launch the server and wait until it will actually answer."""
+    async def start(cls, binary: Path, voice: Voice, slot: model_gate.Slot) -> WhisperServer:
+        """Launch the server and wait until it will actually answer.
+
+        ``slot`` is the machine-wide model slot (`model_gate`) the model is loaded under. The
+        caller took it and gives it back once the server has stopped: a dictation session
+        keeps its models loaded for as long as it runs, so they count against the same pool
+        as every file transcription — they are the same wired memory.
+        """
         port = _free_port()
-        process = await asyncio.create_subprocess_exec(
-            *_argv(binary, voice, port),
+        process = await proc.start(
+            _argv(binary, voice, port),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            hold=slot,
         )
         server = cls(process, port)
         server._begin_draining()

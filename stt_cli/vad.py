@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import proc
+from . import model_gate, proc
 from ._errors import UsageError
 from .models import SpeechSpan
 
@@ -36,6 +36,10 @@ MAX_SPAN_SECONDS = 600.0
 # the context it needs and multiplies process launches for no gain. Callers override it
 # from ``min_silence_ms`` so both detectors end up with identical grouping behaviour.
 DEFAULT_MERGE_GAP = 0.8
+# Seconds of wall time Silero may take per second of audio, after `proc.LOAD_SECONDS`. It
+# covers an hour in a couple of seconds on the CPU, so this is well over a hundred times
+# what it needs — and still minutes, not the hour every file used to get.
+VAD_PACE = 0.1
 
 
 @dataclass(slots=True)
@@ -95,7 +99,7 @@ async def detect(
     if have_silero and mode in {"auto", "silero"}:
         assert silero_binary is not None and silero_model is not None
         raw = await _silero_spans(
-            wav, silero_binary, silero_model, threshold, speech_pad_ms, min_speech_ms
+            wav, duration, silero_binary, silero_model, threshold, speech_pad_ms, min_speech_ms
         )
         method = "silero"
     else:
@@ -157,6 +161,7 @@ _SILERO_LINE = re.compile(r"start\s*=\s*([\d.]+),\s*end\s*=\s*([\d.]+)")
 
 async def _silero_spans(
     wav: Path,
+    duration: float,
     binary: Path,
     model: Path,
     threshold: float,
@@ -182,7 +187,9 @@ async def _silero_spans(
         "-vp", str(speech_pad_ms),
         "-np",
     ]  # fmt: skip
-    result = await proc.run(argv, check=True, timeout=60 * 60)
+    limit = proc.budget(duration, pace=VAD_PACE)
+    async with model_gate.slot(model.stat().st_size, what="the Silero VAD") as held:
+        result = await proc.run(argv, check=True, timeout=limit, hold=held)
     return [
         SpeechSpan(float(a) / 100.0, float(b) / 100.0)
         for a, b in _SILERO_LINE.findall(result.stdout + result.stderr)

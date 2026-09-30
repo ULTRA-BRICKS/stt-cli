@@ -23,7 +23,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .. import config, proc, registry, resources
+from .. import config, media, model_gate, proc, registry, resources
 from .._errors import EngineError, NetworkError
 from ..jsonio import JsonDict, as_dict, as_dicts, as_float, as_str
 from ..models import Segment, Word
@@ -64,6 +64,11 @@ PROMPT_CONTEXT = 64
 
 # `whisper-cli --help` prints and exits; anything slower than this is a broken binary.
 _HELP_TIMEOUT = 20.0
+
+# Seconds of wall time a decode may take per second of audio, after `proc.LOAD_SECONDS`.
+# whisper.cpp on Metal decodes many times faster than real time; this is five times SLOWER
+# than real time, so only a process that has stopped making progress runs into it.
+DECODE_PACE = 5.0
 
 
 class WhisperCppBackend:
@@ -155,7 +160,10 @@ class WhisperCppBackend:
         with tempfile.TemporaryDirectory(prefix="stt-whispercpp-") as tmp:
             stem = Path(tmp) / "out"
             argv = self._argv(request, stem, carry_prompt=carry)
-            result = await proc.run(argv, timeout=proc.DEFAULT_TIMEOUT)
+            size = self.model_path(request.model).stat().st_size
+            limit = proc.budget(media.engine_wav_seconds(request.wav), pace=DECODE_PACE)
+            async with model_gate.slot(size, what=request.model) as held:
+                result = await proc.run(argv, timeout=limit, hold=held)
             payload = stem.with_suffix(".json")
             if not result.ok or not payload.is_file():
                 raise EngineError(
