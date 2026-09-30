@@ -182,7 +182,7 @@ stt dict search medic              # id, version, term count, languages, title, 
 stt dict search --tag drug-names
 stt dict install medical-general   # re-running it later upgrades to the newest version
 stt dict installed                 # what is installed, and anything the merge left out
-stt dict show medical-general      # its terms
+stt dict show medical-general      # its terms, and what your overlay changed (below)
 stt dict uninstall medical-general
 ```
 
@@ -205,6 +205,43 @@ covers the terms the transcription ends up using, so installing or uninstalling 
 that adds any term re-runs the transcription instead of serving the one made before; a
 dictionary whose every entry a conflict left out changes nothing, and neither does the key.
 Live dictation (`stt mic`) does not read the installed dictionaries yet.
+
+#### Overlays: your edits to an installed dictionary
+
+One wrong or missing entry does not mean copying the whole dictionary into your own and
+losing its upgrades. Write an overlay next to it instead, in
+`~/.config/stt-cli/dicts/overlays/<id>.yaml` (`$XDG_CONFIG_HOME/stt-cli/dicts/overlays/`
+when `XDG_CONFIG_HOME` is set to an absolute path), naming entries by the ids `stt dict show <id>` prints:
+
+```yaml
+# ~/.config/stt-cli/dicts/overlays/software-engineering-tools.yaml
+base_version: 1          # the installed version you wrote it against
+entries:
+  conloca:
+    op: replace          # new values for the fields you give; aka is replaced whole
+    aka: ["ConLog", "our-internal-nickname"]
+    note: "our fork, not the upstream project"
+  hyperide:
+    op: disable          # drop the entry
+  my-codename:
+    op: add              # a new entry, after the dictionary's own
+    term: "ProjNova"
+    aka: ["Proj Nova"]
+```
+
+`stt dict show <id>` then marks every term base, replaced or added and lists the disabled
+ones. Every transcription uses the overlay, and editing it changes the cache key exactly
+when it changes the words. Upgrades and `stt dict uninstall` never touch it. When the base
+moves on, an overlay entry whose id is gone, a `base_version` that no longer matches, or a
+name another entry already has is a warning, never a failure. A mistake in the file itself
+(an unknown `op`, an add without a `term`) is an error naming the line.
+
+The file is read as a small, fixed subset of YAML with no extra dependency, so it reads the
+same everywhere: `key: value` lines indented with spaces, plain or quoted text, integers,
+`["flow", "lists"]` and `- item` lists, and `#` comments. Anchors, tags, `|`/`>` blocks,
+`{flow: mappings}`, tabs and a key repeated in one mapping are refused with the line number.
+Quote `null`, `true`, `false` and `~` if you mean them as text. `stt dict --help` prints an
+example and the rules. The details are in `docs/specs/dictionaries.md` section 7.
 
 ## Speakers
 

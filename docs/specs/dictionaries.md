@@ -15,13 +15,16 @@ and its validator (`stt_cli/catalog.py`), the 21 curated dictionaries of section
 the committed catalog index. **Shipped by [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83):**
 both sources (`stt_cli/sources.py`), the index reader (`catalog.parse_index`), the
 `search`/`install`/`installed`/`show`/`uninstall` commands, installed-dictionary merging and the
-fingerprint (`stt_cli/installed.py`), read by file transcription and `stt dict check`. Live dictation
+fingerprint (`stt_cli/installed.py`), read by file transcription and `stt dict check`. **Shipped by
+[#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84):** overlays (`stt_cli/overlays.py`) and
+their standard-library YAML-subset reader (`stt_cli/yamlsubset.py`), applied inside
+`installed.load_effective`, so everything that reads the effective glossary reads them. Live dictation
 still reads only the personal dictionary; switching it is
 [#113](https://git.hyperide.ai/ultrabricks/stt-cli/issues/113). **Shipped by
 [#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86):** the marketplace website of section 8
 (`site/`), deployed at `https://stt-dicts-marketplace.vercel.app`, whose API tests read the same contract
-fixture `tests/fixtures/dictionaries/` as the stt side. None of the following is built yet: overlays and
-usage-based suggestions. Build order,
+fixture `tests/fixtures/dictionaries/` as the stt side. None of the following is built yet: usage-based
+suggestions. Build order,
 as recorded on the epic: [#81](https://git.hyperide.ai/ultrabricks/stt-cli/issues/81) (format, catalog
 contract, curated content), then [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) (sources,
 install, effective glossary, cache fingerprint), then
@@ -204,9 +207,9 @@ and `install` with the remote source, never by a transcription or a dictation se
 | --- | --- |
 | `stt dict search [query] [--tag T] [--remote]` | Lists id, version, title, tags, languages and term count of entries whose id, title or tags contain the query, case-insensitively; marks installed ones. It reads only the catalog index, which holds no terms, so unlike the website's search (section 8) it does not match term text. |
 | `stt dict install <id> [--remote]` | Fetches, verifies, validates (section 3), writes. Re-installing upgrades, printing old and new version, and warns if an overlay exists for it. |
-| `stt dict installed` | Lists installed dictionaries (id, version, term count, overlay or not); warns when the effective glossary exceeds the 500-term phonetic screen or merging dropped entries (section 6). Offline. |
+| `stt dict installed` | Lists installed dictionaries (id, version, term count after the overlay, overlay or not); warns when the effective glossary exceeds the 500-term phonetic screen, merging dropped entries (section 6), or an overlay could not do something (section 7). Offline. |
 | `stt dict uninstall <id>` | Deletes the installed file; leaves the overlay (the user's own writing) and says where it is. |
-| `stt dict show <id>` | The effective terms of one installed dictionary, each marked base, replaced or added; disabled entries separately; every overlay warning (section 7). Before [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84), base terms only. |
+| `stt dict show <id>` | The effective terms of one installed dictionary, each marked base, replaced or added with its term id; disabled entries separately; the overlay's path and `base_version`, or where one would go; every overlay warning (section 7). |
 
 The uninstall command is `uninstall`, settled by [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83)
 (section 11): `stt dict rm` already deletes a personal term, and `remove` was one typo away from it.
@@ -323,8 +326,9 @@ invalidate every archived run of users who install nothing.
 
 ## 7. Overlay YAML schema
 
-Path: `~/.config/stt-cli/dicts/overlays/<dict_id>.yaml`, or under `$XDG_CONFIG_HOME` when it is set
-(section 5). The schema is [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84)'s: a named-field object per entry instead of Alex's
+Path: `~/.config/stt-cli/dicts/overlays/<dict_id>.yaml`, or under `$XDG_CONFIG_HOME` when it is set to
+an absolute path; a relative value (a `~` included, since nothing expands it there) counts as unset, as the XDG spec says, so the words of a transcript
+never depend on the directory stt was started from (section 5). The schema is [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84)'s: a named-field object per entry instead of Alex's
 positional `["replace", "<value>"]` sketch, because a replace changes several fields a positional pair
 cannot name, and a named field lets an error say which one is wrong.
 
@@ -367,7 +371,34 @@ listed by `stt dict show`:
   as it was; an overlay alias equal to another entry's term or alias: dropped from the overlay's entry.
   Each is warned naming the overlay line. The same collision between two dictionaries is section 6's
   steps 3 and 4; a colliding name or alias in an overlay never stops a transcription.
-- An overlay for a dictionary that is not installed: ignored, warned.
+- An overlay for a dictionary that is not installed: ignored, warned. So is a `<dict_id>.yml` file,
+  since only `.yaml` is read.
+
+Details settled by [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84):
+
+- `base_version` is required, a positive integer: without it the staleness warning could never fire.
+  `entries` may be missing or empty (`entries:` with nothing under it), which changes nothing.
+- Entry ids follow section 3's id rules; an `add` id is local to the overlay.
+- An `add` whose id the base has since gained takes that entry's place, exactly as a `replace` of every
+  field would (its `aka` and `note` default to empty, not to the base's), and is marked replaced.
+- Order: disables first, so a spelling a disabled entry held is free for a replace or an add; then
+  replaces, then adds, each in overlay order and each checked against the entries as they stand at that
+  moment. Warnings are listed in the file's line order.
+- At most `MAX_SCREENED_TERMS` = 500 entries and `MAX_DICTIONARY_BYTES` per overlay file.
+- `stt dict install` of a dictionary that has an overlay prints the overlay's warnings against the
+  newly installed version, so a `base_version` that no longer matches is said at the moment it
+  stops matching. A broken overlay is printed as a warning there too, not an error: the install has
+  already been written, and a script re-running `install` to upgrade must not read a failure.
+- A replace that renames an entry to one of the spellings it keeps drops that spelling from the
+  entry's `aka`, since it is now the name.
+- Only regular files, or links to them, are overlays; a directory or a FIFO is not. The name must
+  match exactly: on a case-insensitive disk `Fixture-Tools.yaml` would open as
+  `fixture-tools.yaml`, and it is ignored and warned about as not installed, not applied. The
+  not-installed and `.yml` warnings quote the file name.
+  `stt dict show <id>` names a `<id>.yml` next to its "overlay: none".
+- `stt dict show <id>` fails only on `<id>`'s own broken overlay. Another dictionary's broken
+  overlay is a warning there, and that dictionary is counted without it for the section 6 drops;
+  a transcription still stops on it.
 
 An unparseable file, an unknown `op`, a missing required field, an id that appears twice under `entries:`
 or an entry over a limit is a `UsageError` naming the line and field, as `load()` treats a malformed
@@ -381,8 +412,13 @@ personal file (`stt_cli/dictionary.py:466-477`).
 | A. Standard-library parser for a documented subset: `#` comments; space-indented block mappings; plain, single- and double-quoted scalars; integers; flow lists `[a, "b"]` and block lists `- a`. Refused with a line number: anchors, aliases, tags, multiple documents, block scalars, flow mappings, tabs, a key repeated in one mapping. Plain `yes`/`no`/`on`/`off` stay strings. | Same result on every machine; nothing to install; errors point at the exact line; the subset is exactly what the schema needs. | About two hundred lines to write and test; advanced YAML is refused rather than read. |
 | B. PyYAML as an optional extra, with the overlay also accepted as JSON when PyYAML is missing. | Full YAML, little parsing code. | The same file loads on one machine and fails on another, so one recording gets a different glossary and cache key depending on unrelated installs; two formats to document. |
 
-Recommendation: option A. An overlay changes the words, so how it parses must not depend on which optional
-packages happen to be present.
+**Decision ([#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84)): option A**, implemented in
+`stt_cli/yamlsubset.py`. An overlay changes the words, so how it parses must not depend on which
+optional packages happen to be present. Beyond the table's list: one leading `---` is accepted, since
+editors and templates write it; plain `null`, `~`, `true` and `false` are refused with "quote it"
+rather than read as text or as a non-text value, because a full YAML reader disagrees with any
+answer; a trailing comma in a flow list is accepted; a list item that is itself a list or a mapping is
+refused. `stt dict --help` prints the schema and the subset in one screen.
 
 ## 8. Marketplace site contract
 
@@ -494,7 +530,7 @@ Until then the suggestion check prints its result to the terminal instead of pos
 | Decision | Recommendation here | Owner |
 | --- | --- | --- |
 | Uninstall command name, given `stt dict rm` already removes a personal term | decided on [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83): `uninstall`, which pairs with `install` and cannot be mistyped as `rm` | [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) |
-| Overlay parser: standard-library subset or optional PyYAML with JSON fallback | standard-library subset (section 7) | [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84), recorded in this file |
+| Overlay parser: standard-library subset or optional PyYAML with JSON fallback | decided on [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84): standard-library subset (section 7) | [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84) |
 | Suggestion thresholds (10 transcripts; 0.6 per transcript; 5 and a quarter of the window) | start here, tune on real archives | [#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88) |
 
 Decided here, not open: the version is an integer (section 3); index, API shapes and merge precedence as

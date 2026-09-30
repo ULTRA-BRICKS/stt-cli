@@ -244,9 +244,10 @@ def _resolve(settings: Settings, reporter: Reporter) -> tuple[Settings, dictiona
     stored under a fingerprint describing a dictionary that did not produce it, and asking
     for the old dictionary again would serve the new dictionary's words out of the cache.
     The dictionary is the EFFECTIVE glossary — the personal terms plus every installed
-    dictionary (`installed.load_effective`) — so installing or uninstalling one changes the
-    digest, and the fingerprint with it, exactly as editing the personal file does. What the
-    merge left out is said here, once per transcription.
+    dictionary as its overlay leaves it (`installed.load_effective`) — so installing or
+    uninstalling one, or editing an overlay, changes the digest, and the fingerprint with
+    it, exactly as editing the personal file does. What the merge left out, and what an
+    overlay could not do, is said here, once per transcription.
 
     Two things here are implied rather than typed by the user, and both change the words in
     the transcript, so both have to be settled before ``archive.fingerprint`` sees the

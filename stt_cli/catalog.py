@@ -542,14 +542,20 @@ def _require_exact_fields(
         )
 
 
+def is_slug(value: object) -> bool:
+    """Is ``value`` a dictionary or term id: 2 to 64 lowercase ASCII words joined by hyphens?"""
+    return isinstance(value, str) and len(value) in SLUG_LENGTHS and bool(_SLUG.fullmatch(value))
+
+
+SLUG_RULE = (
+    "ids are 2 to 64 lowercase ASCII letters and digits in hyphen-separated words, "
+    "like medical-general; a Russian term gets a transliterated id"
+)
+
+
 def _require_slug(value: object, where: str) -> None:
-    if not isinstance(value, str) or len(value) not in SLUG_LENGTHS or not _SLUG.fullmatch(value):
-        raise _invalid(
-            where,
-            f"is {value!r}, not a slug",
-            "ids are 2 to 64 lowercase ASCII letters and digits in hyphen-separated words, "
-            "like medical-general; a Russian term gets a transliterated id",
-        )
+    if not is_slug(value):
+        raise _invalid(where, f"is {value!r}, not a slug", SLUG_RULE)
 
 
 def _require_line(value: object, where: str, limit: int) -> None:

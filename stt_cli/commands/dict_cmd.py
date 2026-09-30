@@ -12,6 +12,9 @@ a line of a transcript and see exactly what would have been flagged and how stro
 curated dictionary at once — bundled with stt, or from the marketplace website with
 ``--remote``. Installed terms join the personal ones in every transcription; the personal
 dictionary wins every conflict, and ``stt dict list`` still shows only the personal terms.
+An overlay — a hand-written ``<config>/stt-cli/dicts/overlays/<id>.yaml`` — disables,
+replaces or adds entries of one installed dictionary without editing it; ``stt dict show``
+says what it did.
 """
 
 from __future__ import annotations
@@ -32,8 +35,37 @@ NAME = "dict"
 SUMMARY = "terms the speech model does not know, and their known misspellings"
 
 
+OVERLAY_HELP = """\
+overlays:
+  Customize an installed dictionary without editing it, so an upgrade still reaches you:
+  write ~/.config/stt-cli/dicts/overlays/<id>.yaml (under $XDG_CONFIG_HOME when that is
+  an absolute path; `stt dict show <id>` prints the exact path and the ids to name entries by):
+
+    base_version: 3          # the installed version you wrote it against
+    entries:
+      conloca:
+        op: replace          # new values for the fields you give; the rest stay
+        aka: ["ConLog", "our-nickname"]
+      hyperide:
+        op: disable          # drop the entry
+      my-codename:
+        op: add              # a new entry, after the dictionary's own
+        term: "ProjNova"
+        note: "internal codename"
+
+  The file is a small subset of YAML: `key: value` lines indented with spaces, quoted or
+  plain text, ["flow", "lists"] or `- item` lines, and # comments. A mistake in it is an
+  error naming the line; an id the dictionary no longer has is only a warning.
+"""
+
+
 def run(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="stt dict", description=SUMMARY)
+    parser = argparse.ArgumentParser(
+        prog="stt dict",
+        description=SUMMARY,
+        epilog=OVERLAY_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="action")
 
     sub.add_parser("list", help="show every term (default)")
@@ -64,7 +96,9 @@ def run(argv: list[str]) -> int:
 
     sub.add_parser("installed", help="list the installed dictionaries")
 
-    show = sub.add_parser("show", help="the terms of one installed dictionary")
+    show = sub.add_parser(
+        "show", help="the terms of one installed dictionary, and what its overlay changed"
+    )
     show.add_argument("id")
 
     drop = sub.add_parser("uninstall", help="remove an installed dictionary")
@@ -343,8 +377,16 @@ def _install(args: argparse.Namespace) -> int:
     print(f"  {done.path}")
     print(f"  its terms:  stt dict show {adopted.id}")
     overlay = installed.overlay_path(adopted.id)
-    if overlay.exists():
+    if installed.has_overlay(adopted.id):
         print(f"warning: your overlay {overlay} customizes this dictionary; check it still fits")
+        # The install has happened by now, so a broken overlay is said, not a failed install:
+        # a script re-running `install` to upgrade must not read a failure.
+        try:
+            said = list(installed.with_overlay(adopted).warnings)
+        except UsageError as broken:
+            said = [f"{broken.what}; {broken.how}"]
+        for warning in said:
+            print(f"warning: {warning}")
     return EXIT_OK
 
 
@@ -352,14 +394,17 @@ def _installed(_args: argparse.Namespace) -> int:
     from .. import config
 
     found = installed.read_all()
+    composed, warnings = installed.overlaid(found)
     if not found:
         print("no dictionaries are installed")
         print("  find one:  stt dict search")
+        for warning in warnings:
+            print(f"warning: {warning}")
         return EXIT_OK
     width = max(len(adopted.id) for adopted in found)
-    for adopted in found:
-        overlay = installed.overlay_path(adopted.id)
-        extra = f"  overlay: {overlay}" if overlay.exists() else ""
+    for each in composed:
+        adopted = each.dictionary
+        extra = f"  overlay: {installed.overlay_path(adopted.id)}" if each.overlay else ""
         print(
             f"{adopted.id:<{width}}  v{adopted.version:<3} {len(adopted.entries):>4} terms"
             f"  {adopted.title}{extra}"
@@ -367,22 +412,44 @@ def _installed(_args: argparse.Namespace) -> int:
     print(f"\n{len(found)} installed in {installed.directory()}")
     if not config.load_settings().dictionary:
         print("note: the dictionary is turned off in the settings, so none of these is used")
-    _, warnings = installed.merge(dictionary.load(), found)
-    for warning in warnings:
+    _, dropped = installed.merge(dictionary.load(), [each.dictionary for each in composed])
+    for warning in warnings + dropped:
         print(f"warning: {warning}")
     return EXIT_OK
 
 
 def _show(args: argparse.Namespace) -> int:
-    adopted = installed.read(args.id)
-    print(f"{adopted.id} v{adopted.version}: {adopted.title}")
-    print(f"  tags: {', '.join(adopted.tags)}   languages: {', '.join(adopted.languages)}")
-    print(f"  license: {adopted.license}   source: {adopted.source}")
+    """The effective terms, each marked base, replaced or added, and what was disabled."""
+    shown, merged, unread = installed.composed_for_show(installed.read_all(), args.id)
+    base = shown.dictionary
+    print(f"{base.id} v{base.version}: {base.title}")
+    print(f"  tags: {', '.join(base.tags)}   languages: {', '.join(base.languages)}")
+    print(f"  license: {base.license}   source: {base.source}")
+    overlay = installed.overlay_path(base.id)
+    if shown.overlay is None:
+        print(f"  overlay: none (write {overlay} to customize it; `stt dict --help` shows how)")
+        stray = overlay.with_suffix(".yml")
+        if stray.is_file():
+            print(f"warning: {installed.misnamed(stray)}")
+    else:
+        print(f"  overlay: {overlay} (written against v{shown.overlay.base_version})")
     print()
-    for entry in adopted.entries:
-        print(f"  {entry.term.describe()}")
-    print(f"\n{len(adopted.entries)} term(s) in {installed.directory() / (adopted.id + '.json')}")
-    for warning in installed.drops_involving(adopted.id, dictionary.load(), installed.read_all()):
+    width = max(len(entry.id) for entry in (*shown.dictionary.entries, *shown.disabled))
+    for entry in shown.dictionary.entries:
+        mark = shown.marks[entry.id]
+        print(f"  {mark:<8}  {entry.id:<{width}}  {entry.term.describe()}")
+    if shown.disabled:
+        print("\ndisabled by the overlay:")
+        for entry in shown.disabled:
+            print(f"  {entry.id:<{width}}  {entry.term.describe()}")
+    print(
+        f"\n{len(shown.dictionary.entries)} term(s) from "
+        f"{installed.directory() / (base.id + '.json')}"
+        + (f", {len(shown.disabled)} disabled" if shown.disabled else "")
+    )
+    for warning in shown.warnings:
+        print(f"warning: {warning}")
+    for warning in unread + installed.drops_involving(base.id, dictionary.load(), merged):
         print(f"warning: {warning}")
     return EXIT_OK
 
@@ -391,7 +458,7 @@ def _uninstall(args: argparse.Namespace) -> int:
     gone = installed.uninstall(args.id)
     print(f"uninstalled {args.id} ({gone})")
     overlay = installed.overlay_path(args.id)
-    if overlay.exists():
+    if installed.has_overlay(args.id):
         print(f"your overlay stays at {overlay}; delete it yourself if you no longer want it")
     return EXIT_OK
 

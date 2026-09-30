@@ -30,6 +30,7 @@ async. Zero required third-party runtime dependencies.
 | `dictionary.py`, `fuzzy.py` | terminology: prompt biasing, exact fixes, phonetic flags |
 | `catalog.py`, `dictionaries/` | distributable dictionaries: the format's validator, the curated bundled set, the catalog index |
 | `sources.py`, `installed.py` | where a dictionary comes from (bundled or the marketplace site, SHA-256 verified), `stt dict install`, and the effective glossary: personal terms plus installed ones |
+| `overlays.py`, `yamlsubset.py` | a user's hand-written YAML edits to an installed dictionary (disable, replace, add by term id), read by a standard-library YAML subset so it parses the same on every machine |
 | `archive.py` | content-addressed store plus a SQLite index |
 | `formats.py`, `timestamps.py` | renderers and the three timestamp modes |
 | `registry.py` | the model pool: one human name per model, per-engine ids, sizes |

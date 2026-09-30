@@ -6,14 +6,14 @@ WHAT INSTALLING IS
     ``<app_home>/dicts/installed/<id>.json``. stt writes and replaces that file itself, so it
     lives beside the personal ``dictionary.json`` under ``STT_HOME``, and ``stt dict
     uninstall`` deletes it. An overlay — a user's hand-written edits to an installed
-    dictionary (#84) — lives under ``~/.config`` instead, where an upgrade or an uninstall
-    can never touch it; this module only resolves that path, to say an overlay exists.
+    dictionary (`overlays.py`) — lives under ``~/.config`` instead, where an upgrade or an
+    uninstall can never touch it.
 
 THE EFFECTIVE GLOSSARY
     `load_effective` is what a transcription reads instead of `dictionary.load()`: the
     personal terms first, in their order, then every installed dictionary's terms in
-    ascending id order. The personal dictionary wins every conflict, and an earlier
-    installed dictionary wins over a later one:
+    ascending id order, each as its overlay leaves it. The personal dictionary wins every
+    conflict, and an earlier installed dictionary wins over a later one:
 
     - an installed entry whose name is already a name or a spelling in the list is dropped
       whole — unlike `Dictionary.add`, nothing from it is merged into the entry it hit;
@@ -21,9 +21,11 @@ THE EFFECTIVE GLOSSARY
       because `_alias_index` would otherwise skip that alias for BOTH, silently switching
       off a correction the user wrote down.
 
-    Every drop is a warning naming both dictionaries ("flag first, drop second"). With
-    nothing installed the result is the personal dictionary itself, so its digest — and the
-    fingerprint of every archived run — is exactly what it was before this module existed.
+    Every drop is a warning naming both dictionaries ("flag first, drop second"), and so is
+    everything an overlay could not do. With nothing installed the result is the personal
+    dictionary itself, so its digest — and the fingerprint of every archived run — is
+    exactly what it was before this module existed. The digest hashes the terms the overlay
+    leaves, so editing an overlay changes the fingerprint exactly when it changes the words.
 
 WHY THE MERGE IS NOT `Dictionary.add`
     ``add`` refuses a 501st term, and three installed dictionaries can hold more than that
@@ -41,7 +43,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import catalog, config, dictionary, portable
+from . import catalog, config, dictionary, overlays, portable
 from ._errors import SttError, UnknownItemError, UsageError, unknown_item
 from .config import Settings
 from .dictionary import MAX_ALIAS_BRANCHES, MAX_DICTIONARY_BYTES, MAX_SCREENED_TERMS
@@ -56,15 +58,103 @@ def directory() -> Path:
     return config.app_home() / "dicts" / "installed"
 
 
-def overlay_path(dict_id: str) -> Path:
-    """Where the user's overlay for ``dict_id`` lives, whether or not there is one.
+def overlay_directory() -> Path:
+    """``$XDG_CONFIG_HOME/stt-cli/dicts/overlays`` when that is set, ``~/.config/...`` otherwise.
 
-    ``$XDG_CONFIG_HOME/stt-cli/dicts/overlays`` when that is set, ``~/.config/...``
-    otherwise: the one file of the epic a person writes by hand and expects to keep.
+    The one directory of the epic a person writes in by hand and expects to keep. A relative
+    ``$XDG_CONFIG_HOME`` (``~`` included: nothing expands it in an environment variable) counts
+    as unset, as the XDG spec says: otherwise the overlays, and so the words of a transcript,
+    would depend on the directory stt was started from.
     """
-    base = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    root = Path(base).expanduser() if base else Path.home() / ".config"
-    return root / "stt-cli" / "dicts" / "overlays" / f"{dict_id}.yaml"
+    base = Path(os.environ.get("XDG_CONFIG_HOME", "").strip())
+    root = base if base.is_absolute() else Path.home() / ".config"
+    return root / "stt-cli" / "dicts" / "overlays"
+
+
+def overlay_path(dict_id: str) -> Path:
+    """Where the user's overlay for ``dict_id`` lives, whether or not there is one."""
+    return overlay_directory() / f"{dict_id}.yaml"
+
+
+def with_overlay(adopted: catalog.Distributable) -> overlays.Composed:
+    """One installed dictionary as its overlay, if it has one, leaves it."""
+    found = overlays.read(overlay_path(adopted.id)) if has_overlay(adopted.id) else None
+    return overlays.compose(adopted, found)
+
+
+def has_overlay(dict_id: str) -> bool:
+    """Whether a file is named exactly ``<dict_id>.yaml`` in the overlay directory.
+
+    Not ``Path.exists()``: a case-insensitive disk (the macOS default) opens
+    ``Fixture-Tools.yaml`` as ``fixture-tools.yaml``, which the stray-file warning calls
+    ignored; only the exact name is an overlay, so every command agrees on which is read.
+    """
+    path = overlay_path(dict_id)
+    try:
+        return path.name in os.listdir(path.parent)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True  # the read says what is wrong with the directory
+
+
+def overlaid(
+    found: Sequence[catalog.Distributable],
+) -> tuple[list[overlays.Composed], list[str]]:
+    """Every dictionary in ``found`` with its overlay applied, and what the overlays said.
+
+    An overlay for a dictionary that is not installed is ignored, and said so: the user
+    wrote it expecting it to do something.
+    """
+    composed = [with_overlay(adopted) for adopted in found]
+    warnings = [warning for each in composed for warning in each.warnings]
+    have = {adopted.id for adopted in found}
+    for stray in sorted(overlay_directory().glob("*.y*ml")):
+        # The name is the user's filesystem, not stt's text: quoted, so a control character
+        # in it is shown rather than executed by the terminal.
+        if not stray.is_file() or stray.suffix not in (".yml", ".yaml"):
+            continue
+        if stray.suffix == ".yml":
+            warnings.append(misnamed(stray))
+        elif stray.stem not in have:
+            warnings.append(
+                f"{str(stray)!r} is ignored: {stray.stem!r} is not installed "
+                "(`stt dict search` lists what can be)"
+            )
+    return composed, warnings
+
+
+def misnamed(path: Path) -> str:
+    """What to say about an overlay file named ``<id>.yml``, which is never read."""
+    return f"{str(path)!r} is ignored: an overlay is named <id>.yaml"
+
+
+def composed_for_show(
+    found: Sequence[catalog.Distributable], dict_id: str
+) -> tuple[overlays.Composed, list[catalog.Distributable], list[str]]:
+    """``dict_id`` with its overlay, every dictionary in ``found`` as the merge sees it, and
+    what could not be read.
+
+    Only ``dict_id``'s own overlay can fail this. Another dictionary's broken overlay is said,
+    and that dictionary is counted without it, so one broken file cannot stop `stt dict show`
+    of an unrelated dictionary. Everything is read once, so the two halves agree.
+    """
+    shown: overlays.Composed | None = None
+    merged: list[catalog.Distributable] = []
+    unread: list[str] = []
+    for adopted in found:
+        if adopted.id == dict_id:
+            shown = with_overlay(adopted)
+            merged.append(shown.dictionary)
+            continue
+        try:
+            merged.append(with_overlay(adopted).dictionary)
+        except UsageError as broken:
+            merged.append(adopted)
+            unread.append(f"{adopted.id} is counted here without its overlay: {broken.what}")
+    if shown is None:
+        raise _not_installed(dict_id, [adopted.id for adopted in found])
+    return shown, merged, unread
 
 
 def installed_ids() -> list[str]:
@@ -156,10 +246,11 @@ def load_effective(settings: Settings) -> tuple[dictionary.Dictionary, list[str]
     if not settings.dictionary:
         return dictionary.Dictionary(), []
     personal = dictionary.load()
-    found = read_all()
-    if not found:
-        return personal, []
-    return merge(personal, found)
+    composed, warnings = overlaid(read_all())
+    if not composed:
+        return personal, warnings
+    glossary, dropped = merge(personal, [each.dictionary for each in composed])
+    return glossary, warnings + dropped
 
 
 def merge(
