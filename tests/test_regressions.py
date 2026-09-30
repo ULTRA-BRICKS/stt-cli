@@ -464,7 +464,7 @@ async def test_the_worker_inherits_the_environment_it_needs(monkeypatch, tmp_pat
 def test_a_result_survives_anything_printed_after_it() -> None:
     """torch and pyannote are other people's programs and may say something on their way out.
     Taking the last line would throw away an hour of finished work over a shutdown warning."""
-    from stt_cli.diarize import _the_object_among
+    from stt_cli.jsonio import last_object as _the_object_among
 
     assert _the_object_among('{"turns": []}') == {"turns": []}
     assert _the_object_among('resolving\n{"turns": [1]}\n') == {"turns": [1]}
@@ -634,7 +634,7 @@ async def test_an_unrecognisable_answer_is_not_read_as_no_speakers(monkeypatch, 
 
     The run then finished with "diarization found 0 speaker(s)" — a warning, not a failure —
     so somebody who asked for `--diarize` and waited for it got a transcript with nobody in it
-    and no reason given. `_the_object_among` takes the LAST object printed, so anything torch
+    and no reason given. `jsonio.last_object` takes the LAST object printed, so anything torch
     prints while shutting down could become the answer; an answer now has to look like one.
     """
     from stt_cli import diarize, proc

@@ -1259,7 +1259,7 @@ def test_a_device_name_cannot_end_the_applescript_string_it_is_put_in() -> None:
     """The notification text reaches `osascript` as source code, and a device name is
     whatever the hardware calls itself. A quote in it would end the literal early — a syntax
     error at best, and at worst a name that decides what the rest of the script says."""
-    from stt_cli.live.status import _quoted
+    from stt_cli.notify import quoted as _quoted
 
     assert _quoted('Mic "Pro"') == '"Mic \\"Pro\\""'
     assert _quoted("back\\slash") == '"back\\\\slash"'

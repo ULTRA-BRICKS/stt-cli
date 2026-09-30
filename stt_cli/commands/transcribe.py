@@ -18,7 +18,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .. import config, formats, pipeline
+from .. import config, formats, pipeline, suggest
 from .._errors import UsageError
 from ..archive import Archive, write_atomic
 from ..backends.base import CONTEXT_TOKENS
@@ -203,7 +203,12 @@ def run(argv: list[str]) -> int:
     results = asyncio.run(pipeline.gather(paths, settings, reporter))
     # Derived from the merged settings, not from argv, so a stored `show_variants` actually
     # takes effect and there is only one place that decides what the reader sees.
-    return _emit(results, settings, pipeline.render_options(settings), args, reporter)
+    code = _emit(results, settings, pipeline.render_options(settings), args, reporter)
+    if results:
+        # After the result is written and printed: the check runs in a detached child and
+        # can neither change this transcript nor delay this command's exit.
+        suggest.after_transcription(settings)
+    return code
 
 
 def _settings(args: argparse.Namespace) -> config.Settings:

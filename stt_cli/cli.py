@@ -122,7 +122,7 @@ def _row(shown: str, plain: str, summary: str, column: int) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     code = guard(lambda: _dispatch(args))
-    if code != EXIT_INTERRUPTED and args and args[0] not in _NOT_A_RUN:
+    if code != EXIT_INTERRUPTED and args and args[0] not in _NOT_A_RUN and not _worker(args):
         # After the command, not before: it has already answered, and a first-ever `stt mic
         # disable` has already been recorded by the time the daemon's autostart looks.
         from .commands import mic
@@ -136,6 +136,14 @@ _VERSION_WORDS = frozenset({"-V", "--version", "version"})
 # Asking stt what it is, or giving up on a command half-way, is not a first run — nothing
 # was used yet, so nothing about the daemon is decided on the back of it (#105).
 _NOT_A_RUN = _HELP_WORDS | _VERSION_WORDS
+
+
+def _worker(args: list[str]) -> bool:
+    """Is this the detached dictionary-suggestion check a transcription started? It is stt
+    talking to itself, not a person using it, so it decides nothing about the daemon."""
+    from .suggest import WORKER_TOKEN
+
+    return args[:2] == ["dict", WORKER_TOKEN]
 
 
 def _dispatch(args: list[str]) -> int:

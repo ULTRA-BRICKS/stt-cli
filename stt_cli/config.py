@@ -195,6 +195,11 @@ class Settings:
     # argument, so a value written down twice would let a direct caller and the
     # pipeline disagree about what the threshold is.
     dict_similarity: float = DEFAULT_SIMILARITY
+    # After a month of use, a notification naming a curated dictionary that matches what the
+    # user dictates (see suggest.py). On by default and never an install; no transcript text
+    # is read until the local classifier was set up (`stt dict suggest --setup`). Neither a
+    # fingerprint key nor an enrichment: it changes no transcript.
+    dict_suggest: bool = True
     # Filled in by the pipeline from the dictionary's content, never by the user: it exists
     # so that editing a term invalidates exactly the cached runs it would have changed.
     dict_digest: str = ""

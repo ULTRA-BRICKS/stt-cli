@@ -31,6 +31,8 @@ async. Zero required third-party runtime dependencies.
 | `catalog.py`, `dictionaries/` | distributable dictionaries: the format's validator, the curated bundled set, the catalog index |
 | `sources.py`, `installed.py` | where a dictionary comes from (bundled or the marketplace site, SHA-256 verified), `stt dict install`, and the effective glossary: personal terms plus installed ones |
 | `overlays.py`, `yamlsubset.py` | a user's hand-written YAML edits to an installed dictionary (disable, replace, add by term id), read by a standard-library YAML subset so it parses the same on every machine |
+| `suggest.py`, `suggest_worker.py` | after a month of use, one notification naming the curated dictionary a user's transcripts match: eligibility, laya scoring in a detached child, rate limits (#88) |
+| `notify.py` | one desktop notification per platform: `osascript`, `notify-send`/`gdbus`, a PowerShell toast |
 | `archive.py` | content-addressed store plus a SQLite index |
 | `formats.py`, `timestamps.py` | renderers and the three timestamp modes |
 | `registry.py` | the model pool: one human name per model, per-engine ids, sizes |
@@ -138,9 +140,13 @@ invariants of its own on top of the ones below.
   starts and never waits for (a first `stt` command turning the daemon on must not be
   delayed by it, #105), the `urllib` calls plus `pbpaste` poll in `hf.py`/`auth.py` (a login
   is a conversation with a human, and `urllib` keeps the token out of an argument vector
-  that `curl` would expose), and the `urllib` GETs in `sources.py` (`stt dict
+  that `curl` would expose), the `urllib` GETs in `sources.py` (`stt dict
   search/install --remote` only, imported inside the function so neither `stt --help` nor a
-  transcription loads the network stack).
+  transcription loads the network stack), and the dictionary suggestions (#88): the detached
+  `stt dict __suggest` check `suggest.after_transcription` starts and never waits for, the
+  notification command `notify.post` runs with a ten-second limit, and the fetch `stt dict
+  suggest --setup` streams to the user's terminal. The laya worker itself does go through
+  `proc.run`, with no `model_gate` slot: it runs on the CPU, never on Metal.
 - **Every process that loads a speech model holds a `model_gate` slot and passes it to
   `proc.run`/`proc.start` as `hold=`.** A model on Metal is wired memory that macOS neither
   swaps nor counts as pressure, and on 2026-09-29 thirteen concurrent runs of it hard-reset

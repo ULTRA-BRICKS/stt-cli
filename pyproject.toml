@@ -37,6 +37,11 @@ diarize = ["pyannote.audio>=3.1", "torch>=2.2"]
 # NOTE: this extra intentionally lists no PyPI packages — the dep is an in-ecosystem local
 # install. `stt mic run` (ad-hoc, foreground) and a bare `stt mic` work without it regardless.
 service = []
+# Dictionary suggestions (#88): laya, the local classifier that sorts a month of transcripts
+# into catalog topics. Heavy (torch + transformers), so never a default install: without it
+# `stt dict suggest --setup` fetches it into a uv environment instead. Pinned below 0.4
+# because `suggest_worker.py` reads laya's result envelope, which is not a stable contract.
+suggest = ["laya>=0.3.20,<0.4"]
 # setuptools is here for the one test that builds the wheel and looks inside it: the bundled
 # dictionaries are data files, and a packaging rule that misses them fails only in a wheel.
 test = ["pytest", "pytest-asyncio", "setuptools>=70.1"]
@@ -81,10 +86,11 @@ python_version = "3.11"
 platform = "darwin"
 strict = true
 warn_unreachable = true
-# Optional engines are imported lazily and are not installed in the type-check env.
-# `_colorize` is CPython's own, present from 3.13 on but absent from the 3.11 typeshed.
+# Optional engines and the suggestion classifier are imported lazily and are not installed
+# in the type-check env. `_colorize` is CPython's own, present from 3.13 on but absent from
+# the 3.11 typeshed.
 [[tool.mypy.overrides]]
-module = ["mlx_whisper.*", "pyannote.*", "torch.*", "_colorize"]
+module = ["mlx_whisper.*", "pyannote.*", "torch.*", "laya.*", "huggingface_hub.*", "_colorize"]
 ignore_missing_imports = true
 # The in-ecosystem `agenttools_service` lib (see the `service` extra above) is not on PyPI
 # and carries no bundled type stubs available to this checkout's type-check env.

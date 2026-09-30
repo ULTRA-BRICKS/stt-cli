@@ -20,7 +20,6 @@ HOW SPEAKERS ARE ATTACHED
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +32,7 @@ from ._errors import (
     PermissionDeniedError,
     ProcessTimeout,
 )
+from .jsonio import last_object
 from .models import Segment
 
 
@@ -262,7 +262,7 @@ async def diarize(wav: Path, *, speakers: int | None = None) -> list[Turn]:
     if "turns" not in said and "error" not in said:
         # Without this, an unrecognised object read as zero turns and the run finished with a
         # cheerful "found 0 speaker(s)" — the user asked for --diarize, waited for it, and got
-        # a transcript with nobody in it and nothing saying why. `_the_object_among` takes the
+        # a transcript with nobody in it and nothing saying why. `jsonio.last_object` takes the
         # LAST object on stdout, so anything torch prints on its way out could be read as the
         # answer; an answer has to look like one.
         raise EngineError(
@@ -321,7 +321,7 @@ async def _ask_the_worker(
             why=result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "no output",
             how=INSTALL_HINT,
         )
-    answered = _the_object_among(result.stdout)
+    answered = last_object(result.stdout)
     if answered is None:
         raise EngineError(
             what="speaker diarization answered with something that is not a result",
@@ -329,26 +329,6 @@ async def _ask_the_worker(
             how="run `stt diarize status` to see whether the environment is intact",
         )
     return answered
-
-
-def _the_object_among(stdout: str) -> dict[str, Any] | None:
-    """The worker's one JSON object, wherever in the output it ended up.
-
-    Not "the whole stream", which assumes nothing else prints: `uv run --quiet` and a
-    download progress bar aimed at stderr are what keep that true, and both are other
-    people's programs. Not "the last line" either, which was the first correction and only
-    moved the problem — anything torch or pyannote flushes on the way OUT lands after our
-    object, and an hour of finished work would be thrown away over a shutdown warning.
-    Searching backwards for the first line that parses costs nothing and survives both.
-    """
-    for line in reversed(stdout.strip().splitlines()):
-        try:
-            found = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(found, dict):
-            return found
-    return None
 
 
 def attach(segments: list[Segment], turns: list[Turn]) -> int:

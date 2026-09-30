@@ -243,6 +243,26 @@ same everywhere: `key: value` lines indented with spaces, plain or quoted text, 
 Quote `null`, `true`, `false` and `~` if you mean them as text. `stt dict --help` prints an
 example and the rules. The details are in `docs/specs/dictionaries.md` section 7.
 
+### Suggested dictionaries
+
+After a month of transcribing, stt can tell you which curated dictionary matches what you
+actually talk about — by a notification, at most once a week, never the same dictionary twice,
+and never by installing anything itself. It names the dictionary, how many of your recent
+transcripts matched it, and the `stt dict install <id>` to run.
+
+```bash
+stt dict suggest --setup   # once: fetch the local classifier, about 3 GB (laya and two checkpoints)
+stt dict suggest           # on or off, ready or not, the last check and what was suggested
+stt config set dict_suggest false   # no more suggestions, and nothing is read
+```
+
+The matching runs on your computer, offline: laya, a local classifier, sorts pieces of your
+last month of archived transcripts into the catalog's topics, in a background process that
+starts after a transcription at most once a day. No transcript text is read until you ran the
+setup; a month in without it, one notification says how. Notifications use `osascript` on
+macOS, `notify-send` or D-Bus on Linux and a PowerShell toast on Windows; only the macOS one
+has been seen working so far.
+
 ## Speakers
 
 ```bash

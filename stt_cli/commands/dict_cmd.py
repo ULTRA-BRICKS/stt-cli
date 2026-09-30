@@ -20,12 +20,15 @@ says what it did.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import stat
+import sys
+from datetime import datetime
 from pathlib import Path
 
-from .. import dictionary, installed, portable, sources
-from .._errors import EXIT_OK, EXIT_UNKNOWN_ITEM, UsageError
+from .. import dictionary, installed, portable, resources, sources, suggest
+from .._errors import EXIT_OK, EXIT_UNKNOWN_ITEM, MissingDependencyError, UsageError
 
 # How far below the flagging threshold `stt dict check` still reports a resemblance.
 NEAR_MISS_FLOOR = 0.5
@@ -60,6 +63,9 @@ overlays:
 
 
 def run(argv: list[str]) -> int:
+    if argv[:1] == [suggest.WORKER_TOKEN]:
+        # The detached check a transcription starts; never typed by a person.
+        return suggest.worker()
     parser = argparse.ArgumentParser(
         prog="stt dict",
         description=SUMMARY,
@@ -103,6 +109,16 @@ def run(argv: list[str]) -> int:
 
     drop = sub.add_parser("uninstall", help="remove an installed dictionary")
     drop.add_argument("id")
+
+    advise = sub.add_parser(
+        "suggest", help="dictionaries suggested from a month of your transcripts: status"
+    )
+    advise.add_argument(
+        "--setup",
+        action="store_true",
+        help=f"fetch the local classifier the suggestions need (about {suggest.SETUP_GIB:.0f} GB)",
+    )
+    advise.add_argument("--yes", action="store_true", help="do not ask before downloading")
 
     args = parser.parse_args(argv)
     action = args.action or "list"
@@ -463,6 +479,70 @@ def _uninstall(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _suggest(args: argparse.Namespace) -> int:
+    if args.setup:
+        return _suggest_setup(assume_yes=args.yes)
+    from .. import config
+
+    state = suggest.State.read()
+    enabled = config.load_settings().dict_suggest
+    print(f"suggestions: {'on' if enabled else 'off'}  (stt config set dict_suggest true|false)")
+    ready = suggest.LayaScorer().ready()
+    print(
+        "classifier: ready"
+        if ready
+        else f"classifier: not set up — stt dict suggest --setup (about {suggest.SETUP_GIB:.0f} GB)"
+    )
+    if state.finished:
+        when = datetime.fromtimestamp(state.finished).isoformat(sep=" ", timespec="minutes")
+        print(f"last check: {when} — {state.outcome}")
+    else:
+        print("last check: never")
+    print(f"suggested so far: {', '.join(state.suggested) or 'nothing'}")
+    return EXIT_OK
+
+
+def _suggest_setup(*, assume_yes: bool) -> int:
+    """Fetch laya and its two checkpoints, visibly, once — the one download suggestions need.
+
+    Like `stt diarize install`: nothing is installed into an interpreter the user owns. uv
+    caches an environment holding laya, and the checkpoints go to the Hugging Face cache, so
+    the background check can then run with the network forbidden.
+    """
+    import subprocess
+
+    route = suggest.runner(offline=False)
+    if route is None:
+        raise MissingDependencyError(
+            what="cannot set up dictionary suggestions",
+            why="laya is not importable here and uv is not installed to supply it",
+            how="install uv (`brew install uv`), then run `stt dict suggest --setup` again",
+        )
+    command = [*route, suggest.worker_path(), "--fetch"]
+    print(f"about to fetch laya and its two checkpoints (~{suggest.SETUP_GIB:.0f} GB):")
+    print(f"  {' '.join(command)}")
+    resources.require_space(
+        int(suggest.SETUP_GIB * 1024**3), path=Path.home(), what="the suggestion classifier"
+    )
+    should_ask = not assume_yes and sys.stdin.isatty()
+    if should_ask and input("proceed? [y/N] ").strip().lower() not in {"y", "yes"}:
+        print("cancelled")
+        return EXIT_OK
+    subprocess.run(command, check=False)
+    if not suggest.LayaScorer().ready():
+        raise MissingDependencyError(
+            what="the suggestion classifier is still not ready",
+            why="the fetch above did not leave laya and both checkpoints on this machine",
+            how="check the output above, then run `stt dict suggest --setup` again",
+        )
+    suggest.update(lambda state: dataclasses.replace(state, set_up=True))
+    print(
+        "ready. After a month of transcriptions stt may suggest a dictionary, at most once "
+        "a week, by notification; `stt config set dict_suggest false` turns that off."
+    )
+    return EXIT_OK
+
+
 _ACTIONS = {
     "list": _list,
     "add": _add,
@@ -474,4 +554,5 @@ _ACTIONS = {
     "installed": _installed,
     "show": _show,
     "uninstall": _uninstall,
+    "suggest": _suggest,
 }

@@ -342,6 +342,27 @@ class Archive:
         params.append(limit)
         return [_record(row) for row in self._db.execute(sql, params)]
 
+    def earliest(self) -> str | None:
+        """When the first run still in the archive was made (`created_at`), or ``None``."""
+        row = self._db.execute("SELECT MIN(created_at) FROM runs").fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+    def since(self, cutoff: str) -> list[RunRecord]:
+        """Runs made at or after ``cutoff`` (an ISO time in UTC, as `created_at` is), newest
+        first, one per recording: the latest of several runs of the same audio stands for it,
+        so re-transcribing a file with other settings does not count it twice."""
+        rows = self._db.execute(
+            "SELECT * FROM runs WHERE created_at >= ? ORDER BY created_at DESC", (cutoff,)
+        )
+        seen: set[str] = set()
+        records: list[RunRecord] = []
+        for row in rows:
+            record = _record(row)
+            if record.media_sha not in seen:
+                seen.add(record.media_sha)
+                records.append(record)
+        return records
+
     def forget(self, identifier: str) -> None:
         self._db.execute("DELETE FROM runs WHERE run_id = ?", (identifier,))
         self._db.commit()
@@ -359,7 +380,7 @@ class Archive:
         keep_media: set[str] = set()
 
         for record in self.recent(limit=1_000_000):
-            expired = cutoff is not None and _epoch(record.created_at) < cutoff
+            expired = cutoff is not None and epoch(record.created_at) < cutoff
             if not record.directory.is_dir() or expired:
                 actions.append(
                     f"remove run {record.run_id} ({'expired' if expired else 'orphaned index row'})"
@@ -455,7 +476,8 @@ def _from_transcript(
     )
 
 
-def _epoch(iso: str) -> float:
+def epoch(iso: str) -> float:
+    """A `created_at` as seconds since the epoch; 0 for one that does not parse."""
     try:
         return datetime.fromisoformat(iso).timestamp()
     except ValueError:

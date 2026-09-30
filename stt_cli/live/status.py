@@ -308,15 +308,20 @@ async def _banner(message: str, *, quiet: bool) -> None:
 
     Fire and forget, and silent about its own failure: the user may have notifications off
     for whatever `osascript` is attributed to, and that is their setting, not an error in the
-    middle of dictation. `_quoted` is not decoration — the message reaches AppleScript as
-    source code, and a stray quote in a device name would otherwise be a syntax error at best.
+    middle of dictation. The command is `notify.command`'s, which quotes the message — it
+    reaches AppleScript as source code, and a stray quote in a device name would otherwise be
+    a syntax error at best.
     """
     if quiet:
         return
-    script = f"display notification {_quoted(message)} with title {_quoted('stt')}"
+    from ..notify import command
+
+    found = command("stt", message, platform="darwin")
+    if found is None:
+        return
     try:
         process = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            *found.argv,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )  # fmt: skip
     except OSError:
@@ -430,12 +435,6 @@ async def close_stop_notification(*, quiet: bool) -> None:
     except OSError:
         return
     await _briefly(process)
-
-
-def _quoted(text: str) -> str:
-    """One AppleScript string literal, with nothing in it that can end the literal early."""
-    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    return '"' + "".join(ch for ch in escaped if ch >= " ") + '"'
 
 
 def _chime(tones: tuple[float, float], name: str) -> Path | None:

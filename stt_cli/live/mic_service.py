@@ -92,17 +92,17 @@ def _serve_argv(extra_argv: list[str]) -> list[str]:
     # tools were found, so it travels with the argv (`commands/mic.py::_serve` applies it).
     search_path = os.environ.get("PATH")
     path_flag = [f"{PATH_FLAG}={search_path}"] if search_path else []
-    return [*_entry(), "mic", SERVE_TOKEN, *path_flag, *extra_argv]
+    return [*stt_entry(), "mic", SERVE_TOKEN, *path_flag, *extra_argv]
 
 
 def autostart_worker_argv() -> list[str]:
     """The argv of the detached process that turns the daemon on (`AUTOSTART_TOKEN`). It
     inherits this process's environment — PATH, `STT_HOME` — so the daemon it enables is
     the one this command would have enabled itself."""
-    return [*_entry(), "mic", AUTOSTART_TOKEN]
+    return [*stt_entry(), "mic", AUTOSTART_TOKEN]
 
 
-def _entry() -> list[str]:
+def stt_entry() -> list[str]:
     """How to run this very `stt` from a fresh process: `bin/stt` in a source checkout
     (see `_serve_argv` for why), the installed package's module otherwise."""
     wrapper = _dev_wrapper()

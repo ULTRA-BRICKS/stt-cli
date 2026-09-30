@@ -23,8 +23,9 @@ still reads only the personal dictionary; switching it is
 [#113](https://git.hyperide.ai/ultrabricks/stt-cli/issues/113). **Shipped by
 [#86](https://git.hyperide.ai/ultrabricks/stt-cli/issues/86):** the marketplace website of section 8
 (`site/`), deployed at `https://stt-dicts-marketplace.vercel.app`, whose API tests read the same contract
-fixture `tests/fixtures/dictionaries/` as the stt side. None of the following is built yet: usage-based
-suggestions. Build order,
+fixture `tests/fixtures/dictionaries/` as the stt side. **Shipped by
+[#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88):** usage-based suggestions (section 9,
+`stt_cli/suggest.py`). Build order,
 as recorded on the epic: [#81](https://git.hyperide.ai/ultrabricks/stt-cli/issues/81) (format, catalog
 contract, curated content), then [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) (sources,
 install, effective glossary, cache fingerprint), then
@@ -463,67 +464,107 @@ dictionaries), feeds stt's source-parser tests and the site's API tests, which a
 
 ## 9. Usage-based suggestions (laya)
 
-**What laya is.** The PyPI package `laya` is a local classifier: given text and developer-defined typed
-questions (`choice`, `score`, `noul`), it returns calibrated probabilities. It does not discover topics,
-degrades past about 20 options per question, and reads about 4,000 tokens reliably
-([#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88)). The feature sorts transcripts into fixed topic tags; it is not open-ended topic discovery.
+**What laya is.** The PyPI package `laya` (Convai Innovations, Apache-2.0) is a local classifier: given
+text and developer-defined typed questions (`choice`, `score`, `noul`), it returns calibrated
+probabilities. It does not discover topics, degrades past about 20 options per question, and reads a few
+hundred tokens per state (512 on the English checkpoint, 1,024 on the multilingual one). The feature sorts
+transcripts into fixed topic tags; it is not open-ended topic discovery.
 
-**Eligibility.** From the archive index, which records `created_at` per run (`stt_cli/archive.py:54`,
-indexed `:66`). `Archive.recent` has no date filter (`stt_cli/archive.py:335-343`), so [#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88) adds a query
-for the earliest `created_at` and a windowed count.
+**Eligibility.** From the archive index's `created_at`: `Archive.earliest` (the first run) and
+`Archive.since` (runs in the window, one per recording, so a file transcribed twice counts once).
 
-- At least 30 days since the first archived transcript.
-- At least 10 archived transcripts in the trailing 30 days: the minimum [#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88) asks this spec to fix, so one
-  topical recording cannot decide alone.
+- At least 30 days since the first archived transcript (`MIN_AGE_DAYS`).
+- At least 10 archived transcripts with words in the trailing 30 days (`MIN_TRANSCRIPTS`,
+  `WINDOW_DAYS`), so one topical recording cannot decide alone. The newest 60 are classified
+  (`MAX_TRANSCRIPTS`).
 - Only file transcriptions count today. Live dictation is not archived
-  ([#15](https://git.hyperide.ai/ultrabricks/stt-cli/issues/15)); mic sessions count only after [#15](https://git.hyperide.ai/ultrabricks/stt-cli/issues/15) lands,
-  and only the sessions the user chose to archive.
+  ([#15](https://git.hyperide.ai/ultrabricks/stt-cli/issues/15)); mic sessions count only after
+  [#15](https://git.hyperide.ai/ultrabricks/stt-cli/issues/15) lands, and only the sessions the user chose
+  to archive.
 
-**Scoring.** Candidates are the topic tags of catalog dictionaries not installed, plus "none of these".
-Each transcript, split into pieces under the input limit, gets one `choice` question per piece via
-`predict_batch` (`predict_shortlist` if candidates ever exceed 20). A transcript matches a tag when its best
-piece scores at least 0.6 for it; a tag qualifies when at least 5 transcripts and at least a quarter of the
-window match it. These three numbers are code constants, tuned on real data by [#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88).
+**Scoring.** Candidates are the topic tags of the bundled catalog's dictionaries that are neither
+installed nor already suggested, plus `other` ("everyday talk, or any subject not listed here"). Each
+option reads as the tag's label followed by three of the topic's terms: measured on the multilingual
+checkpoint on 2026-09-30, the bare label "Russian IT anglicisms" gave Russian small talk about a weekend
+0.69, because the word "Russian" was the match; with three terms after it the same text scored 0.51 and
+two other pieces of Russian small talk 0.14, while dictated medicine in English and Russian stayed at 0.99
+and above. Each transcript is split into pieces of about 1,000 characters and at most three of them,
+spread over the text, are scored with one `choice` question per group of at most 19 topics plus `other`
+through `Router.predict_batch` (the Router sends English to the English checkpoint and everything else to
+the multilingual one). A transcript matches a tag when its best piece scores at least 0.6 for it; a tag
+qualifies when at least 5 transcripts and at least a quarter of the window match it. Among qualifying tags
+the one with the most matching transcripts wins, then the higher mean probability. The dictionary named is
+the tag's candidate in the language most of the matching transcripts were dictated in; with none in their
+language the tag does not qualify.
 
-**Opt-in, off by default.** A new setting `dict_suggest: bool = False`, not in `archive.FINGERPRINT_KEYS`
-(it changes no transcript). Off: no archive text is read and laya is never imported. This deliberately
-departs from the "default most things on" audit
-([#47](https://git.hyperide.ai/ultrabricks/stt-cli/issues/47)), because it reads a month of the user's
-speech into a model. Everything runs locally. On: the check runs at most once a day, after a file
-transcription has written its result and printed its output, in a detached child process, so it can never
-affect a transcript or delay the command's exit; its state (last check, dictionaries already suggested)
-lives in `<app_home>/dicts/suggestions.json`.
+**On by default, opted out with one setting (changed by #88 from the opt-in drafted here).** The setting
+is `dict_suggest: bool = True`, neither in `archive.FINGERPRINT_KEYS` nor in `ENRICHMENTS` (it changes no
+transcript). Off: no process starts and nothing is read; the detached check asks the setting again before
+it reads anything, so turning it off while a check waits still counts. The consent that matters is a different step:
+no transcript text is read by a model until the user ran `stt dict suggest --setup`, which fetches laya
+and its checkpoints visibly, after a disk check and a confirmation. That keeps the ticket's privacy
+argument (a month of the user's speech read into a model) while letting a user who has never heard of the
+marketplace hear about it once: after a month of use without the setup, one notification says what the
+feature is, how to set it up and how to turn it off. The #47 "default most things on" audit applies to the
+setting; the explicit step applies to the reading.
 
-**Exactly one notification, never an install.** At most one per check, for the highest-scoring qualifying
-dictionary, never twice for the same one. It names the dictionary, the reason and the command:
-`Dictionary "General medicine" matches 7 of your last 23 transcripts (tag medical-general). Install: stt
-dict install medical-general`. The suggestion code path contains no install call.
+**Where it runs.** `stt_cli/suggest.py`. After a file transcription has written its result and printed its
+output, `suggest.after_transcription` stamps `<app_home>/dicts/suggestions.json` and starts
+`stt dict __suggest` in a session of its own, which it never waits for, so the check can neither change a
+transcript nor delay the command. The child takes a lock (one check at a time), lowers its priority, and
+asks `suggest_worker.py` — run by stt's own Python when the `suggest` extra is installed, otherwise by
+`uv run --offline --with laya` — for probabilities, sending the pieces on standard input. The worker sets
+`HF_HUB_OFFLINE=1` before anything imports `huggingface_hub`, loads both checkpoints from the local cache,
+and runs on the CPU with one checkpoint resident, because a model on Metal is wired memory (#106) and this
+runs beside speech models. Everything is local: the candidates come from the bundled catalog, not the
+website, and the transcripts never leave the machine.
 
-**Mechanism.** Today: the osascript banner, `_banner` (`stt_cli/live/status.py:243-261`), fire-and-forget
-and unable to carry a button (`stt_cli/live/status.py:1-15`), so the notification is informational and the
-user runs the command. With the signed helper app of
-[#99](https://git.hyperide.ai/ultrabricks/stt-cli/issues/99) (not built), it carries an Install action;
-stt runs `stt dict install <id>` only after the helper reports the click, and does nothing on dismissal.
+**Rate limits.** A check starts at most once a day (`CHECK_INTERVAL`), a notification reaches the user at
+most once a week (`NOTIFY_INTERVAL`), a dictionary is named at most once ever, and the setup notification
+is shown once; after it, nothing more runs until the setup is done. A stamp in the future (the clock set
+back) holds nothing off. `stt dict suggest` shows the setting, whether the classifier is ready, the last
+check's outcome and what was already suggested.
 
-**Optional extra.** laya needs torch and transformers and downloads a checkpoint of about 400 million
-parameters from the Hugging Face Hub on first use, so it is an optional extra (for example
-`suggest = ["laya"]` beside `mlx` and `diarize`, `pyproject.toml:21-27`), imported lazily inside the scoring
-function with the failure cached, following task-cli's `tasklib/laya_autoinstall.py`. Missing laya or
-checkpoint: the feature does nothing, raises nothing, and no other command is affected. The download goes
-through `resources.py`'s disk guard like every large download.
+**Exactly one notification, never an install.** At most one per check, for the best qualifying
+dictionary: `Dictionary "General medicine (Russian)" matches 7 of your last 23 transcripts (tag
+medical-general). Install: stt dict install medical-general-ru. Turn off: stt config set dict_suggest
+false`. A notification the platform did not accept is not recorded as a suggestion, and counts against the
+weekly limit so a machine with no way to show one does not classify a month of transcripts every day. The
+record is read and written under a lock by all three writers (a finishing transcription, the check, the
+setup), and the check lays its findings over the record as it is when it ends. The suggestion code
+path contains no install call.
+
+**Mechanism.** `stt_cli/notify.py`, one command per platform (section 10). On macOS it is the osascript
+banner `live/status.py` already shows, fire-and-forget and unable to carry a button, so the notification is
+informational and the user runs the command. With the signed helper app of
+[#99](https://git.hyperide.ai/ultrabricks/stt-cli/issues/99) it can carry an Install action; stt would run
+`stt dict install <id>` only after the helper reports the click, and do nothing on dismissal.
+
+**Optional extra.** laya needs torch and transformers, and its two checkpoints are 843 MB (English) and
+644 MB (multilingual) in the `convaiinnovations/laya` repository. It is the `suggest` extra
+(`laya>=0.3.20,<0.4`, pinned below 0.4 because the worker reads laya's result envelope), never imported by
+stt itself. Without the extra, `stt dict suggest --setup` fetches it into a uv environment, as `stt diarize
+install` does for pyannote, so nothing is installed into an interpreter the user owns. Missing laya or a
+checkpoint: the check does nothing, raises nothing, and no other command is affected.
 
 ## 10. Platform deferrals
 
 Platform-independent, and in scope wherever stt starts: the distributable format, catalog and tag
 vocabulary, both sources, install/uninstall/show, overlays, the effective glossary and fingerprint, the
-website, and section 9's eligibility and scoring. Deferred: notifications and microphone capture outside
-macOS. Linux needs `notify-send` or a D-Bus notification action (oh-my-pi's
-`packages/tui/src/desktop-notify.ts` is the one precedent found) plus capture, tracked in
+website, and section 9's eligibility, scoring and notification. Suggestion notifications are built for all
+three platforms in `stt_cli/notify.py`, and only macOS was seen working on a real machine (2026-09-30):
+
+| Platform | Command | Verified |
+| --- | --- | --- |
+| macOS | `osascript -e 'display notification … with title "stt"'` | live: a throwaway `STT_HOME` with a seeded month, the real detached check and laya on the CPU; usernoted logged the request from `com.apple.ScriptEditor2`, not suppressed |
+| Linux | `notify-send --app-name=stt -- <title> <body>`, else `gdbus call … org.freedesktop.Notifications.Notify` (the order of oh-my-pi's `packages/tui/src/desktop-notify.ts`) | the command's shape, unit-tested |
+| Windows | a toast through Windows PowerShell 5.1's WinRT projection, attributed to PowerShell's application id; the text travels in environment variables, never in the script | the command's shape, unit-tested |
+
+Microphone capture outside macOS stays deferred: Linux in
 [#60](https://git.hyperide.ai/ultrabricks/stt-cli/issues/60) and
 [#64](https://git.hyperide.ai/ultrabricks/stt-cli/issues/64), with Linux engines in
-[#61](https://git.hyperide.ai/ultrabricks/stt-cli/issues/61). Windows needs a toast notification (no
-precedent found) on top of [#76](https://git.hyperide.ai/ultrabricks/stt-cli/issues/76)'s start-up support.
-Until then the suggestion check prints its result to the terminal instead of posting a notification.
+[#61](https://git.hyperide.ai/ultrabricks/stt-cli/issues/61); Windows on top of
+[#76](https://git.hyperide.ai/ultrabricks/stt-cli/issues/76)'s start-up support.
 
 ## 11. Open decisions
 
@@ -531,7 +572,7 @@ Until then the suggestion check prints its result to the terminal instead of pos
 | --- | --- | --- |
 | Uninstall command name, given `stt dict rm` already removes a personal term | decided on [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83): `uninstall`, which pairs with `install` and cannot be mistyped as `rm` | [#83](https://git.hyperide.ai/ultrabricks/stt-cli/issues/83) |
 | Overlay parser: standard-library subset or optional PyYAML with JSON fallback | decided on [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84): standard-library subset (section 7) | [#84](https://git.hyperide.ai/ultrabricks/stt-cli/issues/84) |
-| Suggestion thresholds (10 transcripts; 0.6 per transcript; 5 and a quarter of the window) | start here, tune on real archives | [#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88) |
+| Suggestion thresholds (10 transcripts; 0.6 per transcript; 5 and a quarter of the window) | kept after the 2026-09-30 measurement in section 9: topical dictation mostly 0.97 to 1.0, small talk at most 0.51, and two topical Russian pieces (a lease, developer slang) under the bar at 0.52 and 0.41, so it errs toward silence; retune when real archives disagree | [#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88) |
 
 Decided here, not open: the version is an integer (section 3); index, API shapes and merge precedence as
 above. Decided on 2026-09-29 and recorded on the tickets (each reversible): the on-disk layout, installed

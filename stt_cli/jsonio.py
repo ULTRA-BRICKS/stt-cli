@@ -98,6 +98,27 @@ MIB = 1024 * 1024
 KIB = 1024
 
 
+def last_object(stdout: str) -> dict[str, Any] | None:
+    """A worker's one JSON object, wherever in its output it ended up (`diarize_worker.py`,
+    `suggest_worker.py`).
+
+    Not "the whole stream", which assumes nothing else prints: `uv run --quiet` and a
+    download progress bar aimed at stderr are what keep that true, and both are other
+    people's programs. Not "the last line" either, which was the first correction and only
+    moved the problem — anything torch or pyannote flushes on the way OUT lands after our
+    object, and an hour of finished work would be thrown away over a shutdown warning.
+    Searching backwards for the first line that parses costs nothing and survives both.
+    """
+    for line in reversed(stdout.strip().splitlines()):
+        try:
+            found = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(found, dict):
+            return found
+    return None
+
+
 def in_units(size: int) -> str:
     """A byte count in the unit it is actually in.
 

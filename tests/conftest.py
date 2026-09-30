@@ -12,6 +12,10 @@ The post-command autostart hook (`commands/mic.py::autostart_after`, called by `
 is also inert unless a test asks for it by requesting the `autostart_hook` fixture: tests
 that run `cli.main` for some other command must not depend on whether the person running
 them has decided about the daemon.
+
+A transcription may start the detached dictionary-suggestion check (`suggest._spawn_worker`,
+#88). No test may: it would outlive the test, reading whichever `STT_HOME` it inherited. A
+test that exercises that hook passes its own `spawn=`.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from stt_cli import suggest
 from stt_cli.commands import mic
 from stt_cli.live.mic_service import AUTOSTART_TOKEN
 
@@ -39,6 +44,14 @@ def _reaches_launchd(args: object) -> bool:
     else:
         words = [os.fsdecode(word) for word in args]  # type: ignore[attr-defined]
     return bool(words) and (os.path.basename(words[0]) == "launchctl" or AUTOSTART_TOKEN in words)
+
+
+@pytest.fixture(autouse=True)
+def _never_a_detached_suggestion_check(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    started: list[bool] = []
+    monkeypatch.setattr(suggest, "_spawn_worker", lambda: started.append(True))
+    yield
+    assert not started, "a test started the detached suggestion check; pass `spawn=` instead"
 
 
 @pytest.fixture(autouse=True)
