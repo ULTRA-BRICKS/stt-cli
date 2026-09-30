@@ -26,7 +26,7 @@ import sys
 from collections.abc import Callable
 
 from . import palette
-from ._errors import EXIT_OK, guard, unknown_item
+from ._errors import EXIT_INTERRUPTED, EXIT_OK, guard, unknown_item
 
 _RunFn = Callable[[list[str]], int]
 
@@ -121,7 +121,21 @@ def _row(shown: str, plain: str, summary: str, column: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    return guard(lambda: _dispatch(args))
+    code = guard(lambda: _dispatch(args))
+    if code != EXIT_INTERRUPTED and args and args[0] not in _NOT_A_RUN:
+        # After the command, not before: it has already answered, and a first-ever `stt mic
+        # disable` has already been recorded by the time the daemon's autostart looks.
+        from .commands import mic
+
+        mic.autostart_after(args)
+    return code
+
+
+_HELP_WORDS = frozenset({"-h", "--help", "help"})
+_VERSION_WORDS = frozenset({"-V", "--version", "version"})
+# Asking stt what it is, or giving up on a command half-way, is not a first run — nothing
+# was used yet, so nothing about the daemon is decided on the back of it (#105).
+_NOT_A_RUN = _HELP_WORDS | _VERSION_WORDS
 
 
 def _dispatch(args: list[str]) -> int:
@@ -130,10 +144,10 @@ def _dispatch(args: list[str]) -> int:
         print(_usage(catalog))
         return EXIT_OK
     head = args[0]
-    if head in {"-h", "--help", "help"}:
+    if head in _HELP_WORDS:
         print(_usage(catalog))
         return EXIT_OK
-    if head in {"-V", "--version", "version"}:
+    if head in _VERSION_WORDS:
         # Imported here, not at the top: resolving it reads a file, and no other command
         # wants that cost. See the note in `stt_cli/__init__`.
         from . import __version__

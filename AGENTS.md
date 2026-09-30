@@ -133,10 +133,13 @@ invariants of its own on top of the ones below.
   daemon showing the user the one toggle to click, and noticing the click), the `defaults
   read` of the Globe-key preference in `live/hotkey.py` (advice when `fn` alone is bound),
   `launchctl kickstart` in `live/mic_service.py` (`stt mic --fix` restarting a down daemon),
-  the `urllib` calls plus `pbpaste` poll in `hf.py`/`auth.py` (a login is a conversation with
-  a human, and `urllib` keeps the token out of an argument vector that `curl` would expose),
-  and the `urllib` GETs in `sources.py` (`stt dict search/install --remote` only, imported
-  inside the function so neither `stt --help` nor a transcription loads the network stack).
+  the detached `stt mic __autostart` worker `commands/mic.py::_spawn_autostart_worker`
+  starts and never waits for (a first `stt` command turning the daemon on must not be
+  delayed by it, #105), the `urllib` calls plus `pbpaste` poll in `hf.py`/`auth.py` (a login
+  is a conversation with a human, and `urllib` keeps the token out of an argument vector
+  that `curl` would expose), and the `urllib` GETs in `sources.py` (`stt dict
+  search/install --remote` only, imported inside the function so neither `stt --help` nor a
+  transcription loads the network stack).
 - **Every process that loads a speech model holds a `model_gate` slot and passes it to
   `proc.run`/`proc.start` as `hold=`.** A model on Metal is wired memory that macOS neither
   swaps nor counts as pressure, and on 2026-09-29 thirteen concurrent runs of it hard-reset
@@ -236,7 +239,11 @@ uv run --extra dev mypy stt_cli
 uv run --extra test pytest -q
 ```
 
-Tests must not need a model, a GPU or a network. Anything that would is mocked.
+Tests must not need a model, a GPU or a network. Anything that would is mocked. Nor may they
+reach the real launchd: every `stt` command on macOS can start the daemon's autostart worker
+(#105), so the autouse fixture in `tests/conftest.py` refuses any `launchctl` process and any
+such worker, and fails the test that tried. A test that needs `cli.main`'s real post-command
+hook asks for the `autostart_hook` fixture; every other test gets it stubbed out.
 
 **Check a fix by removing it and watching its test fail.** Five tests in `test_live.py` passed
 whether or not the code they named was there — they asserted on the machinery rather than on

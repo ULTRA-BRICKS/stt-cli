@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 # as a constant here so the argv the descriptor builds and the argv the CLI recognises as
 # "this is the hidden entry, not a real user command" can never drift apart.
 SERVE_TOKEN = "__serve"
+# The hidden entry of the detached process that turns the daemon on after a user's first
+# `stt` command (`commands/mic.py::autostart_after`) — never typed by a person.
+AUTOSTART_TOKEN = "__autostart"
 # The hidden daemon flag carrying the enabling shell's PATH — see `_serve_argv`.
 PATH_FLAG = "--search-path"
 
@@ -83,19 +86,31 @@ def _serve_argv(extra_argv: list[str]) -> list[str]:
     module's own ``__file__``, never `cwd`, so it is unaffected by whatever directory
     launchd happens to be running in when it re-execs this later.
     """
-    wrapper = _dev_wrapper()
-    entry = (
-        [sys.executable, str(wrapper)]
-        if wrapper is not None
-        else [sys.executable, "-m", "stt_cli.cli"]
-    )
     # launchd runs the job with PATH=/usr/bin:/bin:/usr/sbin:/sbin, where neither a Homebrew
     # ffmpeg nor whisper-server is found — a daemon granted its permissions would then die
     # on "required tool not found: ffmpeg". The PATH of whoever enabled it is where those
     # tools were found, so it travels with the argv (`commands/mic.py::_serve` applies it).
     search_path = os.environ.get("PATH")
     path_flag = [f"{PATH_FLAG}={search_path}"] if search_path else []
-    return [*entry, "mic", SERVE_TOKEN, *path_flag, *extra_argv]
+    return [*_entry(), "mic", SERVE_TOKEN, *path_flag, *extra_argv]
+
+
+def autostart_worker_argv() -> list[str]:
+    """The argv of the detached process that turns the daemon on (`AUTOSTART_TOKEN`). It
+    inherits this process's environment — PATH, `STT_HOME` — so the daemon it enables is
+    the one this command would have enabled itself."""
+    return [*_entry(), "mic", AUTOSTART_TOKEN]
+
+
+def _entry() -> list[str]:
+    """How to run this very `stt` from a fresh process: `bin/stt` in a source checkout
+    (see `_serve_argv` for why), the installed package's module otherwise."""
+    wrapper = _dev_wrapper()
+    return (
+        [sys.executable, str(wrapper)]
+        if wrapper is not None
+        else [sys.executable, "-m", "stt_cli.cli"]
+    )
 
 
 def _dev_wrapper() -> Path | None:

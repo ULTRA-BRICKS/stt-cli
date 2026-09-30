@@ -399,19 +399,25 @@ press the toggle chord again. It never ends a hold burst, which ends when you le
 bindings may share a key.
 
 `enable` also installs OS autostart (a launchd `LaunchAgent`) so the daemon comes back after
-a restart; `disable` removes it and must be run explicitly to turn it back off — the first
-ad-hoc dictation that actually completes (proof Accessibility and the microphone both work
-for THAT process) enables it automatically from then on, unless you already ran `disable`
-yourself. That automatic enable is only confirmed once the daemon it just installed is
-verified genuinely alive, not merely once the OS accepted the install: a launchd-spawned
-process runs under a separate permission identity from the ad-hoc one that just proved
-Accessibility/the microphone work, and the two can genuinely disagree (see `stt mic
-status` below). If that separate process has not been granted Accessibility yet, it does
-not crash: it asks macOS for it and waits, and `stt mic status` (and the banner before an
-ad-hoc dictation) says "waiting for Accessibility — turn on 'python3.14' in System
-Settings > Privacy & Security > Accessibility" until you click. If it cannot be verified alive at all, stt says
-so immediately and leaves the decision retryable rather than either falsely confirmed or
-silently abandoned; the next successful ad-hoc dictation tries again automatically. These six lifecycle subcommands come from the same
+a restart; `disable` removes it and must be run explicitly to turn it back off. On macOS the
+daemon is on by default: the first `stt` command you run (anything but `--help` — a
+command's own `--help` included — `--version`, a usage error, and `stt mic` with no flags or
+with one of the six words below) prints one line (none with `-q`/`--quiet`)
+naming the Accessibility toggle macOS is about to ask for, and a detached background process
+enables the daemon without delaying that command. An explicit `stt mic disable` — first
+command or later — is never overridden, and once the decision is made either way a command
+only reads the record; it takes no lock and runs no `launchctl`. That automatic enable is
+only confirmed once the daemon it just installed is verified genuinely alive, not merely
+once the OS accepted the install: a launchd-spawned process runs under its own permission
+identity, separate from your terminal's (see `stt mic status` below). If that separate
+process has not been granted Accessibility yet, it does not crash: it asks macOS for it and
+waits, and `stt mic status` (and the banner before an ad-hoc dictation) says "waiting for
+Accessibility — turn on 'python3.14' in System Settings > Privacy & Security >
+Accessibility" until you click. If it cannot be verified alive at all, the outcome goes to
+the daemon's log and the decision stays retryable rather than either falsely confirmed or
+silently abandoned: a later `stt` command tries again, ten minutes after the first failed
+try, twice as long after each one after that, and never more than a day apart. These six
+lifecycle subcommands come from the same
 `agenttools_service` library every other long-running agent-tools server uses (the review-cli
 dashboard, spec-web) — not reimplemented here — so it needs a small additional install:
 
@@ -420,7 +426,9 @@ pip install -e <agent-tools>/lib/agenttools_daemon -e <agent-tools>/lib/agenttoo
 ```
 
 Without it, `stt mic run` still works (an ad-hoc foreground daemon, Ctrl-C to stop); only
-`start`/`status`/`stop`/`enable`/`disable` need the library, and say so if it's missing.
+`start`/`status`/`stop`/`enable`/`disable` need the library, and say so if it's missing. The
+daemon is not turned on by a first `stt` command either, and that command prints nothing
+about it.
 
 A bare `stt mic` — no arguments at all — is completely unaffected by any of this: it is a
 literal alias for `stt mic --help` regardless of whether the library is installed. Any
@@ -533,7 +541,7 @@ its worker downloads the model on first use.
 
 `0` ok · `2` bad usage · `4` unknown model/format/command · `5` missing file · `7` network ·
 `8` permission or missing token · `9` not enough disk or memory · `10` engine failure ·
-`127` missing dependency.
+`127` missing dependency · `130` interrupted with Ctrl-C.
 
 ## Requirements
 

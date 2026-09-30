@@ -21,7 +21,7 @@ by default, stacked status lines, an inviting idle line, a Stop button that is a
 | --- | --- | --- |
 | `stt mic` (no arguments) | Byte-identical to `stt mic --help`; launches nothing | Shipped ([#85](https://git.hyperide.ai/ultrabricks/stt-cli/issues/85)), `stt_cli/commands/mic.py:102` |
 | `stt mic [flags]` | Ad-hoc dictation in this terminal, after the check banner (section 3) | Shipped |
-| `stt mic --check` | Opens the microphone and reports levels against the gate, after the same banner; never triggers daemon autostart | Shipped (#85, [#87](https://git.hyperide.ai/ultrabricks/stt-cli/issues/87)) |
+| `stt mic --check` | Opens the microphone and reports levels against the gate, after the same banner; like any other `stt` command it can be the first run that turns the daemon on (section 4) | Shipped (#85, [#105](https://git.hyperide.ai/ultrabricks/stt-cli/issues/105)) |
 | `stt mic --list-devices` | Lists microphones; no banner, no microphone | Shipped |
 | `stt mic run` | The daemon in the foreground of this shell | Shipped ([#21](https://git.hyperide.ai/ultrabricks/stt-cli/issues/21)) |
 | `stt mic start` / `stop` / `status` | Background daemon lifecycle | Shipped (#21, [#54](https://git.hyperide.ai/ultrabricks/stt-cli/issues/54)) |
@@ -172,7 +172,7 @@ dictation behind it: every probe failure degrades to a plain line.
 | Globe key setting | `_globe_key_line`, `mic.py:248` (#101) | only when fn-alone hold is configured and `AppleFnUsageType` is not `0`: `hotkey:  fn alone is your push-to-talk key: set System Settings > Keyboard > "Press 🌐 key to" to "Do Nothing" — …` |
 | How to stop this session | printed by the session's first status note today (`listening on <device> — Ctrl-C to finish …`) | must match section 6 |
 
-Tests: `tests/test_hotkey.py::test_check_flag_also_prints_the_ad_hoc_banner_but_never_triggers_autostart`
+Tests: `tests/test_hotkey.py::test_check_flag_also_prints_the_ad_hoc_banner`
 (the banner is printed on `--check`, stubbing the two line builders),
 `test_ad_hoc_dictation_prints_the_check_banner_before_opening_the_microphone`,
 `test_quiet_suppresses_the_ad_hoc_check_banner`,
@@ -183,37 +183,59 @@ Tests: `tests/test_hotkey.py::test_check_flag_also_prints_the_ad_hoc_banner_but_
 
 ## 4. The daemon is on by default
 
-`mic_daemon_autostart` (`stt_cli/config.py:172`) is a decision record, not a switch:
+`mic_daemon_autostart` (`stt_cli/config.py:171`) is a decision record, not a switch:
 
 | Value | Meaning | Who writes it |
 | --- | --- | --- |
 | `None` | undecided — eligible for automatic enable | default; `stt config unset mic_daemon_autostart` |
-| `"retry"` (`MIC_AUTOSTART_RETRY`, `config.py:54`) | autostart was installed but the daemon was not verified alive; try again next time | `_maybe_autostart_daemon` |
+| `"retry"` (`MIC_AUTOSTART_RETRY`, `config.py:55`) | autostart was installed but the daemon was not verified alive; a later `stt` command tries again after the backoff below | `_maybe_autostart_daemon` |
 | `True` | on, and the daemon was verified alive (or enabled explicitly) | `_maybe_autostart_daemon`, `stt mic enable` |
 | `False` | the user said no | `stt mic disable` |
 
-**Trigger shipped today (#87):** after an ad-hoc dictation completes successfully, and only
-while the record is `None` or `"retry"`, `_maybe_autostart_daemon` (`mic.py:339`) enables
-launchd autostart and then polls the same launchd probe `stt mic status` uses, up to
-`_AUTOSTART_PROBE_ATTEMPTS = 6` times, 0.5 s apart (`mic.py:261-294`; on macOS only — off
-macOS it probes once). Verified alive → `True` and a note that the hotkey now works from any
-application; not verified → `"retry"` and a note naming the cause. An explicit
-`enable`/`disable` is never overridden. The whole check-enable-probe-persist sequence holds
-one lock shared with `enable`/`disable`. `--check` never triggers it.
+**Trigger (shipped, [#105](https://git.hyperide.ai/ultrabricks/stt-cli/issues/105),
+implementing the decision on [#98](https://git.hyperide.ai/ultrabricks/stt-cli/issues/98)):**
+the daemon enables itself at the **first `stt` run on macOS**, unless the user explicitly
+disabled it. `cli.main` calls `mic.autostart_after(argv)` after every dispatched command
+except `--help`/`help`/`-h`, `--version`/`version`/`-V`, and a command interrupted with
+Ctrl-C; `autostart_after` itself skips bare `stt mic`, the six lifecycle words (a first
+`stt mic disable` or `enable` has already decided by the time it looks) and the two hidden
+entries (`__serve`, the daemon; `__autostart`, the worker below). A command that ends inside
+argument parsing — its own `--help`, such as `stt mic --help`, or a usage error — leaves
+through argparse's `SystemExit`, which `guard` does not catch, so it never reaches the hook
+either. Any other command that ran counts, whatever its exit code — a mistyped command name
+(`stt doctorr`, exit 4) included: the person has started using stt either way. The hook runs
+after the command, so the command's own output and exit code are settled first. It no
+longer waits for a successful ad-hoc dictation (#87): that dictation was itself blocked on
+the permissions the daemon can only ask for once it is running.
 
-**Trigger decided ([#98](https://git.hyperide.ai/ultrabricks/stt-cli/issues/98), 2026-09-29,
-reversible; gap until #98 lands):** the daemon enables itself at the **first `stt` run on
-macOS**, unless the user explicitly disabled it (`mic_daemon_autostart` is `False`, written
-by `stt mic disable`). It no longer waits for a successful ad-hoc dictation: that dictation
-was itself blocked on the permissions the daemon can only ask for once it is running, so the
-daemon's own one-click permission request (#98) now appears in the session the user
-installed stt in. The lock, the liveness probe and the recorded states above stay the same;
-only the trigger moves. Because every `stt` command can now be the trigger, the enable-and-probe
-sequence (up to about 3 s under the shared lock) must never delay the command that triggered
-it — it runs detached, or after that command's own output and exit code are settled — and a
-`"retry"` record is retried with a backoff #98 chooses, so a daemon that cannot come alive
-(for example one denied Accessibility) does not cost every later command a probe. The record
-is read under the lock, as today, so with that backoff concurrent commands do not each probe.
+- **Decided (`True` or `False`):** one read of `config.json`. No lock, no `launchctl`, no
+  worker.
+- **Undecided (`None`, or `"retry"`) and due:** stamp the attempt in
+  `<STT_HOME>/mic-autostart-attempts.json`, start `stt mic __autostart` detached (its own
+  session, standard streams to `/dev/null`), and print one line to standard error naming the
+  interpreter to turn on under Privacy & Security > Accessibility — unless the command was
+  given `-q`/`--quiet` (`stt mic` and a transcription have it; `_asked_quiet`), which drops
+  the line but still starts the worker. The command does not wait for the worker.
+- **Backoff:** the first attempt is always due. After an attempt that did not end with a
+  verified-alive daemon, the next is due 10 minutes after it was requested, doubling after
+  each further attempt, capped at one day (`_AutostartAttempts.due`). A verified daemon resets
+  the count.
+- **The worker** (`_autostart_worker`) takes the decision lock, skips if another worker has
+  already finished since the latest request (two commands started together may each start
+  one), runs `_maybe_autostart_daemon` with its standard error appended to the daemon's log,
+  and records the attempt as finished. `_maybe_autostart_daemon` re-reads the record under
+  the lock, so a `stt mic disable` that lands between the spawn and the worker still wins.
+  It enables launchd autostart and then polls the same launchd probe `stt mic status` uses,
+  up to `_AUTOSTART_PROBE_ATTEMPTS = 6` times, 0.5 s apart (on macOS only — off macOS it
+  probes once). Verified alive → `True`; not verified → `"retry"`, with the cause in the
+  log. The whole check-enable-probe-persist sequence holds one lock shared with
+  `enable`/`disable`.
+- **Without `agenttools_service`** nothing is stamped, started or printed.
+
+Tests: the trigger, the backoff and the worker in `tests/test_autostart.py`; the
+enable-probe-persist sequence in `tests/test_hotkey.py`. The autouse fixture in
+`tests/conftest.py` refuses any `launchctl` process and any autostart worker a test starts,
+and fails the test at teardown even when the code under test swallowed the refusal.
 
 **Liveness is not permission.** The launchd-spawned daemon is its own macOS privacy
 principal: the interpreter in `ProgramArguments` of
@@ -225,8 +247,8 @@ can be installed, alive, and still unable to type or hear.
   [#98](https://git.hyperide.ai/ultrabricks/stt-cli/issues/98).
 - Gap: nobody has seen the launchd-spawned daemon type after a hotkey press —
   [#97](https://git.hyperide.ai/ultrabricks/stt-cli/issues/97) (blocked by #98).
-- Gap: the trigger is still the first successful ad-hoc dictation, not the first `stt` run
-  decided above — #98.
+- Gap: nobody has watched the first-run trigger turn on a real launchd daemon on a fresh
+  Mac; the live check used a fake `launchctl` and a throwaway `HOME` (#105).
 
 ## 5. Permissions
 
@@ -422,8 +444,8 @@ mechanism.
 | Different validators per binding, modifier list, fn-alone hold, `hotkey_stop` | yes | no — [#124](https://git.hyperide.ai/ultrabricks/stt-cli/issues/124); typing while a hold's modifiers are held is [#125](https://git.hyperide.ai/ultrabricks/stt-cli/issues/125) | #101 |
 | Esc-Esc removed | yes | unit tests only | #79 |
 | Always-available Stop button + how-to-stop text | no | — | #99 |
-| Daemon on by default, liveness-verified | yes (after first successful dictation) | no — daemon crash-looping on Alex's Mac | #87, #98, #97 |
-| Daemon on at the first `stt` run | no | — | #98 |
+| Daemon on by default, liveness-verified | yes | no — daemon crash-looping on Alex's Mac | #87, #98, #97 |
+| Daemon on at the first `stt` run | yes | a detached worker spawned and recorded its outcome, against a fake `launchctl` and a throwaway `HOME` | #105 |
 | Daemon has its own Accessibility + Microphone | no | — | #98, #97 |
 | No wrapped-row corruption in a ~50-column terminal | yes | pty captures at 50 columns, not yet on Alex's phone | #100 |
 | Inviting idle line | yes | unit tests only | #91 |

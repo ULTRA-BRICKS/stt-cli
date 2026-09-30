@@ -42,15 +42,16 @@ APP_NAME = "stt-cli"
 # succeeded and the OS accepted the autostart install (`autostart_active()`), but the
 # daemon it just installed has NOT been verified genuinely alive yet (`mic_service.
 # probe_launchd`, #54) — most often a permission-flavored crash-loop (`EXIT_PERMISSION`):
-# the ad-hoc dictation that triggered this proved ACCESSIBILITY/MICROPHONE work for THAT
-# process's own identity, never for the separately-spawned launchd daemon (#54 exists
-# because those two can genuinely differ). Deliberately not `True` (that would durably
+# the daemon is its own macOS privacy principal, and nothing about the `stt` command that
+# triggered the attempt says what that principal has been granted (#54 exists because the
+# two can genuinely differ). Deliberately not `True` (that would durably
 # claim a daemon that may be crash-looping forever is confirmed working) and not `False`
 # (nothing here was ever DECLINED — a real user `stt mic disable` is the only thing that
 # means that). Treated the SAME as `None` by the trigger's own gate — "eligible to try
-# again on the next successful ad-hoc dictation" — so it is retried automatically, not
-# stuck, while still being distinguishable in the stored record from "nothing was ever
-# attempted here at all". See #87.
+# again after a later `stt` command, once `commands/mic.py::_AutostartAttempts`' backoff
+# has passed" — so it is retried automatically, not stuck, while still being
+# distinguishable in the stored record from "nothing was ever attempted here at all".
+# See #87 and #105.
 MIC_AUTOSTART_RETRY = "retry"
 
 # Formats the renderers can produce. `all` expands to this list minus the JSON-ish debug
@@ -151,19 +152,17 @@ class Settings:
     hotkey_stop: str | None = None
     # A DECISION RECORD, not a direct control — `stt config set mic_daemon_autostart true`
     # stores the record without touching the daemon itself (use `stt mic enable`/`disable`
-    # for that); this only ever affects what `commands/mic.py::_maybe_autostart_daemon`
-    # decides on a LATER successful dictation, which is why the TUI/help text below says so
+    # for that); this only ever affects what `commands/mic.py::autostart_after` decides
+    # after a LATER `stt` command, which is why the TUI/help text below says so
     # explicitly rather than implying a live toggle. FOUR states, not three:
     #   None   — nobody has decided yet (the same None-means-undecided convention as
-    #            `hotkey_press`/`hotkey_hold` above); `_maybe_autostart_daemon` reads this
-    #            as "eligible to turn the background daemon on the first time an ad-hoc
-    #            dictation actually completes on this machine" — that success is proof
-    #            Accessibility and the microphone are really granted to THAT process, the
-    #            same permission surface the daemon needs.
+    #            `hotkey_press`/`hotkey_hold` above); on macOS the next `stt` command
+    #            starts a detached worker that turns the background daemon on, so it can
+    #            ask for its own Accessibility and Microphone (#105).
     #   MIC_AUTOSTART_RETRY ("retry") — that trigger fired, `enable()` succeeded and the OS
     #            accepted the autostart install, but the SEPARATELY-SPAWNED launchd daemon
     #            was not then verified genuinely alive (`mic_service.probe_launchd`, #54):
-    #            an ad-hoc process's own TCC identity is not proof of the daemon's — see
+    #            the process that triggered it says nothing about the daemon's own grants — see
     #            `MIC_AUTOSTART_RETRY`'s own comment. Treated the SAME as `None` by the
     #            trigger's gate (tries again next time), but distinguishable in the record
     #            from "never even attempted".
@@ -173,7 +172,7 @@ class Settings:
     #   False  — an explicit `stt mic disable` opted out, and it must never be silently
     #            turned back on.
     # Unsetting it (`stt config unset mic_daemon_autostart`) re-arms the automatic decision
-    # from scratch (back to `None`). See #87.
+    # from scratch (back to `None`). See #87 and #105.
     mic_daemon_autostart: bool | str | None = None
 
     # voice activity detection
@@ -590,7 +589,7 @@ def save_setting_if_unset(key: str, value: Any, *, unset: tuple[Any, ...] = (Non
     ``unset`` defaults to just ``(None,)`` but ``_maybe_autostart_daemon`` (#87) passes
     ``(None, MIC_AUTOSTART_RETRY)`` for `mic_daemon_autostart`: `MIC_AUTOSTART_RETRY` ITSELF
     counts as "not yet decided" — it records "tried, the daemon was not verified alive",
-    not a real decision either way — so a LATER successful dictation must still be able to
+    not a real decision either way — so a LATER attempt must still be able to
     overwrite it (with a confirmed `True`, or with another `MIC_AUTOSTART_RETRY` while the
     daemon keeps failing to come up), the same as it could overwrite a bare `None`. Without
     broadening this check, the first crash-looping attempt would permanently wedge the

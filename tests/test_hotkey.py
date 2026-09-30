@@ -2279,7 +2279,6 @@ def test_an_explicit_flag_still_dictates_ad_hoc_exactly_as_before(monkeypatch) -
         return 0
 
     monkeypatch.setattr(mic, "_adhoc_banner", lambda **_: None)
-    monkeypatch.setattr(mic, "_maybe_autostart_daemon", lambda **_: None)
     monkeypatch.setattr(dictation_mod, "dictate", fake_dictate)
 
     assert mic.run(["--device", "1"]) == 0
@@ -2302,7 +2301,6 @@ def test_ad_hoc_dictation_prints_the_check_banner_before_opening_the_microphone(
 
     monkeypatch.setattr(mic, "_daemon_status_line", lambda: "daemon:  not running")
     monkeypatch.setattr(mic, "_hotkey_lines", lambda: "hotkey:  cmd+shift+space (toggle)")
-    monkeypatch.setattr(mic, "_maybe_autostart_daemon", lambda **_: None)
 
     async def fake_dictate(args):
         return 0
@@ -2316,25 +2314,15 @@ def test_ad_hoc_dictation_prints_the_check_banner_before_opening_the_microphone(
     assert "hotkey:  cmd+shift+space (toggle)" in captured.err
 
 
-def test_check_flag_also_prints_the_ad_hoc_banner_but_never_triggers_autostart(
-    monkeypatch, capsys
-) -> None:
+def test_check_flag_also_prints_the_ad_hoc_banner(monkeypatch, capsys) -> None:
     """`--check` opens the microphone exactly like ad-hoc dictation does — the SAME banner
-    (#85), printed before `_check` runs, same as the plain-dictation path above. But
-    `--check` is a DIAGNOSTIC, not a real dictation: `run()` only calls
-    `_maybe_autostart_daemon` after `dictation.dictate` itself returns `EXIT_OK` — `--check`
-    returns through `_check` instead and must never reach that trigger, unlike a genuine
-    dictation completing (#87). Required coverage: the diff adds the `--check` banner path
-    with no test proving it independently of a real dictation."""
+    (#85), printed before `_check` runs, same as the plain-dictation path above. Required
+    coverage: the diff adds the `--check` banner path with no test proving it
+    independently of a real dictation."""
     from stt_cli.commands import mic
 
     monkeypatch.setattr(mic, "_daemon_status_line", lambda: "daemon:  not running")
     monkeypatch.setattr(mic, "_hotkey_lines", lambda: "hotkey:  cmd+shift+space (toggle)")
-
-    def boom(**_: object) -> None:
-        raise AssertionError("--check must never trigger the autostart decision")
-
-    monkeypatch.setattr(mic, "_maybe_autostart_daemon", boom)
 
     async def fake_check(args: object) -> int:
         return 0
@@ -2356,7 +2344,6 @@ def test_quiet_suppresses_the_ad_hoc_check_banner(monkeypatch, capsys) -> None:
         raise AssertionError("--quiet must skip the daemon probe entirely")
 
     monkeypatch.setattr(mic, "_daemon_status_line", boom)
-    monkeypatch.setattr(mic, "_maybe_autostart_daemon", lambda **_: None)
 
     async def fake_dictate(args):
         return 0
@@ -2550,45 +2537,13 @@ def test_hotkey_lines_show_the_stop_chord_the_allowed_modifiers_and_the_globe_ad
     assert hotkey_mod.GLOBE_KEY_ADVICE in lines
 
 
-# ── daemon default-on after the first successful ad-hoc dictation (#87) ─────────
+# ── the daemon turns itself on and verifies it came up (#87; triggered since #105 by the
+# first `stt` run, see tests/test_autostart.py) ────────────────────────────────────────
 
 
-def test_run_triggers_the_autostart_check_only_after_a_successful_dictation(
-    tmp_path, monkeypatch
-) -> None:
-    from stt_cli.commands import mic
-    from stt_cli.live import dictation as dictation_mod
-
-    monkeypatch.setenv("STT_HOME", str(tmp_path))
-    monkeypatch.setattr(mic, "_adhoc_banner", lambda **_: None)
-
-    calls: list[int] = []
-    monkeypatch.setattr(mic, "_maybe_autostart_daemon", lambda **_: calls.append(1))
-
-    async def ok(args):
-        return 0
-
-    monkeypatch.setattr(dictation_mod, "dictate", ok)
-    assert mic.run(["--device", "1"]) == 0
-    assert calls == [1]
-
-    calls.clear()
-
-    async def failed(args):
-        return 8
-
-    monkeypatch.setattr(dictation_mod, "dictate", failed)
-    assert mic.run(["--device", "1"]) == 8
-    assert calls == [], "a failed/denied dictation is not proof anything works here"
-
-
-def test_a_successful_ad_hoc_dictation_enables_the_daemon_when_undecided(
-    tmp_path, monkeypatch
-) -> None:
-    """The first ad-hoc dictation that actually completes is proof Accessibility and the
-    microphone both work here — the trigger `_maybe_autostart_daemon` turns into "enable
-    the daemon", exactly once, but ONLY once the daemon it installed is verified genuinely
-    alive (#87/#54)."""
+def test_autostart_enables_the_daemon_when_undecided(tmp_path, monkeypatch) -> None:
+    """An undecided record turns into "enable the daemon", exactly once, but ONLY once the
+    daemon it installed is verified genuinely alive (#87/#54)."""
     from stt_cli.commands import mic
     from stt_cli.live import mic_service
 
@@ -2663,13 +2618,12 @@ def test_autostart_still_installs_when_something_is_already_running_but_not_enab
 
 def test_autostart_never_fires_twice_or_after_an_explicit_decision(tmp_path, monkeypatch) -> None:
     """Once `mic_daemon_autostart` is set — by this same auto-enable OR by an explicit
-    `stt mic enable`/`disable` — a later successful dictation must never touch the daemon
-    again (#87).
+    `stt mic enable`/`disable` — a later attempt must never touch the daemon again (#87).
 
     Asserts on an OBSERVED call list rather than on `status()` raising: an earlier version
     of this test raised `AssertionError` from `status()` instead, which the caller's own
-    broad `except Exception` (a deliberate, separate contract: never break a dictation that
-    just worked) swallowed right along with a real bug — deleting the early-return this test
+    broad `except Exception` (a deliberate, separate contract: an attempt ends quietly)
+    swallowed right along with a real bug — deleting the early-return this test
     is supposed to guard left `status()` genuinely called, `AssertionError` raised, and
     silently caught, and the test still passed. Caught in review; this is the fix."""
     from stt_cli.commands import mic
@@ -2784,9 +2738,9 @@ def test_the_daemon_lock_prevents_an_explicit_disable_from_interleaving_with_aut
 
 
 def test_autostart_is_a_no_op_without_the_shared_service_lib(tmp_path, monkeypatch) -> None:
-    """A machine without `agenttools_service` completes ad-hoc dictation exactly as before —
-    no traceback, no attempted daemon control — and the flag stays undecided so this can try
-    again once the lib is installed (#87)."""
+    """A machine without `agenttools_service` gets no traceback and no attempted daemon
+    control, and the flag stays undecided so this can try again once the lib is installed
+    (#87)."""
     from stt_cli.commands import mic
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
@@ -2865,12 +2819,12 @@ def test_the_shared_service_libs_attribute_surface_still_matches_what_mic_py_rea
         assert hasattr(st, attr), f"ServiceManager.status() no longer exposes {attr!r}"
 
 
-def test_a_failure_enabling_the_daemon_never_breaks_the_dictation_that_just_worked(
+def test_a_failure_enabling_the_daemon_ends_quietly_and_stays_undecided(
     tmp_path, monkeypatch
 ) -> None:
     """`enable()` can fail for its own reasons (launchd unreachable, ...) — that must never
-    surface as an exception from a function called after dictation already succeeded, and
-    must leave the flag undecided so a later run can retry (#87)."""
+    surface as an exception out of the attempt, and must leave the flag undecided so a
+    later run can retry (#87)."""
     from stt_cli.commands import mic
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
@@ -2888,14 +2842,12 @@ def test_a_failure_enabling_the_daemon_never_breaks_the_dictation_that_just_work
     assert config.load_settings().mic_daemon_autostart is None
 
 
-def test_a_failure_persisting_the_decision_never_breaks_the_dictation_that_just_worked(
-    tmp_path, monkeypatch
-) -> None:
-    """The promise is "never breaks the dictation that just succeeded", not "never breaks
-    it unless the failure happens to be in config.save_setting_if_unset" — a config.json
-    write can itself raise (a lock file that cannot be opened, the file grown past the
-    size guard), and that must be caught exactly like a daemon-manager failure. Caught in
-    review before merge; this is the regression test."""
+def test_a_failure_persisting_the_decision_ends_quietly(tmp_path, monkeypatch) -> None:
+    """The promise is "an attempt ends quietly", not "ends quietly unless the failure
+    happens to be in config.save_setting_if_unset" — a config.json write can itself raise
+    (a lock file that cannot be opened, the file grown past the size guard), and that must
+    be caught exactly like a daemon-manager failure. Caught in review before merge; this is
+    the regression test."""
     from stt_cli import config as config_mod
     from stt_cli._errors import UsageError
     from stt_cli.commands import mic
@@ -2972,30 +2924,28 @@ def test_a_crash_looping_daemon_after_autostart_is_never_recorded_as_confirmed(
     tmp_path, monkeypatch
 ) -> None:
     """End-to-end regression for the correctness blocker review caught: `enable()`
-    succeeding only proves the AD-HOC process's own TCC identity works, never the
-    separately-spawned launchd daemon's (#54's own investigation, this session's TCC-scope
-    investigation). Runs the REAL `stt mic` entry point — `run()` -> a genuinely successful
-    dictation -> the real `_maybe_autostart_daemon`, faking only `_manager` (no real
-    launchd) and `mic_service.probe_launchd` (the daemon's own liveness/exit-code probe,
-    diagnosing the exact #54 crash-loop: registered, no live pid, last exit code
-    `EXIT_PERMISSION`). Must NOT persist `True` (that would silently claim a permanently
-    crash-looping daemon is confirmed working, never retrying, never telling the user
-    anything is wrong — exactly the failure this session kept hitting) and must NOT
-    persist `False` either (nobody explicitly declined) — only the dedicated retryable
-    state, with the real permission principal named in the user-facing message, not a
-    generic 'grant Accessibility' hint."""
+    succeeding only proves the OS accepted the install, never the separately-spawned
+    launchd daemon's own TCC identity (#54's own investigation). Runs the REAL `stt mic`
+    entry the first-run worker is started with, `stt mic __autostart` (#105), faking only
+    `_manager` (no real launchd) and `mic_service.probe_launchd` (the daemon's own
+    liveness/exit-code probe, diagnosing the exact #54 crash-loop: registered, no live
+    pid, last exit code `EXIT_PERMISSION`). Must NOT persist `True` (that would silently
+    claim a permanently crash-looping daemon is confirmed working, never retrying, never
+    telling the user anything is wrong) and must NOT persist `False` either (nobody
+    explicitly declined) — only the dedicated retryable state, with the real permission
+    principal named in the message, not a generic 'grant Accessibility' hint."""
     from stt_cli._errors import EXIT_PERMISSION
     from stt_cli.commands import mic
-    from stt_cli.live import dictation as dictation_mod
     from stt_cli.live import mic_service
 
     monkeypatch.setenv("STT_HOME", str(tmp_path))
     assert config.load_settings().mic_daemon_autostart is None
+    mic._AutostartAttempts(count=1, requested=1.0).write()
 
     enabled: list[bool] = []
 
     class _FakeManager:
-        service = argparse.Namespace(label="com.agenttools.stt.mic")
+        service = argparse.Namespace(label="com.agenttools.stt.mic", logfile=tmp_path / "log")
 
         def status(self) -> object:
             return argparse.Namespace(running=False, enabled=False, state="stopped", pid=None)
@@ -3007,7 +2957,6 @@ def test_a_crash_looping_daemon_after_autostart_is_never_recorded_as_confirmed(
             return True
 
     monkeypatch.setattr(mic, "_manager", lambda ns: _FakeManager())
-    monkeypatch.setattr(mic, "_adhoc_banner", lambda **_: None)
     monkeypatch.setattr(
         mic_service,
         "probe_launchd",
@@ -3018,12 +2967,7 @@ def test_a_crash_looping_daemon_after_autostart_is_never_recorded_as_confirmed(
     notes: list[str] = []
     monkeypatch.setattr("stt_cli.live.status.note", lambda message, **_: notes.append(message))
 
-    async def fake_dictate(args: object) -> int:
-        return 0
-
-    monkeypatch.setattr(dictation_mod, "dictate", fake_dictate)
-
-    assert mic.run(["--device", "1"]) == 0
+    assert mic.run([mic_service.AUTOSTART_TOKEN]) == 0
 
     assert enabled == [True], "enable() must still have run: the OS control itself succeeded"
     settled = config.load_settings().mic_daemon_autostart
@@ -3040,12 +2984,10 @@ def test_a_crash_looping_daemon_after_autostart_is_never_recorded_as_confirmed(
     )
 
 
-def test_a_crash_looping_daemon_can_be_retried_by_a_later_successful_dictation(
-    tmp_path, monkeypatch
-) -> None:
+def test_a_crash_looping_daemon_can_be_retried_by_a_later_attempt(tmp_path, monkeypatch) -> None:
     """The retryable state left by a previous crash-loop must not permanently wedge the
     trigger — once the daemon comes up genuinely alive (Accessibility was granted since),
-    the very next successful ad-hoc dictation confirms it for real (#87/#54)."""
+    the next attempt confirms it for real (#87/#54)."""
     from stt_cli.commands import mic
     from stt_cli.live import mic_service
 
@@ -3209,7 +3151,7 @@ def test_an_unanswerable_probe_off_macos_still_confirms_via_autostart_active(
 
 def test_explicit_enable_records_the_same_flag_autostart_reads(tmp_path, monkeypatch) -> None:
     """`stt mic enable` is an explicit decision — it must record the SAME flag
-    `_maybe_autostart_daemon` reads, so a later ad-hoc dictation never second-guesses it
+    `_maybe_autostart_daemon` reads, so a later `stt` command never second-guesses it
     (#87)."""
     from stt_cli.commands import mic
 
@@ -3292,8 +3234,8 @@ def test_a_successful_enable_that_fails_to_persist_still_reports_ok_but_warns(
     config.json grown past the size guard, or an `OSError` out of the write itself
     (`ENOSPC` and friends are not `SttError`s) must not turn a real, successful `stt mic
     enable` into a reported failure. But it must not go unnoticed either: an un-persisted
-    `enable` leaves `mic_daemon_autostart` at whatever it was before, so a later ad-hoc
-    dictation could re-decide this on its own — the user is told immediately instead."""
+    `enable` leaves `mic_daemon_autostart` at whatever it was before, so a later `stt`
+    command could re-decide this on its own — the user is told immediately instead."""
     from stt_cli import config as config_mod
     from stt_cli._errors import UsageError
     from stt_cli.commands import mic

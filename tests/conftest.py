@@ -1,0 +1,69 @@
+"""Guards every test gets without asking: the suite never reaches the real launchd.
+
+`stt mic enable`/`disable`/`status` and the daemon's autostart talk to launchd through
+`launchctl`, and since #105 every `stt` command on macOS may start a detached worker that
+does the same. On a developer's Mac a test that slipped past its fakes would install, start
+or remove the real LaunchAgent — the one the person running the suite relies on. So every
+process a test starts goes through `_Guarded`, which refuses `launchctl` and the autostart
+worker outright and records the attempt, and the test fails at teardown even when the code
+under test swallowed the refusal.
+
+The post-command autostart hook (`commands/mic.py::autostart_after`, called by `cli.main`)
+is also inert unless a test asks for it by requesting the `autostart_hook` fixture: tests
+that run `cli.main` for some other command must not depend on whether the person running
+them has decided about the daemon.
+"""
+
+from __future__ import annotations
+
+import os
+import shlex
+import subprocess
+from collections.abc import Iterator
+
+import pytest
+
+from stt_cli.commands import mic
+from stt_cli.live.mic_service import AUTOSTART_TOKEN
+
+
+class LaunchdReachedInTest(AssertionError):
+    """A test started `launchctl`, or the autostart worker that runs it."""
+
+
+def _reaches_launchd(args: object) -> bool:
+    # A string is a whole command line (`shell=True`, or one word with no arguments), so its
+    # first word is split out before its basename is compared.
+    if isinstance(args, (str, bytes, os.PathLike)):
+        words = shlex.split(os.fsdecode(args))
+    else:
+        words = [os.fsdecode(word) for word in args]  # type: ignore[attr-defined]
+    return bool(words) and (os.path.basename(words[0]) == "launchctl" or AUTOSTART_TOKEN in words)
+
+
+@pytest.fixture(autouse=True)
+def _never_the_real_launchd(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[list[list[str]]]:
+    reached: list[list[str]] = []
+
+    class _Guarded(subprocess.Popen):  # type: ignore[type-arg]
+        def __init__(self, args: object, *rest: object, **options: object) -> None:
+            if _reaches_launchd(args):
+                reached.append(
+                    [str(word) for word in args] if isinstance(args, list) else [str(args)]
+                )
+                raise LaunchdReachedInTest(f"a test tried to run {args!r}")
+            super().__init__(args, *rest, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "Popen", _Guarded)
+    if "autostart_hook" not in request.fixturenames:
+        monkeypatch.setattr(mic, "autostart_after", lambda argv: None)
+    yield reached
+    assert not reached, f"the suite must never reach the real launchd: {reached}"
+
+
+@pytest.fixture
+def autostart_hook() -> None:
+    """Keep `cli.main`'s real post-command autostart hook for this test (see the module
+    docstring); `_never_the_real_launchd` still refuses what it would start."""

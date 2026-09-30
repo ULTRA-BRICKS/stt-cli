@@ -27,6 +27,7 @@ EXIT_PERMISSION = 8  # missing token / denied access
 EXIT_RESOURCES = 9  # not enough disk space or memory to proceed safely
 EXIT_ENGINE = 10  # a transcription engine ran but failed
 EXIT_MISSING_DEP = 127  # a required external tool (ffmpeg, an engine) isn't installed
+EXIT_INTERRUPTED = 130  # Ctrl-C: the shell's own 128 + SIGINT
 
 EXIT_NAMES: dict[int, str] = {
     EXIT_OK: "ok",
@@ -39,6 +40,7 @@ EXIT_NAMES: dict[int, str] = {
     EXIT_RESOURCES: "insufficient resources",
     EXIT_ENGINE: "engine failure",
     EXIT_MISSING_DEP: "missing dependency",
+    EXIT_INTERRUPTED: "interrupted",
 }
 
 
@@ -132,7 +134,7 @@ def guard(fn: Callable[[], int]) -> int:
         return exc.exit_code
     except KeyboardInterrupt:
         print("stt: interrupted", file=sys.stderr)
-        return 130
+        return EXIT_INTERRUPTED
     except BrokenPipeError:  # `stt ... | head` — not an error worth a traceback
         return EXIT_OK
 

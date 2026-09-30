@@ -37,11 +37,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import importlib.util
+import json
 import math
 import os
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from .._errors import (
@@ -56,7 +61,7 @@ from .._errors import (
     UsageError,
 )
 from ..live import hotkey as hotkey_mod
-from ..live.mic_service import PATH_FLAG, SERVE_TOKEN
+from ..live.mic_service import AUTOSTART_TOKEN, PATH_FLAG, SERVE_TOKEN
 
 if TYPE_CHECKING:
     from agenttools_service import ServiceManager
@@ -102,6 +107,8 @@ def _exit_note(probe: LaunchdProbe) -> str:
 def run(argv: list[str]) -> int:
     if argv and argv[0] == SERVE_TOKEN:
         return _serve(argv[1:])
+    if argv and argv[0] == AUTOSTART_TOKEN:
+        return _autostart_worker()
     if argv and argv[0] in _LIFECYCLE:
         return _lifecycle(argv)
     if not argv:
@@ -123,12 +130,7 @@ def run(argv: list[str]) -> int:
         return asyncio.run(_check(args))
     from ..live import dictation
 
-    exit_code = asyncio.run(dictation.dictate(args))
-    if exit_code == EXIT_OK:
-        # A dictation that actually completed is proof Accessibility and the microphone
-        # both work on this machine — see `_maybe_autostart_daemon` (#87).
-        _maybe_autostart_daemon(quiet=args.quiet)
-    return exit_code
+    return asyncio.run(dictation.dictate(args))
 
 
 def _adhoc_banner(*, quiet: bool) -> None:
@@ -307,9 +309,9 @@ def _one_hotkey_line(
 # Bounded: launchd takes a moment to actually spawn what `enable()` just told it to
 # install, and a permission-denied daemon takes a moment to crash once spawned — probing
 # once, immediately, would as often as not catch it mid-launch, neither alive yet nor
-# diagnosably dead. ~3s worst case (6 * 0.5s) — long enough for either to happen, short
-# enough that a successful ad-hoc dictation that just finished isn't left waiting on the
-# daemon's own unrelated startup. See `_wait_for_daemon_liveness` (#87/#54).
+# diagnosably dead. ~3s worst case (6 * 0.5s), spent in the detached worker
+# (`_autostart_worker`), never in the command that triggered it, but under the decision
+# lock a concurrent `stt config set` waits on. See `_wait_for_daemon_liveness` (#87/#54).
 _AUTOSTART_PROBE_ATTEMPTS = 6
 _AUTOSTART_PROBE_INTERVAL = 0.5
 # Alive sightings (about a second) before a daemon that has written no state record is
@@ -383,8 +385,7 @@ def _autostart_crash_loop_message(probe: LaunchdProbe | None, *, freshly_enabled
         return (
             f"the background daemon {verb}, but its liveness could not be "
             "verified (launchctl did not answer) — autostart is NOT confirmed working; "
-            "`stt mic status` has the full diagnostic, and the next successful ad-hoc "
-            "dictation checks again automatically."
+            f"`stt mic status` has the full diagnostic, and {_AUTOSTART_RETRIES}."
         )
     exit_note = _exit_note(probe)
     if probe.last_exit_code == EXIT_PERMISSION:
@@ -396,41 +397,40 @@ def _autostart_crash_loop_message(probe: LaunchdProbe | None, *, freshly_enabled
     return (
         f"the background daemon {verb}, but has not come up yet{exit_note} — "
         "autostart is NOT confirmed working; `stt mic status` has the full diagnostic, and "
-        "the next successful ad-hoc dictation checks again automatically."
+        f"{_AUTOSTART_RETRIES}."
     )
 
 
 def _maybe_autostart_daemon(*, quiet: bool) -> None:
-    """First successful ad-hoc dictation on THIS machine is proof Accessibility and the
-    microphone both actually work here — the exact permission surface the background daemon
-    needs (`quartz.require_accessibility()` is the first line of both `dictation.dictate`
-    and `dictation.dictate_daemon`). That is the trigger this repurposes as "turn the daemon
-    on", instead of requiring the user to separately remember `stt mic enable` — see #87.
+    """Turn the background daemon on, verify it came up, and record the outcome — the body
+    of `_autostart_worker`, which `autostart_after` starts after a person's first `stt`
+    command on this Mac (#105) instead of requiring them to remember `stt mic enable`. It
+    used to run only after a successful ad-hoc dictation (#87), and that dictation was
+    itself blocked on the permissions only a running daemon can ask for (#98).
 
-    That proof is about the AD-HOC process's own TCC identity, never about the separately
-    spawned launchd daemon's — #54 (and this session's own TCC-scope investigation) already
-    established those two can genuinely differ, which is exactly how #54's crash-loop
-    happens: `enable()` succeeding (the OS accepted the control command) is proof the OS
-    autostart mechanism itself works, NOT that the daemon it just installed can actually
-    run. So `enable()` succeeding is never enough by itself to call this DECIDED:
+    Nothing about the process that triggered this proves anything about the separately
+    spawned launchd daemon's own TCC identity — #54 (and this session's own TCC-scope
+    investigation) established those two can genuinely differ, which is exactly how #54's
+    crash-loop happens: `enable()` succeeding (the OS accepted the control command) is proof
+    the OS autostart mechanism itself works, NOT that the daemon it just installed can
+    actually run. So `enable()` succeeding is never enough by itself to call this DECIDED:
     `_wait_for_daemon_liveness` gives the daemon a brief, bounded chance to actually come up
     and reuses `mic_service.probe_launchd` (#54) — the same OS-authoritative liveness/
     exit-code probe `stt mic status` already uses — to find out for real. Only a VERIFIED
     alive daemon persists `True`; a daemon that comes up NOT alive (most commonly
     crash-looping on `EXIT_PERMISSION`) persists `config.MIC_AUTOSTART_RETRY` instead —
     distinct from both `True` (falsely claiming confirmed-working) and `False` (falsely
-    claiming the user explicitly declined) — and the user is told the real cause and the
-    real principal to fix immediately, not left to discover a silently crash-looping daemon
-    later. `MIC_AUTOSTART_RETRY` is treated the SAME as `None` by the gate below, so the
-    next successful ad-hoc dictation retries the whole sequence automatically.
+    claiming the user explicitly declined) — and the real cause and the real principal to
+    fix are noted (in the daemon's log, where the detached worker's standard error goes).
+    `MIC_AUTOSTART_RETRY` is treated the SAME as `None` by the gate below, so a later `stt`
+    command retries the whole sequence, on `_AutostartAttempts`' backoff.
 
     Fires until a real, verified decision lands: `mic_daemon_autostart` records that
     decision so a later run never overrides an explicit `stt mic enable`/`disable`, and
     never re-decides a CONFIRMED auto-enable either. EVERYTHING that can fail — the config
     read, the daemon calls, the liveness probe, AND the config write — is inside the one
     guarded region: a config.json write can itself raise (a lock file that cannot be
-    opened, a file that grew past the size guard), and this promises to never break the
-    dictation that just succeeded, not merely the daemon half of it.
+    opened, a file that grew past the size guard), and a failure here must end quietly.
 
     The whole check-then-enable-then-probe-then-persist sequence runs under
     `config.locked_for_daemon_decision()`, not just the final write: a status check followed
@@ -477,8 +477,8 @@ def _maybe_autostart_daemon(*, quiet: bool) -> None:
                 # it will print "enabled" (agenttools_service core.py: "Don't claim 'enabled'
                 # when the OS rejected it"). Recording `True` here anyway would be a durable
                 # lie, AND — because the flag then reads "decided" — would permanently skip
-                # every future retry. Leave it unset so the next successful ad-hoc dictation
-                # tries again.
+                # every future retry. Leave it unset so a later `stt` command tries again,
+                # on the same backoff as a recorded retry.
                 return
             probe = _wait_for_daemon_liveness(manager.service.label)
             # Verified genuinely alive, OR the one platform `probe_launchd` has nothing to
@@ -528,7 +528,7 @@ def _maybe_autostart_daemon(*, quiet: bool) -> None:
                     outcome, crash = "retry", probe
     except ImportError:
         return
-    except Exception:  # best-effort; never break a dictation that just worked
+    except Exception:  # best-effort; a failure here must end quietly
         return
     from ..live import status
 
@@ -548,6 +548,198 @@ def _maybe_autostart_daemon(*, quiet: bool) -> None:
         status.note(
             _autostart_crash_loop_message(crash, freshly_enabled=freshly_enabled), quiet=quiet
         )
+
+
+# ── the daemon turns itself on at the first `stt` run on macOS (#105) ─────────────────
+
+# Said wherever an unconfirmed attempt is reported: when the next one happens.
+_AUTOSTART_RETRIES = (
+    "a later `stt` command tries again by itself, waiting longer after each failed try"
+)
+# The backoff between attempts that did not end with a verified-alive daemon: ten minutes
+# after the first, doubling, never more than a day. A daemon that cannot come alive (one
+# denied its permissions, a launchctl that refuses) must not cost every later command a
+# worker and three seconds of probing under the decision lock.
+_AUTOSTART_RETRY_FIRST_SECONDS = 600.0
+_AUTOSTART_RETRY_CAP_SECONDS = 86400.0
+_AUTOSTART_ATTEMPTS = "mic-autostart-attempts.json"
+# `stt mic` words after which turning the daemon on would second-guess what the person
+# just did to it (`stop`, `status`, `disable`, ...), and the hidden entries that ARE the
+# daemon and its autostart worker.
+_NOT_A_FIRST_RUN = frozenset({*_LIFECYCLE, SERVE_TOKEN, AUTOSTART_TOKEN})
+
+
+@dataclass(frozen=True)
+class _AutostartAttempts:
+    """The backoff record beside `mic_daemon_autostart`, in `STT_HOME`: how many attempts
+    have been requested since the daemon last came up verified, when the latest request
+    was made, and when a worker last finished one. Read only while the record is undecided
+    (`None` or `MIC_AUTOSTART_RETRY`) — a decided record costs one config read and nothing
+    else."""
+
+    count: int = 0
+    requested: float = 0.0
+    finished: float = 0.0
+
+    @staticmethod
+    def _path() -> Path:
+        from .. import config
+
+        return config.app_home() / _AUTOSTART_ATTEMPTS
+
+    @classmethod
+    def read(cls) -> _AutostartAttempts:
+        """The stored record, or a fresh one when it is missing, unreadable or impossible (a
+        negative count) — a lost record costs at most one extra attempt, where a kept bad one
+        would make every later `due` raise, silently, and the daemon never come on."""
+        try:
+            raw = json.loads(cls._path().read_text(encoding="utf-8"))
+            count = int(raw["count"])
+            if count < 0:
+                return cls()
+            return cls(count, float(raw["requested"]), float(raw["finished"]))
+        except (OSError, ValueError, TypeError, KeyError):
+            return cls()
+
+    def write(self) -> None:
+        from ..archive import write_atomic
+
+        path = self._path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, json.dumps(asdict(self), sort_keys=True) + "\n")
+
+    def due(self, now: float) -> bool:
+        """May another attempt start at ``now``? Always for the first; after that only once
+        the backoff since the latest request has passed. A request stamped in the future
+        (the clock was set back) does not hold anything off."""
+        if self.count == 0 or now < self.requested:
+            return True
+        wait = _AUTOSTART_RETRY_FIRST_SECONDS * (1 << min(self.count - 1, 16))
+        return now >= self.requested + min(wait, _AUTOSTART_RETRY_CAP_SECONDS)
+
+
+def autostart_after(argv: list[str]) -> None:
+    """Called by `cli.main` after every dispatched command: on macOS, while nobody has
+    decided about the background daemon (`mic_daemon_autostart` unset, or a `retry` whose
+    backoff has passed), start `_autostart_worker` detached and say, in one line, which
+    toggle macOS is about to ask for (#105). Runs AFTER the command, so a first-ever `stt
+    mic disable` or `enable` has already decided by the time this looks.
+
+    Never delays the command that triggered it: turning the daemon on and verifying it
+    takes up to about three seconds, all of it in the worker, which this does not wait for.
+    A decided record costs one config read — no lock, no launchctl, no worker. Anything
+    that goes wrong here is swallowed: the command that just ran has already answered.
+    """
+    if sys.platform != "darwin" or (
+        argv[:1] == ["mic"] and (len(argv) == 1 or argv[1] in _NOT_A_FIRST_RUN)
+    ):
+        return
+    try:
+        from .. import config
+
+        record = config.load_settings().mic_daemon_autostart
+        if record is not None and record != config.MIC_AUTOSTART_RETRY:
+            return
+        attempts = _AutostartAttempts.read()
+        now = time.time()
+        if not attempts.due(now) or not _service_lib_installed():
+            return
+        from ..live import permissions, status
+
+        again = "turning on" if attempts.count == 0 else "trying again to turn on"
+        message = (
+            f"{again} the background dictation daemon, so the hotkey works from any "
+            f"application — when macOS asks, turn on {permissions.principal_name()} in System "
+            "Settings > Privacy & Security > Accessibility and allow its microphone; `stt mic "
+            "disable` turns this off."
+        )
+        # Stamped before the worker starts, so a command run while it works finds this
+        # attempt in flight rather than starting another. A worker that could not even be
+        # started (fork refused, interpreter gone) is no attempt: the stamp is taken back,
+        # so the next command tries again instead of waiting out a backoff nobody earned.
+        _AutostartAttempts(attempts.count + 1, now, attempts.finished).write()
+        try:
+            _spawn_autostart_worker()
+        except Exception:
+            attempts.write()
+            return
+        # Inside the `try` too: `stt ... 2>&1 | head` has closed standard error by now, and
+        # the command's exit code, which `guard` already settled, must not become a traceback.
+        status.note(message, quiet=_asked_quiet(argv))
+    except Exception:
+        return
+
+
+def _service_lib_installed() -> bool:
+    """Whether `agenttools_service`, which every daemon action needs, can be imported —
+    asked without importing it, so a machine without it pays nothing and starts nothing."""
+    return importlib.util.find_spec("agenttools_service") is not None
+
+
+def _asked_quiet(argv: list[str]) -> bool:
+    """Did the command that just ran take `-q`/`--quiet`? Then the one line about the daemon
+    is not printed either; the worker still starts. Only `stt mic` and a transcription have
+    the flag, and a command whose options did not parse never reaches this, so reading argv
+    the way their parsers do is enough: `--quiet` or a prefix argparse accepts for it (no
+    other option starts with `--q`), `-q` alone or leading a cluster (`-qo out.txt`), and
+    nothing after `--`, where `-q` is a file."""
+    for token in argv:
+        if token == "--":
+            return False
+        if token.startswith("--") and len(token) > 2 and "--quiet".startswith(token):
+            return True
+        if token.startswith("-q"):
+            return True
+    return False
+
+
+def _spawn_autostart_worker() -> None:
+    """`stt mic __autostart` in a session of its own, detached from this terminal, with
+    nothing read back: the outcome is the record it writes (#105). With `PYTHONSAFEPATH`:
+    an installed stt's worker is `python -m stt_cli.cli`, and `-m` otherwise imports from
+    the directory the command was typed in first, so a checkout or a planted `stt_cli` there
+    would be the code that decides about the daemon. The directory itself is kept, since a
+    relative `STT_HOME` is relative to it."""
+    import subprocess
+
+    from ..live import mic_service
+
+    subprocess.Popen(
+        mic_service.autostart_worker_argv(),
+        env={**os.environ, "PYTHONSAFEPATH": "1"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _autostart_worker() -> int:
+    """The detached half of `autostart_after`: `_maybe_autostart_daemon` under the decision
+    lock, with what it has to say appended to the daemon's own log, since its standard error
+    is nobody's terminal; `stt mic status` then shows the daemon it left behind.
+
+    Under the lock it first asks whether any worker has finished since the latest request:
+    two commands started together may each start one, and only the first may probe. Then
+    it records the attempt as finished, resetting the count once the daemon is verified,
+    so the backoff starts over from the beginning if the record is ever unset again.
+    """
+    from .. import config
+
+    with config.locked_for_daemon_decision():
+        attempts = _AutostartAttempts.read()
+        if attempts.finished >= attempts.requested:
+            return EXIT_OK
+        try:
+            logfile = _default_manager().service.logfile
+            logfile.parent.mkdir(parents=True, exist_ok=True)
+            with open(logfile, "a", encoding="utf-8") as log, contextlib.redirect_stderr(log):
+                _maybe_autostart_daemon(quiet=False)
+        finally:
+            confirmed = config.load_settings().mic_daemon_autostart is True
+            count = 0 if confirmed else attempts.count
+            _AutostartAttempts(count, attempts.requested, time.time()).write()
+    return EXIT_OK
 
 
 # `--fix` waits on a person, so its budget is a person's: ten minutes to find the window
@@ -1020,8 +1212,8 @@ def _lifecycle(argv: list[str]) -> int:
             # grown past the size guard, an `OSError` out of the write itself — `ENOSPC` and
             # friends are not `SttError`s — ...) must not make this whole command look like
             # it failed — but it must not go unnoticed either: an un-persisted `disable`
-            # leaves `mic_daemon_autostart` at `None`, so the very next successful ad-hoc
-            # dictation would silently re-enable the daemon this command just turned off.
+            # leaves `mic_daemon_autostart` at `None`, so the very next `stt` command would
+            # silently re-enable the daemon this command just turned off (#105).
             try:
                 config.save_setting("mic_daemon_autostart", ns.action == "enable")
             except (SttError, OSError) as broken:
@@ -1029,7 +1221,7 @@ def _lifecycle(argv: list[str]) -> int:
 
                 status.note(
                     f"`stt mic {ns.action}` succeeded, but recording that decision failed: "
-                    f"{broken} — a later ad-hoc dictation may re-decide this on its own",
+                    f"{broken} — a later `stt` command may re-decide this on its own",
                     quiet=False,
                 )
     return exit_code
