@@ -449,6 +449,22 @@ def test_a_repainted_line_never_wraps_in_a_narrow_terminal(narrow_terminal) -> N
     assert shown == ["● listening  ✓ a line with a newline in it"], "one row, the latest"
 
 
+def test_a_note_printed_while_the_line_is_up_gets_a_row_of_its_own(narrow_terminal) -> None:
+    """A burst's "listening … click Stop" note arrives once the Stop button has been looked
+    up — often after the microphone painted its first frame. Printed over that frame, the
+    note was glued to its end and the next repaint left the glued row behind."""
+    from stt_cli.live import status
+
+    with contextlib.redirect_stderr(narrow_terminal):
+        line = status.Line()
+        line.show("● start speaking")
+        line.note("listening on Mic — Ctrl-C to finish", quiet=False)
+        line.show("● listening  hello")
+
+    shown = [row for row in _rows(narrow_terminal.getvalue(), 50) if row]
+    assert shown == ["stt: listening on Mic — Ctrl-C to finish", "● listening  hello"]
+
+
 def test_a_resize_between_repaints_is_measured_and_the_erase_fits_too(narrow_terminal) -> None:
     """A phone turned from landscape to portrait mid-sentence: the frame after the resize is
     fitted to the new width, and so is the padding that erases the wider frame before it —
@@ -1253,6 +1269,62 @@ def test_a_second_dictation_is_refused_while_one_is_running(tmp_path, monkeypatc
 
     with _the_only_session():
         pass  # and the lock is gone once the first one finishes
+
+
+async def test_ad_hoc_dictation_builds_the_helper_only_once_it_is_really_going_to_dictate(
+    tmp_path, monkeypatch
+) -> None:
+    """The first `stt mic` builds `stt.app` so its bursts get a Stop button (#99) — but after
+    the device, the one-session lock and whisper-server are settled: a compile is minutes,
+    and none of those refusals should cost one first."""
+    import argparse
+
+    from stt_cli._errors import MissingDependencyError, UsageError
+    from stt_cli.live import capture, dictation, helper, quartz
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(quartz, "require_accessibility", lambda: None)
+    monkeypatch.setattr(helper, "can_build", lambda: True)
+    order: list[str] = []
+    monkeypatch.setattr(helper, "ensure", lambda *, say, wait: order.append("ensure"))
+
+    class _Loaded(Exception):
+        pass
+
+    @contextlib.asynccontextmanager
+    async def models(args, settings):
+        order.append("models")
+        raise _Loaded
+        yield
+
+    monkeypatch.setattr(dictation, "_models", models)
+    args = argparse.Namespace(device="1", quiet=True)
+
+    async def no_such_device(device):
+        raise UsageError(what="no such device", why="", how="")
+
+    monkeypatch.setattr(capture, "resolve", no_such_device)
+    with pytest.raises(UsageError):
+        await dictation.dictate(args)
+    assert order == [], "a wrong device is refused before any build"
+
+    async def a_device(device):
+        return object()
+
+    monkeypatch.setattr(capture, "resolve", a_device)
+    with dictation._the_only_session(), pytest.raises(UsageError):
+        await dictation.dictate(args)
+    assert order == [], "so is a second session"
+
+    monkeypatch.setattr(dictation.whispercpp, "server_binary", lambda root: None)
+    with pytest.raises(MissingDependencyError):
+        await dictation.dictate(args)
+    assert order == [], "and so is a Mac with no whisper-server"
+
+    monkeypatch.setattr(dictation.whispercpp, "server_binary", lambda root: Path("whisper-server"))
+    with pytest.raises(_Loaded):
+        await dictation.dictate(args)
+    assert order == ["ensure", "models"], "built before the first burst, not after it"
 
 
 def test_a_device_name_cannot_end_the_applescript_string_it_is_put_in() -> None:

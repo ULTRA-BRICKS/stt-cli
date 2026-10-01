@@ -196,12 +196,14 @@ def _notification_stop_line() -> None:
     from ..live import helper, status
 
     state = helper.state()
+    button = status.stop_button()  # what a burst will actually use
     if state == "current":
         permission = helper.notification_permission() or "unknown"
         allowed, _, style = permission.partition(" ")
-        ok = allowed in ("authorized", "provisional", "not-determined")
         where = f"{helper.app_path()} (notifications: {allowed}, style {style or 'unknown'})"
-        print(f"  {_mark(ok)} mic notification Stop button: {where}")
+        if button is not None and not button.via_helper:
+            where = f"terminal-notifier, since {where}"
+        print(f"  {_mark(button is not None)} mic notification Stop button: {where}")
         if allowed == "denied":
             print("      fix: System Settings > Notifications > stt > Allow notifications")
         elif style == "banner":
@@ -210,11 +212,10 @@ def _notification_stop_line() -> None:
                 "Notifications > stt > Alerts keeps the Stop button on screen"
             )
         return
-    fallback = status._terminal_notifier()
     missing = (
         f"{helper.APP_NAME} not built" if state == "missing" else f"{helper.APP_NAME} out of date"
     )
-    if fallback:
+    if button is not None:
         print(f"  {_mark(True)} mic notification Stop button: terminal-notifier ({missing})")
     else:
         print(f"  {_mark(False)} mic notification Stop button: {missing}")

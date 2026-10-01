@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .. import portable
 from .._errors import MissingDependencyError, SttError
 
 APP_NAME = "stt.app"
@@ -56,7 +57,7 @@ EXECUTABLE = "stt"
 SOURCE = Path(__file__).resolve().parent.parent / "helper_app" / "main.swift"
 # Bumped when the build itself changes (flags, Info.plist) without the source changing, so
 # an installed copy built the old way counts as stale.
-_RECIPE = 1
+_RECIPE = 2  # 2: `codesign --timestamp=none`
 _DIGEST_KEY = "STTSourceDigest"
 _CERT_NAME = "stt local code signing"
 _TIMEOUT = 120.0
@@ -128,19 +129,40 @@ def current() -> Path | None:
     return executable() if state() == "current" else None
 
 
-def ensure(*, say: bool = True) -> Path | None:
+def can_build() -> bool:
+    """Whether `build` has what it needs here: macOS and the Swift compiler."""
+    return _MACOS and shutil.which("swiftc") is not None
+
+
+def ensure(*, say: bool = True, wait: bool = True) -> Path | None:
     """Build and install the helper unless an up-to-date one is already there; return its
     executable, or `None` (with one line saying why, unless ``say`` is false) when it cannot
-    be built here. Never raises: the hotkey stops a burst with or without the helper."""
+    be built here. Never raises: the hotkey stops a burst with or without the helper.
+    ``wait=False`` returns `None` at once while another stt is building it, rather than
+    sitting behind a compile nothing on screen explains."""
     if not _MACOS:
         return None
     found = current()
     if found is not None:
         return found
-    if say:
-        print(f"stt: building {APP_NAME} (the notification Stop button)…", file=sys.stderr)
     try:
-        built = build()
+        with _exclusive(blocking=wait, waiting=say):
+            # Another stt (the autostart worker, `stt doctor --fix`) may have built it while
+            # this one waited for the lock.
+            found = current()
+            if found is not None:
+                return found
+            if say:
+                print(f"stt: building {APP_NAME} (the notification Stop button)…", file=sys.stderr)
+            built = _build()
+    except _Busy:
+        if say:
+            print(
+                f"stt: another stt is building {APP_NAME} — this dictation starts without its "
+                "Stop button",
+                file=sys.stderr,
+            )
+        return None
     except (SttError, OSError) as failed:
         if say:
             why = f"{failed.what}: {failed.why}" if isinstance(failed, SttError) else str(failed)
@@ -200,10 +222,45 @@ def info_plist() -> dict[str, object]:
     }
 
 
-def build() -> Built:
-    """Compile, sign and install `stt.app`. The copy it replaces is kept beside it until the
-    new one is in place and put back if that fails, so an interrupted rebuild never leaves
-    the daemon's launchd job pointing at nothing."""
+def build(*, force: bool) -> Built | None:
+    """Compile, sign and install `stt.app`, one build at a time on this Mac. Unless
+    ``force``, `None` without building when the copy there is current once this one's turn
+    comes — another stt built it while this one waited."""
+    with _exclusive(waiting=True):
+        if not force and current() is not None:
+            return None
+        return _build()
+
+
+class _Busy(Exception):
+    """Another stt holds the build lock, and the caller chose not to wait for it."""
+
+
+@contextlib.contextmanager
+def _exclusive(*, blocking: bool = True, waiting: bool = False) -> Iterator[None]:
+    """Two builds at once would trade renames and edit the user's keychain search list over
+    each other's heads; they queue on a lock file beside the app instead. ``blocking=False``
+    raises `_Busy` rather than queue; ``waiting`` says so before queueing, since the build
+    in front may be a compile of minutes that nothing else on screen explains."""
+    install_dir().mkdir(parents=True, exist_ok=True)
+    with (install_dir() / ".stt-helper.lock").open("a") as handle:
+        try:
+            portable.lock(handle, blocking=False)
+        except OSError as held:
+            if not blocking:
+                raise _Busy from held
+            if waiting:
+                print(
+                    f"stt: waiting for another stt to finish building {APP_NAME}…", file=sys.stderr
+                )
+            portable.lock(handle)
+        yield
+
+
+def _build() -> Built:
+    """The build itself. The copy it replaces is kept beside it until the new one is in
+    place and put back if that fails, so an interrupted rebuild never leaves the daemon's
+    launchd job pointing at nothing."""
     swiftc = shutil.which("swiftc")
     if swiftc is None:
         raise MissingDependencyError(
@@ -246,6 +303,8 @@ def build() -> Built:
 def sign(app: Path) -> Signing:
     developer = _developer_id()
     if developer is not None:
+        # No fallback when it fails: a helper signed some other way is a different
+        # principal to macOS, and replacing a granted one would take its permissions away.
         _codesign(app, developer)
         return "developer-id"
     try:
@@ -260,7 +319,18 @@ def sign(app: Path) -> Signing:
 
 def _codesign(app: Path, identity: str) -> None:
     _run(
-        ["codesign", "--force", "--sign", identity, "--identifier", BUNDLE_ID, str(app)],
+        # No secure timestamp: it would make every rebuild depend on reaching Apple, and the
+        # requirement macOS checks a grant against is evaluated locally.
+        [
+            "codesign",
+            "--force",
+            "--timestamp=none",
+            "--sign",
+            identity,
+            "--identifier",
+            BUNDLE_ID,
+            str(app),
+        ],
         what=f"signing {APP_NAME} failed",
     )
 

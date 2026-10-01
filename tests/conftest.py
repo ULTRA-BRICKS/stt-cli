@@ -92,7 +92,7 @@ def _never_the_real_helper_app(
     def refused() -> helper.Built:
         raise helper.HelperBuildError(what="tests never build stt.app", why="", how="")
 
-    monkeypatch.setattr(helper, "build", refused)
+    monkeypatch.setattr(helper, "_build", refused)
 
 
 @pytest.fixture

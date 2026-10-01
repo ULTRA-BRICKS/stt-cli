@@ -656,12 +656,21 @@ def autostart_after(argv: list[str]) -> None:
         now = time.time()
         if not attempts.due(now) or not _service_lib_installed():
             return
-        from ..live import permissions, status
+        from ..live import helper, permissions, status
 
+        # The worker builds `stt.app` before enabling, and then macOS asks for "stt", not
+        # for this interpreter (#99) — unless a daemon enabled before the helper existed is
+        # already installed: the worker leaves that job alone, and it still runs as Python.
+        builds = helper.installed() is not None or helper.can_build()
+        principal = (
+            permissions.HELPER_PRINCIPAL
+            if builds and _daemon_outside_helper() is None
+            else permissions.principal_name()
+        )
         again = "turning on" if attempts.count == 0 else "trying again to turn on"
         message = (
             f"{again} the background dictation daemon, so the hotkey works from any "
-            f"application — when macOS asks, turn on {permissions.principal_name()} in System "
+            f"application — when macOS asks, turn on {principal} in System "
             "Settings > Privacy & Security > Accessibility and allow its microphone; `stt mic "
             "disable` turns this off."
         )
@@ -1367,9 +1376,13 @@ def _helper_command(argv: list[str]) -> int:
             how="nothing to do on this platform: the hotkey stops a dictation",
         )
     if not ns.rebuild and helper.state() == "current":
+        built = None
+    else:
+        # `None` here too when another stt built it while this one waited for the lock.
+        built = helper.build(force=ns.rebuild)
+    if built is None:
         print(f"{helper.app_path()} is up to date")
     else:
-        built = helper.build()
         print(f"installed {built.app} ({helper.describe(built.signing)})")
     moved = _daemon_outside_helper()
     if moved is not None:

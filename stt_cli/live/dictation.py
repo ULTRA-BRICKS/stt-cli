@@ -22,7 +22,7 @@ from typing import Any
 from .. import config, dictionary, model_gate, phrases, portable
 from .._errors import EXIT_OK, EngineError, MissingDependencyError, UsageError
 from ..backends import whispercpp
-from . import capture, hotkey, permissions, quartz, status, tap
+from . import capture, helper, hotkey, permissions, quartz, status, tap
 from .gate import Gate
 from .server import Transcriber, Voice, WhisperServer
 from .session import IDLE_MINUTES, Progress, Session
@@ -81,6 +81,15 @@ async def dictate(args: argparse.Namespace) -> int:
     # couple of gigabytes, and a second `stt mic` used to pay both of those before being told
     # that the first one already had the keyboard.
     with _the_only_session():
+        # The demo path gets the same Stop button as the daemon (#99): built here on the
+        # first run, not after it by the autostart worker, which would be one dictation too
+        # late — and after the cheap refusals (a wrong device, a second session, no
+        # whisper-server), so none of them costs a compile first. Not behind another stt's
+        # build, though (the autostart worker starts one on the first `stt` command): that
+        # one says so and dictates without it. No Swift compiler: the listening line says so.
+        _server(settings)
+        if helper.can_build():
+            await asyncio.to_thread(helper.ensure, say=not args.quiet, wait=False)
         async with _models(args, settings) as models:
             said = await _dictate_until_stopped(args, device, models, settings)
     if said:
@@ -99,17 +108,7 @@ class Models:
 @contextlib.asynccontextmanager
 async def _models(args: argparse.Namespace, settings: config.Settings) -> AsyncIterator[Models]:
     """Load both models, each under a slot of its own, and unload them however the block ends."""
-    # The configured checkout, not just PATH. Someone whose whisper.cpp lives somewhere they
-    # told stt about could transcribe files perfectly well and be told by `stt mic` that
-    # whisper-server does not exist — the two commands disagreeing about an installation the
-    # user had already configured once.
-    binary = whispercpp.server_binary(settings.whispercpp_root)
-    if binary is None:
-        raise MissingDependencyError(
-            what="whisper-server was not found",
-            why="live dictation keeps a model loaded, which whisper-cli cannot do",
-            how=SERVER_HINT,
-        )
+    binary = _server(settings)
     language = args.language or settings.language or "auto"
     engine = whispercpp.WhisperCppBackend(settings.whispercpp_root)
     wanted = [_settled_model(args, settings)]
@@ -144,6 +143,21 @@ async def _models(args: argparse.Namespace, settings: config.Settings) -> AsyncI
     finally:
         for load in loads:
             model_gate.release(load.slot)
+
+
+def _server(settings: config.Settings) -> Path:
+    """`whisper-server`, from the configured checkout, not just PATH. Someone whose
+    whisper.cpp lives somewhere they told stt about could transcribe files perfectly well
+    and be told by `stt mic` that whisper-server does not exist — the two commands
+    disagreeing about an installation the user had already configured once."""
+    binary = whispercpp.server_binary(settings.whispercpp_root)
+    if binary is None:
+        raise MissingDependencyError(
+            what="whisper-server was not found",
+            why="live dictation keeps a model loaded, which whisper-cli cannot do",
+            how=SERVER_HINT,
+        )
+    return binary
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,11 +299,7 @@ async def _dictate_until_stopped(
     )
     watcher = _watch(dictating, marker)
     try:
-        hint = status.stop_hint("Ctrl-C in the terminal")
-        status.note(
-            f"listening on {device.name} — {hint}{_notification_absence_note()}",
-            quiet=args.quiet,
-        )
+        listening = f"listening on {device.name}"
         mic = asyncio.create_task(
             _through_the_microphone(
                 device,
@@ -301,7 +311,7 @@ async def _dictate_until_stopped(
             )
         )
         notif = asyncio.create_task(
-            status.stop_notification(f"listening on {device.name} — {hint}", quiet=args.quiet)
+            _announce(line, listening, "Ctrl-C in the terminal", quiet=args.quiet, first=True)
         )
         try:
             return await _race_burst_signals(dictating, mic, notif)
@@ -823,9 +833,10 @@ async def _idle_loop(
     advising: asyncio.Task[None] | None = None
     try:
         permissions.mark_ready()
+        absence = "" if args.quiet else _notification_absence_note(await _burst_button(quiet=False))
         status.note(
             f"stt mic daemon ready — {_ready_hint(press, hold, stop)}; `stt mic stop` to quit"
-            f"{_notification_absence_note()}",
+            f"{absence}",
             quiet=args.quiet,
         )
         advising = asyncio.create_task(_say_globe_key_advice(hold, quiet=args.quiet))
@@ -1004,8 +1015,7 @@ async def _burst(ctx: _BurstContext, armed: hotkey.Combo, kind: hotkey.BindingKi
     )
     ctx.active.open(dictating)
     try:
-        hint = _off_hint(kind, armed, ctx.stop)
-        status.note(f"listening on {ctx.device.name} — {hint}", quiet=ctx.args.quiet)
+        listening = f"listening on {ctx.device.name}"
         mic = asyncio.create_task(
             _through_the_microphone(
                 ctx.device,
@@ -1019,9 +1029,7 @@ async def _burst(ctx: _BurstContext, armed: hotkey.Combo, kind: hotkey.BindingKi
         )
         off = asyncio.create_task(_await_release(ctx.bus, armed, kind, ctx.stop))
         notif = asyncio.create_task(
-            status.stop_notification(
-                f"listening on {ctx.device.name} — {hint}", quiet=ctx.args.quiet
-            )
+            _announce(line, listening, _off_action(kind, armed, ctx.stop), quiet=ctx.args.quiet)
         )
         try:
             return await _race_burst_signals(dictating, mic, off, notif)
@@ -1060,27 +1068,55 @@ async def _await_release(
             return True
 
 
-def _off_hint(
+def _off_action(
     kind: hotkey.BindingKind, combo: hotkey.Combo, stop: hotkey.Combo | None = None
 ) -> str:
+    """What always ends a burst armed by ``combo``: the chord again, or letting it go."""
     if kind == "hold":
         action = f"release {combo.spec}"
     elif stop is not None:
         action = f"press {combo.spec} again or {stop.spec}"
     else:
         action = f"press {combo.spec} again"
-    return status.stop_hint(action)
+    return action
 
 
-def _notification_absence_note() -> str:
-    """Appended to the daemon-ready line and the ad-hoc session's first line ONLY when no
-    Stop button can be drawn (no `stt.app`, no terminal-notifier). Alex asked for a Stop
-    button that is ALWAYS there (#79, #99), so its absence has to be a visible fact about
-    THIS run, printed once before any burst, together with the command that adds it. Empty
-    when there is one: the notification itself then says "or click Stop".
+async def _burst_button(*, quiet: bool) -> status.StopButton | None:
+    """This burst's Stop button, found once and off the event loop (`status.stop_button`
+    starts a process) — and not at all when quiet, since no notification goes out then."""
+    return None if quiet else await asyncio.to_thread(status.stop_button)
+
+
+async def _announce(
+    line: status.Line, listening: str, guaranteed: str, *, quiet: bool, first: bool = False
+) -> bool:
+    """A burst's status line and its notification, raced like the microphone they describe
+    (`_race_burst_signals`); ``True`` only when Stop was clicked. Started after the
+    microphone, not before it: finding the button asks the helper, and a burst whose first
+    words wait on that loses them. Both say the same thing about the button because both
+    read the one answer. ``first`` adds the absence note, for the ad-hoc session's one line.
     """
-    if status.stop_button_available():
+    button = await _burst_button(quiet=quiet)
+    hint = status.stop_hint(guaranteed, button=button is not None)
+    absence = _notification_absence_note(button) if first and not quiet else ""
+    line.note(f"{listening} — {hint}{absence}", quiet=quiet)
+    return await status.stop_notification(listening, guaranteed, button, quiet=quiet)
+
+
+def _notification_absence_note(button: status.StopButton | None) -> str:
+    """Appended to the daemon-ready line and the ad-hoc session's first line ONLY when no
+    Stop button can be drawn (no `stt.app`, notifications turned off for it, no
+    terminal-notifier). Alex asked for a Stop button that is ALWAYS there (#79, #99), so its
+    absence has to be a visible fact about THIS run, printed once before any burst, together
+    with what adds it. Empty when there is one: the notification itself then says "or click
+    Stop". A current helper with no button is one macOS refused notifications — the only
+    reason `status.stop_button` passes it over — so that is read from ``button`` and a file,
+    not asked of the helper a second time.
+    """
+    if button is not None:
         return ""
+    if helper.current() is not None:
+        return f" ({status.DENIED_NOTE})"
     return f" (no Stop button on the notification — `{status.INSTALL_HINT}` adds one)"
 
 

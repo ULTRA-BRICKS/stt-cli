@@ -89,13 +89,17 @@ def under_launchd(label: str | None) -> bool:
     return label is not None and os.environ.get("XPC_SERVICE_NAME") == label
 
 
+# How System Settings lists `stt.app`, quoted the way every principal name here is.
+HELPER_PRINCIPAL = "'stt'"
+
+
 def principal_name() -> str:
     """The entry the user has to turn on for the launchd daemon, as System Settings lists
     it: "stt" when launchd started `stt.app` (#99), otherwise the interpreter launchd
     execs, resolved like `principal_key` — a venv's `python` is a symlink, and macOS lists
     the binary it points to."""
     if os.environ.get(HELPER_ENV):
-        return "'stt'"
+        return HELPER_PRINCIPAL
     return f"'{Path(principal_key()).name}'"
 
 
