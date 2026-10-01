@@ -92,7 +92,21 @@ def _serve_argv(extra_argv: list[str]) -> list[str]:
     # tools were found, so it travels with the argv (`commands/mic.py::_serve` applies it).
     search_path = os.environ.get("PATH")
     path_flag = [f"{PATH_FLAG}={search_path}"] if search_path else []
-    return [*stt_entry(), "mic", SERVE_TOKEN, *path_flag, *extra_argv]
+    return [*_principal(), *stt_entry(), "mic", SERVE_TOKEN, *path_flag, *extra_argv]
+
+
+def _principal() -> list[str]:
+    """``stt.app/Contents/MacOS/stt run --`` in front of the daemon's command once the
+    helper is installed (`helper.py`, #99). launchd then starts the helper, the helper
+    starts stt as its child, and macOS files the daemon's Accessibility and Microphone
+    under "stt" — this bundle's identifier and signature — rather than under the Python
+    interpreter, which a `brew upgrade` replaces with a new principal holding no grants.
+    Any installed copy will do, even one older than the source: `run` has not changed, and
+    the path is what launchd keeps."""
+    from . import helper
+
+    found = helper.installed()
+    return [str(found), "run", "--"] if found is not None else []
 
 
 def autostart_worker_argv() -> list[str]:

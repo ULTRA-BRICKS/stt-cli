@@ -434,12 +434,18 @@ through; `hotkey_hold` is push-to-talk in the literal, radio sense — dictate e
 the chord is held, stop the instant you release it — and defaults to unset (disabled) until
 you choose one. Either way, because both models are already loaded, the delay between the
 hotkey and the microphone being live is under a second — a cold ad-hoc dictation (`stt mic
---device 0`, or any other flag) spends 30-45 seconds loading them first. A system
-notification with a Stop button is also available during a burst, on both this daemon path
-and the ad-hoc path above, when `terminal-notifier` is installed (`brew install
-terminal-notifier` — optional; `stt doctor` reports whether it is present); the hotkey
-itself (press again, or release) always works regardless of whether that optional tool is
-installed.
+--device 0`, or any other flag) spends 30-45 seconds loading them first. Every burst, on
+both this daemon path and the ad-hoc path above, posts a notification that says how to stop
+(the chord to press again or release, or Ctrl-C) and carries a Stop button. stt draws that
+button with a small app of its own, `stt.app`, which it builds from the Swift source it
+ships and installs in `~/Applications`: `stt mic helper` is the build step, and `stt mic
+enable` and `stt doctor --fix` run it too (it needs the Swift compiler: `xcode-select
+--install`). The first notification asks once whether stt may send notifications. Once the
+app is installed, the background daemon also runs inside it, so macOS lists its
+Accessibility and Microphone permissions under "stt" and a Python upgrade no longer takes
+them away (a daemon enabled earlier moves over with `stt mic disable && stt mic enable`).
+Without the app, terminal-notifier 3.x draws the button if it is installed; the hotkey (or
+Ctrl-C) always stops a dictation either way.
 
 Every chord needs cmd or ctrl, plus any of shift, opt and fn, and one key (a letter, digit,
 punctuation, space, tab, return, delete, an arrow, f1-f12): stt only listens to the

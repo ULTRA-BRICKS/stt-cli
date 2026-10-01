@@ -1047,7 +1047,7 @@ def _wire_fakes(monkeypatch):
     typed: list[str] = []
     monkeypatch.setattr(dictation.quartz, "type_text", lambda text, *, marker: typed.append(text))
     monkeypatch.setattr(dictation.quartz, "press_backspace", lambda times, *, marker: None)
-    monkeypatch.setattr(dictation.status, "notifier_available", lambda: False)
+    monkeypatch.setattr(dictation.status, "stop_button", lambda: None)
     watchers: list[_FakeWatcher] = []
 
     def fake_watcher(*, marker, on_key, hotkeys=(), on_hotkey=None):
@@ -1570,40 +1570,38 @@ def test_ready_hint_lists_only_the_bindings_that_are_actually_configured() -> No
     assert "(cmd+shift+x also stops it)" in _ready_hint(press, hold, stop)
 
 
-def test_notification_absence_note_is_empty_when_available_and_explicit_when_not(
-    monkeypatch,
-) -> None:
+def test_notification_absence_note_is_empty_when_available_and_explicit_when_not() -> None:
     """The exact spot ticket #79 names for the daemon's startup banner: silent when the
     notification Stop button works, explicit (naming the install hint) when it does not."""
     from stt_cli.live import dictation, status
 
-    monkeypatch.setattr(status, "notifier_available", lambda: True)
-    assert dictation._notification_absence_note() == ""
+    button = status.StopButton("/Applications/stt.app/Contents/MacOS/stt", via_helper=True)
+    assert dictation._notification_absence_note(button) == ""
 
-    monkeypatch.setattr(status, "notifier_available", lambda: False)
-    note = dictation._notification_absence_note()
+    note = dictation._notification_absence_note(None)
     assert status.INSTALL_HINT in note
 
 
-def test_off_hint_uses_the_shared_stop_hint_for_press_and_hold(monkeypatch) -> None:
+def test_off_hint_says_how_to_stop_in_the_spec_s_words_for_press_and_hold() -> None:
+    """docs/specs/live-dictation-ux.md section 6.2: the notification names the chord to
+    press again or release, and the Stop button only where one can be drawn."""
     from stt_cli.live import hotkey as hotkey_mod
     from stt_cli.live import status
-    from stt_cli.live.dictation import _off_hint
+    from stt_cli.live.dictation import _off_action
 
-    monkeypatch.setattr(status, "notifier_available", lambda: True)
+    def _off_hint(kind, combo, stop=None, *, button=True):  # a burst's status line
+        return status.stop_hint(_off_action(kind, combo, stop), button=button)
+
     press = hotkey_mod.parse("cmd+shift+space")
     hold = hotkey_mod.parse("ctrl+opt+d")
-    assert (
-        _off_hint("press", press)
-        == "press cmd+shift+space again, or click Stop on the notification, to finish"
-    )
-    assert (
-        _off_hint("hold", hold)
-        == "release ctrl+opt+d, or click Stop on the notification, to finish"
-    )
+    assert _off_hint("press", press) == "press cmd+shift+space again, or click Stop, to finish"
+    assert _off_hint("hold", hold) == "release ctrl+opt+d, or click Stop, to finish"
     stop = hotkey_mod.parse("cmd+shift+x", binding="hotkey_stop")
     assert _off_hint("press", press, stop).startswith("press cmd+shift+space again or cmd+shift+x")
     assert _off_hint("hold", hold, stop).startswith("release ctrl+opt+d,"), "a hold ignores stop"
+
+    assert _off_hint("press", press, button=False) == "press cmd+shift+space again to finish"
+    assert _off_hint("hold", hold, button=False) == "release ctrl+opt+d to finish"
 
 
 def test_refuse_colliding_hotkey_flags_catches_shared_keycode_before_enable_installs_anything(

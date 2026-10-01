@@ -8,8 +8,9 @@ dictionary reaches both, so a project name comes out spelled the way you wrote i
 
 Press any key yourself and stt stops correcting the sentence in flight and leaves it alone —
 it will never delete a character it did not type. Pressing the hotkey again (or releasing
-it, for a push-to-talk one) always ends the session; a system notification's Stop button
-does too, when `terminal-notifier` is installed (optional — `stt doctor` reports it).
+it, for a push-to-talk one) always ends the session; so does the Stop button on the
+notification every session posts, which stt draws with its own small helper app, `stt.app`
+(`stt mic helper` builds it; `stt mic enable` and `stt doctor --fix` do too).
 
 A bare `stt mic` (no arguments at all) is a literal alias for `stt mic --help` — see below
 for every flag, including `run`/`start`/`status`/`stop`/`enable`/`disable`, which manage a
@@ -78,6 +79,8 @@ DEFAULT_DRAFT = "base"
 # The words that mean "manage the background daemon" rather than "dictate now, ad-hoc". None
 # of the ad-hoc flags below start with one of these bare words, so the split is unambiguous.
 _LIFECYCLE = ("run", "start", "stop", "status", "enable", "disable")
+# `stt mic helper`: build and install `stt.app` (see `live/helper.py`, #99).
+HELPER = "helper"
 
 # `agenttools_service.run_action`'s own convention (its docstring: "3 when status/stop find
 # nothing running") — `_status` returns it too when IT is the one deciding nothing is
@@ -111,6 +114,8 @@ def run(argv: list[str]) -> int:
         return _autostart_worker()
     if argv and argv[0] in _LIFECYCLE:
         return _lifecycle(argv)
+    if argv and argv[0] == HELPER:
+        return _helper_command(argv[1:])
     if not argv:
         # A bare `stt mic` is a literal alias for `stt mic --help` — argparse's own,
         # unchanged mechanism, not a custom screen. Alex, this session: "stt mic должен
@@ -446,6 +451,13 @@ def _maybe_autostart_daemon(*, quiet: bool) -> None:
     crash: LaunchdProbe | None = None
     freshly_enabled = False
     waiting: str | None = None
+    from ..live import helper
+
+    # Before the argv is built: with `stt.app` installed, launchd starts it rather than the
+    # interpreter, and the daemon's permissions belong to "stt" (#99). Outside the lock — a
+    # first build is a Swift compile, and `stt mic disable` in another shell must not wait
+    # behind it.
+    helper.ensure()
     try:
         with config.locked_for_daemon_decision():
             if config.load_settings().mic_daemon_autostart not in (
@@ -644,12 +656,21 @@ def autostart_after(argv: list[str]) -> None:
         now = time.time()
         if not attempts.due(now) or not _service_lib_installed():
             return
-        from ..live import permissions, status
+        from ..live import helper, permissions, status
 
+        # The worker builds `stt.app` before enabling, and then macOS asks for "stt", not
+        # for this interpreter (#99) — unless a daemon enabled before the helper existed is
+        # already installed: the worker leaves that job alone, and it still runs as Python.
+        builds = helper.installed() is not None or helper.can_build()
+        principal = (
+            permissions.HELPER_PRINCIPAL
+            if builds and _daemon_outside_helper() is None
+            else permissions.principal_name()
+        )
         again = "turning on" if attempts.count == 0 else "trying again to turn on"
         message = (
             f"{again} the background dictation daemon, so the hotkey works from any "
-            f"application — when macOS asks, turn on {permissions.principal_name()} in System "
+            f"application — when macOS asks, turn on {principal} in System "
             "Settings > Privacy & Security > Accessibility and allow its microphone; `stt mic "
             "disable` turns this off."
         )
@@ -725,7 +746,10 @@ def _autostart_worker() -> int:
     so the backoff starts over from the beginning if the record is ever unset again.
     """
     from .. import config
+    from ..live import helper
 
+    # Outside the lock, for the reason `_maybe_autostart_daemon` gives; it finds it built.
+    helper.ensure(say=False)
     with config.locked_for_daemon_decision():
         attempts = _AutostartAttempts.read()
         if attempts.finished >= attempts.requested:
@@ -1025,8 +1049,8 @@ def _parse(argv: list[str]) -> argparse.Namespace:
             "while you are still speaking, then the accurate model replaces them a moment "
             "later with punctuation and proper nouns corrected. any key you press yourself "
             "stops that second pass on the sentence in flight; Ctrl-C always finishes the "
-            "session, and so does a notification's Stop button when `terminal-notifier` is "
-            "installed (optional — `stt doctor` reports it). "
+            "session, and so does the Stop button on the notification each session posts "
+            "(drawn by stt's own helper app — `stt mic helper` builds it). "
             "needs Accessibility and Microphone granted to the TERMINAL running stt (not "
             "stt itself) — System Settings > Privacy & Security. if nothing appears at all, "
             "`stt mic --check` shows what the microphone actually hears against the bar it "
@@ -1093,9 +1117,9 @@ def _daemon_parser() -> argparse.ArgumentParser:
             "--hotkey-hold are INDEPENDENT bindings, both settable at once, and "
             "--hotkey-stop is an optional third chord for press bursts only: pressing the "
             "press-chord again (or --hotkey-stop), or releasing the hold-chord, ends the "
-            "burst it started — and a system notification's Stop button works too, for "
-            "either one, from anywhere, when `terminal-notifier` is installed (optional — "
-            "`stt doctor` reports it; the hotkey itself always works regardless). hotkeys — "
+            "burst it started — and so does the Stop button on the notification each "
+            "burst posts, for either one, from anywhere (drawn by stt's own helper app, "
+            "`stt mic helper`; the hotkey itself always works regardless). hotkeys — "
             f"{hotkey_mod.MODIFIER_RULE}. a press chord may not be an editing shortcut you "
             "press while dictating (cmd+z, cmd+c, cmd+v, cmd+a, cmd+s, cmd+arrows, ...). "
             "`stt mic stop` ends the daemon itself. needs Accessibility "
@@ -1175,6 +1199,12 @@ def _lifecycle(argv: list[str]) -> int:
     add_service_subcommands(subs, manager_factory=lambda: _manager(ns), service_name="mic")
     parser.parse_args(_reordered_for_argparse(argv), namespace=ns)
     _refuse_colliding_hotkey_flags(ns)
+    if ns.action in {"enable", "start", "run"}:
+        from ..live import helper
+
+        # Before `_manager` builds the daemon's argv, which starts with `stt.app` once it
+        # exists — and so that the daemon's bursts have their Stop button (#99).
+        helper.ensure()
     if ns.action in {"enable", "start"} and ns.hotkey_hold is not None:
         # `run` says this itself when the daemon comes up; a detached one only says it to
         # its log file, which nobody reads at the moment they bind fn.
@@ -1317,6 +1347,69 @@ def _reordered_for_argparse(argv: list[str]) -> list[str]:
     if not argv:
         return argv
     return [*argv[1:], argv[0]]
+
+
+def _helper_command(argv: list[str]) -> int:
+    """`stt mic helper [--rebuild]`: build `stt.app` from the Swift source shipped with stt
+    and install it in ~/Applications. It draws the Stop button on every burst's notification
+    and is what macOS grants the background daemon's permissions to (`live/helper.py`)."""
+    from ..live import helper
+
+    parser = argparse.ArgumentParser(
+        prog="stt mic helper",
+        description=(
+            f"build {helper.APP_NAME} — stt's own small app that draws the Stop button on "
+            "the notification every dictation posts, and that macOS grants the background "
+            "daemon's Accessibility and Microphone to — from the Swift source shipped with "
+            f"stt, and install it as {helper.app_path()}. needs the Swift compiler "
+            "(xcode-select --install). `stt mic enable` and `stt doctor --fix` run this too."
+        ),
+    )
+    parser.add_argument(
+        "--rebuild", action="store_true", help="build even when the installed copy is current"
+    )
+    ns = parser.parse_args(argv)
+    if sys.platform != "darwin":
+        raise UsageError(
+            what=f"{helper.APP_NAME} is macOS-only",
+            why="it is a macOS application bundle",
+            how="nothing to do on this platform: the hotkey stops a dictation",
+        )
+    if not ns.rebuild and helper.state() == "current":
+        built = None
+    else:
+        # `None` here too when another stt built it while this one waited for the lock.
+        built = helper.build(force=ns.rebuild)
+    if built is None:
+        print(f"{helper.app_path()} is up to date")
+    else:
+        print(f"installed {built.app} ({helper.describe(built.signing)})")
+    moved = _daemon_outside_helper()
+    if moved is not None:
+        print(
+            f"the background daemon still runs as {moved}; `stt mic disable && stt mic enable` "
+            f"moves it into {helper.APP_NAME}, and macOS then asks once for Accessibility and "
+            'Microphone for "stt" — grants a Python upgrade no longer takes away'
+        )
+    return EXIT_OK
+
+
+def _daemon_outside_helper() -> str | None:
+    """The program an installed LaunchAgent starts, when that is not `stt.app` — the daemon
+    enabled before the helper existed, still holding its permissions under Python."""
+    import plistlib
+
+    from ..live import helper
+
+    unit = Path.home() / "Library" / "LaunchAgents" / "com.agenttools.stt.mic.plist"
+    try:
+        with unit.open("rb") as handle:
+            program = plistlib.load(handle).get("ProgramArguments", [None])[0]
+    except (OSError, plistlib.InvalidFileException, ValueError, IndexError):
+        return None
+    if not isinstance(program, str) or program == str(helper.executable()):
+        return None
+    return program
 
 
 def _lifecycle_without_lib(argv: list[str]) -> int:

@@ -76,6 +76,25 @@ def _never_the_real_launchd(
     assert not reached, f"the suite must never reach the real launchd: {reached}"
 
 
+@pytest.fixture(autouse=True)
+def _never_the_real_helper_app(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A developer's Mac may have `~/Applications/stt.app` installed, and with it every
+    burst's notification and the daemon's launchd argv change. The suite sees an empty
+    Applications folder of its own instead, and a build — a Swift compile, a keychain — is
+    refused: a test that wants a helper installs a fake one there."""
+    from stt_cli.live import helper
+
+    apps = tmp_path_factory.mktemp("Applications")
+    monkeypatch.setattr(helper, "install_dir", lambda: apps)
+
+    def refused() -> helper.Built:
+        raise helper.HelperBuildError(what="tests never build stt.app", why="", how="")
+
+    monkeypatch.setattr(helper, "_build", refused)
+
+
 @pytest.fixture
 def autostart_hook() -> None:
     """Keep `cli.main`'s real post-command autostart hook for this test (see the module

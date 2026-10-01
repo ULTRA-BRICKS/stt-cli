@@ -69,6 +69,8 @@ _STATE = "mic-daemon-state.json"
 
 DaemonState = Literal["waiting-accessibility", "waiting-microphone", "starting", "ready"]
 _STATES: tuple[DaemonState, ...] = get_args(DaemonState)
+# Set by `stt.app run` for the daemon it starts (see `helper_app/main.swift`).
+HELPER_ENV = "STT_HELPER_APP"
 
 
 # ---------------------------------------------------------------------------------------
@@ -87,19 +89,31 @@ def under_launchd(label: str | None) -> bool:
     return label is not None and os.environ.get("XPC_SERVICE_NAME") == label
 
 
+# How System Settings lists `stt.app`, quoted the way every principal name here is.
+HELPER_PRINCIPAL = "'stt'"
+
+
 def principal_name() -> str:
     """The entry the user has to turn on for the launchd daemon, as System Settings lists
-    it: the interpreter launchd execs, resolved like `principal_key` — a venv's `python` is
-    a symlink, and macOS lists the binary it points to."""
+    it: "stt" when launchd started `stt.app` (#99), otherwise the interpreter launchd
+    execs, resolved like `principal_key` — a venv's `python` is a symlink, and macOS lists
+    the binary it points to."""
+    if os.environ.get(HELPER_ENV):
+        return HELPER_PRINCIPAL
     return f"'{Path(principal_key()).name}'"
 
 
 def principal_key() -> str:
-    """What the ledger keys "already asked" on: the REAL interpreter path. `brew upgrade`
-    moves it (a new Cellar directory), and macOS treats the moved binary as a new
-    principal with no grant — so it must be asked again, and a new key does exactly that.
-    Only the launchd daemon asks (`dictation._permissions`), so a terminal's answer can
-    never use up the daemon's one prompt."""
+    """What the ledger keys "already asked" on. Under `stt.app` (which says so in
+    ``STT_HELPER_APP`` to the command it starts) that is the app itself: its grants survive
+    Python upgrades, so the question is asked once. Otherwise the REAL interpreter path:
+    `brew upgrade` moves it (a new Cellar directory), and macOS treats the moved binary as
+    a new principal with no grant — so it must be asked again, and a new key does exactly
+    that. Only the launchd daemon asks (`dictation._permissions`), so a terminal's answer
+    can never use up the daemon's one prompt."""
+    app = os.environ.get(HELPER_ENV)
+    if app:
+        return os.path.realpath(app)
     return os.path.realpath(sys.executable)
 
 

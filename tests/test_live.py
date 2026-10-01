@@ -449,6 +449,22 @@ def test_a_repainted_line_never_wraps_in_a_narrow_terminal(narrow_terminal) -> N
     assert shown == ["● listening  ✓ a line with a newline in it"], "one row, the latest"
 
 
+def test_a_note_printed_while_the_line_is_up_gets_a_row_of_its_own(narrow_terminal) -> None:
+    """A burst's "listening … click Stop" note arrives once the Stop button has been looked
+    up — often after the microphone painted its first frame. Printed over that frame, the
+    note was glued to its end and the next repaint left the glued row behind."""
+    from stt_cli.live import status
+
+    with contextlib.redirect_stderr(narrow_terminal):
+        line = status.Line()
+        line.show("● start speaking")
+        line.note("listening on Mic — Ctrl-C to finish", quiet=False)
+        line.show("● listening  hello")
+
+    shown = [row for row in _rows(narrow_terminal.getvalue(), 50) if row]
+    assert shown == ["stt: listening on Mic — Ctrl-C to finish", "● listening  hello"]
+
+
 def test_a_resize_between_repaints_is_measured_and_the_erase_fits_too(narrow_terminal) -> None:
     """A phone turned from landscape to portrait mid-sentence: the frame after the resize is
     fitted to the new width, and so is the padding that erases the wider frame before it —
@@ -1253,6 +1269,62 @@ def test_a_second_dictation_is_refused_while_one_is_running(tmp_path, monkeypatc
 
     with _the_only_session():
         pass  # and the lock is gone once the first one finishes
+
+
+async def test_ad_hoc_dictation_builds_the_helper_only_once_it_is_really_going_to_dictate(
+    tmp_path, monkeypatch
+) -> None:
+    """The first `stt mic` builds `stt.app` so its bursts get a Stop button (#99) — but after
+    the device, the one-session lock and whisper-server are settled: a compile is minutes,
+    and none of those refusals should cost one first."""
+    import argparse
+
+    from stt_cli._errors import MissingDependencyError, UsageError
+    from stt_cli.live import capture, dictation, helper, quartz
+
+    monkeypatch.setenv("STT_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(quartz, "require_accessibility", lambda: None)
+    monkeypatch.setattr(helper, "can_build", lambda: True)
+    order: list[str] = []
+    monkeypatch.setattr(helper, "ensure", lambda *, say, wait: order.append("ensure"))
+
+    class _Loaded(Exception):
+        pass
+
+    @contextlib.asynccontextmanager
+    async def models(args, settings):
+        order.append("models")
+        raise _Loaded
+        yield
+
+    monkeypatch.setattr(dictation, "_models", models)
+    args = argparse.Namespace(device="1", quiet=True)
+
+    async def no_such_device(device):
+        raise UsageError(what="no such device", why="", how="")
+
+    monkeypatch.setattr(capture, "resolve", no_such_device)
+    with pytest.raises(UsageError):
+        await dictation.dictate(args)
+    assert order == [], "a wrong device is refused before any build"
+
+    async def a_device(device):
+        return object()
+
+    monkeypatch.setattr(capture, "resolve", a_device)
+    with dictation._the_only_session(), pytest.raises(UsageError):
+        await dictation.dictate(args)
+    assert order == [], "so is a second session"
+
+    monkeypatch.setattr(dictation.whispercpp, "server_binary", lambda root: None)
+    with pytest.raises(MissingDependencyError):
+        await dictation.dictate(args)
+    assert order == [], "and so is a Mac with no whisper-server"
+
+    monkeypatch.setattr(dictation.whispercpp, "server_binary", lambda root: Path("whisper-server"))
+    with pytest.raises(_Loaded):
+        await dictation.dictate(args)
+    assert order == ["ensure", "models"], "built before the first burst, not after it"
 
 
 def test_a_device_name_cannot_end_the_applescript_string_it_is_put_in() -> None:
@@ -2522,148 +2594,8 @@ async def test_a_stop_that_never_reached_the_tap_still_types_nothing() -> None:
 # ── ticket #79: the notification Stop button, and the guaranteed keyboard fallback ──
 
 
-class _FakeNotifierProcess:
-    """Stands in for the `Process` object `asyncio.create_subprocess_exec` returns — the
-    AppleScript/terminal-notifier subprocess boundary is what gets mocked for
-    `status.stop_notification`/`close_stop_notification`, never the logic that reads it."""
-
-    def __init__(self, *, stdout: bytes = b"") -> None:
-        self._stdout = stdout
-        self.killed = False
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        return self._stdout, b""
-
-    def kill(self) -> None:
-        self.killed = True
-
-
-def test_notifier_available_reflects_whether_terminal_notifier_is_on_path(monkeypatch) -> None:
-    from stt_cli.live import status
-
-    monkeypatch.setattr(status.shutil, "which", lambda name: "/opt/homebrew/bin/terminal-notifier")
-    assert status.notifier_available() is True
-    monkeypatch.setattr(status.shutil, "which", lambda name: None)
-    assert status.notifier_available() is False
-
-
-async def test_stop_notification_is_true_only_when_stop_was_the_button_clicked(monkeypatch) -> None:
-    from stt_cli.live import status
-
-    monkeypatch.setattr(status, "notifier_available", lambda: True)
-    seen: list[tuple] = []
-
-    async def fake_exec(*args, **kwargs):
-        seen.append(args)
-        return _FakeNotifierProcess(stdout=b"Stop\n")
-
-    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
-    assert await status.stop_notification("listening — click Stop", quiet=False) is True
-    assert seen[0][0] == "terminal-notifier"
-    assert "-actions" in seen[0]
-
-
-async def test_stop_notification_is_false_when_dismissed_or_closed_instead_of_clicked(
-    monkeypatch,
-) -> None:
-    from stt_cli.live import status
-
-    monkeypatch.setattr(status, "notifier_available", lambda: True)
-
-    async def fake_exec(*args, **kwargs):
-        return _FakeNotifierProcess(stdout=b"@CLOSED\n")
-
-    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
-    assert await status.stop_notification("listening", quiet=False) is False
-
-
-async def test_stop_notification_never_spawns_a_process_when_quiet_or_unavailable(
-    monkeypatch,
-) -> None:
-    """`quiet` and "terminal-notifier not installed" must not even try to launch a process —
-    a real spawn attempt on a machine without the binary would be a confusing `OSError`
-    every burst, not the one clean, once-at-startup fact `stt doctor`/the daemon banner
-    already report."""
-    from stt_cli.live import status
-
-    calls = 0
-
-    async def fake_exec(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return _FakeNotifierProcess()
-
-    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
-
-    monkeypatch.setattr(status, "notifier_available", lambda: True)
-    assert await status.stop_notification("x", quiet=True) is False
-
-    monkeypatch.setattr(status, "notifier_available", lambda: False)
-    assert await status.stop_notification("x", quiet=False) is False
-
-    assert calls == 0
-
-
-async def test_stop_notification_kills_the_subprocess_when_cancelled(monkeypatch) -> None:
-    """The caller (`_race_burst_signals`) cancels whichever signal did not win the race —
-    the still-waiting `terminal-notifier` process must be killed here, not left running
-    (and potentially showing a Stop button for the NEXT burst)."""
-    from stt_cli.live import status
-
-    monkeypatch.setattr(status, "notifier_available", lambda: True)
-    process = _FakeNotifierProcess()
-
-    async def hanging_communicate() -> tuple[bytes, bytes]:
-        await asyncio.sleep(10)
-        return b"", b""  # pragma: no cover - cancelled before this would ever return
-
-    process.communicate = hanging_communicate  # type: ignore[method-assign]
-
-    async def fake_exec(*args, **kwargs):
-        return process
-
-    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
-    task = asyncio.create_task(status.stop_notification("x", quiet=False))
-    await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert process.killed
-
-
-async def test_close_stop_notification_does_nothing_when_unavailable(monkeypatch) -> None:
-    from stt_cli.live import status
-
-    calls = 0
-
-    async def fake_exec(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return _FakeNotifierProcess()
-
-    monkeypatch.setattr(status.asyncio, "create_subprocess_exec", fake_exec)
-    monkeypatch.setattr(status, "notifier_available", lambda: False)
-    await status.close_stop_notification(quiet=False)
-    assert calls == 0
-
-
-def test_stop_hint_names_the_notification_when_available_and_the_fallback_when_not(
-    monkeypatch,
-) -> None:
-    """The exact wording ticket #79 needs: when `terminal-notifier` is missing, "a
-    notification with a Stop button is always available" is never left silently untrue —
-    the sentence says so and names the one thing that always works regardless."""
-    from stt_cli.live import status
-
-    monkeypatch.setattr(status, "notifier_available", lambda: True)
-    available = status.stop_hint("Ctrl-C")
-    assert "Ctrl-C" in available and "notification" in available
-
-    monkeypatch.setattr(status, "notifier_available", lambda: False)
-    missing = status.stop_hint("Ctrl-C")
-    assert "Ctrl-C" in missing
-    assert status.INSTALL_HINT in missing
-    assert "no notification" in missing
+# The notification itself — the helper's protocol, terminal-notifier's `-action`, the
+# osascript fallback — is tested in `test_helper_app.py`.
 
 
 async def test_race_burst_signals_stops_the_mic_on_a_true_signal_and_ignores_false() -> None:

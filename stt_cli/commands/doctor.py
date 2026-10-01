@@ -26,8 +26,8 @@ def run(argv: list[str]) -> int:
     parser.add_argument(
         "--fix",
         action="store_true",
-        help="after reporting, attempt auto-fixable gaps (currently: trigger the native "
-        "macOS Accessibility prompt) and report the result",
+        help="after reporting, attempt auto-fixable gaps (the native macOS Accessibility "
+        "prompt, and building stt.app for the notification's Stop button) and report the result",
     )
     args = parser.parse_args(argv)
 
@@ -58,6 +58,16 @@ def _fix_section() -> None:
     print("\nfix")
     _fix_terminal_accessibility()
     if sys.platform == "darwin":
+        from ..live import helper
+
+        found = helper.ensure(say=False)
+        if found is not None:
+            print(f"  {_mark(True)} mic notification Stop button: {helper.app_path()}")
+        else:
+            print(
+                f"  {_mark(False)} mic notification Stop button: {helper.APP_NAME} could not "
+                f"be built — `stt mic helper` says why"
+            )
         print(
             "  the background dictation daemon is a separate principal to macOS and asks for "
             "its own — `stt mic --fix` turns it on and makes it ask"
@@ -176,19 +186,43 @@ def _optional_section() -> None:
 
 
 def _notification_stop_line() -> None:
-    """Whether `stt mic`'s notification Stop button is available — never required (the
-    hotkey firing again, or being released, always works regardless), but ticket #79's
-    stated baseline expectation is that SOME clickable stop is always there, so its absence
-    is reported here like any other optional feature rather than discovered only when a
-    burst starts and no button ever appears — see `live.status.notifier_available`.
+    """Whether `stt mic`'s notification carries a Stop button (#79, #99) — stt's own
+    `stt.app`, or else terminal-notifier — reported like any other optional feature rather
+    than discovered only when a burst starts and no button appears. The hotkey stops a burst
+    either way, and the notification is posted either way; only the button depends on this.
     """
-    from ..live import status
+    if sys.platform != "darwin":
+        return
+    from ..live import helper, status
 
-    available = status.notifier_available()
-    found = "terminal-notifier found" if available else "terminal-notifier NOT found"
-    print(f"  {_mark(available)} mic notification Stop button: {found}")
-    if not available:
-        print(f"      fix: {status.INSTALL_HINT} (the hotkey itself always works without it)")
+    state = helper.state()
+    button = status.stop_button()  # what a burst will actually use
+    if state == "current":
+        permission = helper.notification_permission() or "unknown"
+        allowed, _, style = permission.partition(" ")
+        where = f"{helper.app_path()} (notifications: {allowed}, style {style or 'unknown'})"
+        if button is not None and not button.via_helper:
+            where = f"terminal-notifier, since {where}"
+        print(f"  {_mark(button is not None)} mic notification Stop button: {where}")
+        if allowed == "denied":
+            print("      fix: System Settings > Notifications > stt > Allow notifications")
+        elif style == "banner":
+            print(
+                "      note: banners slide away after a few seconds; System Settings > "
+                "Notifications > stt > Alerts keeps the Stop button on screen"
+            )
+        return
+    missing = (
+        f"{helper.APP_NAME} not built" if state == "missing" else f"{helper.APP_NAME} out of date"
+    )
+    if button is not None:
+        print(f"  {_mark(True)} mic notification Stop button: terminal-notifier ({missing})")
+    else:
+        print(f"  {_mark(False)} mic notification Stop button: {missing}")
+    print(
+        f"      fix: `{status.INSTALL_HINT}` or `stt doctor --fix` builds it (the hotkey "
+        "always stops a dictation without it)"
+    )
 
 
 def _dictation_line() -> None:

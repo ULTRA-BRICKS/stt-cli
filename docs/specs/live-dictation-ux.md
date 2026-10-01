@@ -37,9 +37,8 @@ hotkey default (shipped: `--hotkey-press` default `cmd+shift+space`, `--hotkey-h
 (`hotkey.MODIFIER_RULE`, shipped by
 [#101](https://git.hyperide.ai/ultrabricks/stt-cli/issues/101)).
 
-- Gap: `stt mic --help` promises "a notification's Stop button when `terminal-notifier` is
-  installed", which does not currently work (section 6) —
-  [#99](https://git.hyperide.ai/ultrabricks/stt-cli/issues/99).
+- Shipped (#99): `stt mic --help` and `stt mic run --help` promise the notification's Stop
+  button drawn by stt's own helper app, and `stt mic helper` builds it (section 6.2).
 
 ## 2. Hotkey bindings
 
@@ -302,48 +301,95 @@ stream is open.
 **Required (#99):** every burst posts a notification that (a) says how to stop, in words,
 and (b) carries a clickable Stop button — on a default install, with no optional tools.
 
-| Session | Notification text |
-| --- | --- |
-| Daemon, press | `listening — press <chord> again, or click Stop, to finish` |
-| Daemon, hold | `listening — release <chord>, or click Stop, to finish` |
-| Ad-hoc | `listening — Ctrl-C in the terminal, or click Stop, to finish` |
+| Session | Notification text (with a Stop button) | Without one |
+| --- | --- | --- |
+| Daemon, press | `listening on <device> — press <chord> again, or click Stop, to finish` | `… press <chord> again to finish` |
+| Daemon, hold | `listening on <device> — release <chord>, or click Stop, to finish` | `… release <chord> to finish` |
+| Ad-hoc | `listening on <device> — Ctrl-C in the terminal, or click Stop, to finish` | `… Ctrl-C in the terminal to finish` |
 
-Clicking Stop ends only the current burst; the daemon keeps running. A burst that ends any
-other way withdraws its notification, so no stale Stop button is left behind.
+The wording comes from one place, `status.stop_hint`, and the Stop button is named only when
+one can be drawn. Clicking Stop ends only the current burst; the daemon keeps running, and
+the daemon's log gets the line `Stop clicked on the notification — finishing this burst`. A
+burst that ends any other way withdraws its notification, so no stale Stop button is left
+behind. The notification is the burst's only one at the start (the open chime still plays);
+`stopped — N word(s) dictated` follows through `osascript` when it ends.
 
-**Shipped today — not meeting the requirement:**
+**Shipped (#99): `stt.app`, stt's own helper application.** Source
+`stt_cli/helper_app/main.swift`, built and installed by `stt_cli/live/helper.py`.
 
-- The only notification every user gets is `osascript display notification "listening on
-  <device>"` (`status.opened`, `stt_cli/live/status.py:289`), which has no button and does
-  not say how to stop. For the daemon, the "how to stop" text goes only to its log file.
-- The Stop button depends on the optional `terminal-notifier`
-  (`notifier_available`, `status.py:341`), and is called with `-actions Stop`
-  (`status.py:404`). The terminal-notifier Homebrew installs today does not read
-  `-actions`: 2.0.0 removed action buttons, and 3.0.0 (2026-08-23; Homebrew stable is 3.1.0
-  as of 2026-09-29) brought them back as `-action TITLE`, singular
-  ([3.0.0 release notes](https://github.com/julienXX/terminal-notifier/releases/tag/3.0.0)).
-  So no button is drawn and the call returns at once. The unit test asserts the wrong flag
-  against a mocked subprocess.
-
-**Helper application (#99, to build):**
-
-- A minimal app bundle (working name `stt-notify.app`) with its own bundle identifier, no
-  Dock icon, using `UNUserNotificationCenter` with one category carrying one `Stop` action.
-- Built in CI as a universal binary; installed into `~/Applications` by `stt doctor --fix` or
-  the first `stt mic enable`; the first use raises macOS's one-time Notifications prompt.
-- Protocol: stt starts it with the burst id and the text; it prints exactly one line —
-  `STOP`, `CLOSED` or `DISMISSED` — and exits. stt terminates it and it withdraws its
-  notification when the burst ends another way. This is the same contract
-  `stop_notification` has today, so `_race_burst_signals`
-  (`stt_cli/live/dictation.py:378`) does not change.
+- A minimal bundle, identifier `ai.hyperide.stt`, name "stt", no Dock icon (`LSUIElement`),
+  asking for the "Alerts" style (`NSUserNotificationAlertStyle`, so the Stop button stays on
+  screen for the whole burst — macOS 26 was seen to start it on "Banners" regardless, which
+  slide away after a few seconds; `stt doctor` prints the style and where to switch it),
+  `NSMicrophoneUsageDescription` naming stt. It uses
+  `UNUserNotificationCenter` with one category, `STT_BURST`, carrying one action, `STOP`
+  ("Stop"), and `customDismissAction` so a dismissal is reported.
+- Built on the user's Mac from the Swift source shipped in the package (`swiftc` from the
+  Command Line Tools, which Homebrew already requires; no download, no Python dependency),
+  and installed as `~/Applications/stt.app`. `stt mic helper [--rebuild]` is the documented
+  build step; `stt mic enable`/`start`/`run`, the first-run autostart worker and
+  `stt doctor --fix` run it when the installed copy is missing or built from older source
+  (the source digest is stamped into its `Info.plist` as `STTSourceDigest`). CI runs on
+  Linux and does not build it. The first notification raises macOS's one-time "stt would
+  like to send notifications" prompt.
+- Protocol (`status.stop_notification`): stt starts
+  `stt.app/Contents/MacOS/stt notify --burst <pid-n> --title stt --body <text>`; it prints
+  exactly one line and exits — `STOP` (the button), `DISMISSED` (the notification was
+  closed), `CLOSED` (its body was clicked, or it could not be posted) or `DENIED`
+  (notifications are off for stt: stt then says where to turn them on and posts the same
+  text through `osascript`). Only `STOP` stops the burst. When the burst ends another way,
+  `_race_burst_signals` cancels the wait and stt sends SIGTERM; the helper removes its
+  notification before exiting (killed after two seconds if it has not). It also withdraws
+  when its parent process disappears, and removes any stale `stt-burst-*` notification
+  before posting a new one.
+- A copy built from older source is not asked to notify (it may speak an older protocol);
+  `stt doctor` reports it as out of date.
+- Fallbacks, in order: terminal-notifier 3.x with `-action Stop` (singular — 3.x ignores
+  `-actions`, which is what the code passed before #99 and why no button was ever drawn),
+  withdrawn with `-remove stt-mic-stop`; then `osascript display notification` with the
+  same how-to-stop text and no button. `stt doctor`, the daemon's ready line and the ad-hoc
+  session's first line say when there is no Stop button and that `stt mic helper` adds one.
+- Tests: `tests/test_helper_app.py` runs stand-in scripts at the helper's and
+  terminal-notifier's paths, so each test starts a real process with the real argv; the
+  terminal-notifier stand-in parses options the way 3.x does.
 - The same helper is the natural home for an always-visible microphone indicator
   ([#14](https://git.hyperide.ai/ultrabricks/stt-cli/issues/14)) and for the dictionary
   suggestion's Install action ([#88](https://git.hyperide.ai/ultrabricks/stt-cli/issues/88)).
-- Until it exists: pass `-action Stop`, and put the how-to-stop text into the notification
-  every user already gets.
-- Deferred: Windows (a toast notification with a button) and Linux (a freedesktop
-  notification action) adapters, with the platform tickets
+- Deferred: Windows (a toast notification with a button, through the WinRT
+  `ToastNotification` API) and Linux (a freedesktop notification action, through
+  `notify-send --action` or D-Bus) adapters, with the platform tickets
   [#60](https://git.hyperide.ai/ultrabricks/stt-cli/issues/60), #64 and #76.
+
+**The helper is also the daemon's privacy principal (#99, from #98).** Once `stt.app` is
+installed, `mic_service._serve_argv` puts `stt.app/Contents/MacOS/stt run --` in front of
+the daemon's command, so the LaunchAgent starts the helper and the helper starts stt's
+Python as its child (a child, not an `exec`: macOS holds the process launchd started
+responsible for its children). The helper forwards SIGTERM, SIGINT and SIGHUP, exits with
+the child's status, and tells it `STT_HELPER_APP=<bundle>`; `permissions.principal_name`
+then names "stt" and the ask-once ledger is keyed on the bundle. A daemon enabled before
+the helper existed keeps running as Python until `stt mic disable && stt mic enable`
+(`stt mic helper` says so).
+
+**Signing, decided on #99 (reversible).** macOS remembers a grant against the signature's
+designated requirement. This Mac has no Developer ID (`security find-identity -v -p
+codesigning` finds 0 valid identities), so:
+
+| Signed with | Designated requirement | Grant survives a Python upgrade | Survives a rebuild of the helper |
+| --- | --- | --- | --- |
+| A Developer ID, when the keychain has one | team identifier | yes | yes |
+| A certificate stt makes on this Mac (default here) | `identifier "ai.hyperide.stt" and certificate leaf = H"…"` | yes | yes |
+| Ad hoc, if making the certificate fails | the binary's own hash | yes | no |
+
+The local certificate is self-signed (`CN=stt local code signing`, code-signing usage only),
+made with `openssl` into a keychain of its own at `STT_HOME/signing/`, with a random
+password beside it (owner-only). `codesign` accepts it untrusted; it only has to find it,
+so the keychain is put on the user's search list for the one signature and taken off
+again. Nothing asks for a password or shows a dialog. The trade-off: anything running as
+this user can read that keychain and sign a binary macOS would treat as stt, inheriting its
+Accessibility and Microphone. That is no wider than before — the helper runs stt's Python,
+which any such process can already edit, and before the helper the principal was Python
+itself. Deleting `STT_HOME/signing` makes a new certificate at the next build, and the
+grants have to be given once more.
 
 ## 7. Status line
 
@@ -443,16 +489,19 @@ mechanism.
 | Two independent bindings, collision guard | yes | no | #79, #97 |
 | Different validators per binding, modifier list, fn-alone hold, `hotkey_stop` | yes | no — [#124](https://git.hyperide.ai/ultrabricks/stt-cli/issues/124); typing while a hold's modifiers are held is [#125](https://git.hyperide.ai/ultrabricks/stt-cli/issues/125) | #101 |
 | Esc-Esc removed | yes | unit tests only | #79 |
-| Always-available Stop button + how-to-stop text | no | — | #99 |
+| Always-available Stop button + how-to-stop text | yes | see #99: a real `stt.app` notification on Alex's Mac, and the burst race it ends | #99 |
 | Daemon on by default, liveness-verified | yes | no — daemon crash-looping on Alex's Mac | #87, #98, #97 |
 | Daemon on at the first `stt` run | yes | a detached worker spawned and recorded its outcome, against a fake `launchctl` and a throwaway `HOME` | #105 |
-| Daemon has its own Accessibility + Microphone | no | — | #98, #97 |
+| Daemon has its own Accessibility + Microphone | yes — `stt.app` is the launchd principal once installed and re-enabled (6.2) | no — needs the daemon moved into `stt.app` and the two grants clicked | #98, #97, #99 |
 | No wrapped-row corruption in a ~50-column terminal | yes | pty captures at 50 columns, not yet on Alex's phone | #100 |
 | Inviting idle line | yes | unit tests only | #91 |
 
 ## 10. Open decisions
 
-- Signed helper application: Developer ID signing or ad-hoc; name; where it is built — #99.
+- Signed helper application — decided on #99 (6.2): named `stt.app`, bundle identifier
+  `ai.hyperide.stt`, built on the user's Mac from source; Developer ID when there is one,
+  otherwise a certificate stt makes on the Mac, otherwise ad hoc. Reversible: a Developer ID
+  build distributed with stt would replace the local build if stt ever ships binaries.
 
 Decided on 2026-09-29 and recorded above (each reversible): fn alone for `hotkey_hold` only,
 with the Globe-key advice, and no other press/hold difference above the floor beyond the

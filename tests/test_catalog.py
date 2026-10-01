@@ -378,3 +378,6 @@ def test_the_built_wheel_carries_every_dictionary_and_the_index(tmp_path: Path) 
     assert wanted - packed == set()
     assert f"stt_cli/dictionaries/{catalog.INDEX}" in packed
     assert f"stt_cli/dictionaries/{catalog.TAGS}" in packed
+    # `stt mic helper` compiles this on the user's Mac; a wheel without it cannot build
+    # the notification's Stop button at all (#99).
+    assert "stt_cli/helper_app/main.swift" in packed

@@ -31,9 +31,10 @@ def first_run(tmp_path, monkeypatch, autostart_hook) -> list[str]:
     """A Mac with the daemon's service library installed and nothing decided yet, where
     starting the worker only records that it was started."""
     monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))  # no LaunchAgent, no stt.app of the real user's
     monkeypatch.setattr(mic.sys, "platform", "darwin")
     monkeypatch.setattr(mic, "_service_lib_installed", lambda: True)
-    monkeypatch.setattr(permissions, "principal_name", lambda: "python3.14")
+    monkeypatch.setattr(permissions, "principal_name", lambda: "'python3.14'")
     started: list[str] = []
     monkeypatch.setattr(mic, "_spawn_autostart_worker", lambda: started.append("worker"))
     return started
@@ -51,8 +52,10 @@ def _autostart_lines(err: str) -> list[str]:
 
 
 def test_the_first_stt_command_starts_the_worker_once_and_names_the_toggle(
-    first_run, capsys
+    first_run, capsys, monkeypatch
 ) -> None:
+    # No Swift compiler, so the worker cannot build `stt.app`: the interpreter is the principal.
+    monkeypatch.setattr("stt_cli.live.helper.can_build", lambda: False)
     assert cli.main(["config", "list"]) == 0
 
     assert first_run == ["worker"]
@@ -60,7 +63,7 @@ def test_the_first_stt_command_starts_the_worker_once_and_names_the_toggle(
     assert len(lines) == 1, lines
     assert lines[0].startswith("stt: turning on the background dictation daemon")
     assert (
-        "turn on python3.14 in System Settings > Privacy & Security > Accessibility" in (lines[0])
+        "turn on 'python3.14' in System Settings > Privacy & Security > Accessibility" in lines[0]
     )
     assert "`stt mic disable` turns this off" in lines[0]
     assert _attempts().count == 1
@@ -69,6 +72,38 @@ def test_the_first_stt_command_starts_the_worker_once_and_names_the_toggle(
     assert cli.main(["config", "list"]) == 0
     assert first_run == ["worker"]
     assert _autostart_lines(capsys.readouterr().err) == []
+
+
+def test_the_first_run_names_stt_when_the_worker_will_build_the_helper(
+    first_run, capsys, monkeypatch
+) -> None:
+    """The worker builds `stt.app` before enabling (#99), so macOS then asks for "stt" —
+    naming the interpreter would send the person looking for a row that is not there."""
+    monkeypatch.setattr("stt_cli.live.helper.can_build", lambda: True)
+
+    assert cli.main(["config", "list"]) == 0
+
+    (line,) = _autostart_lines(capsys.readouterr().err)
+    assert "turn on 'stt' in System Settings > Privacy & Security > Accessibility" in line
+
+
+def test_a_daemon_enabled_before_the_helper_is_still_named_as_the_interpreter(
+    first_run, capsys, monkeypatch, tmp_path
+) -> None:
+    """The worker leaves an already-installed job alone, so a daemon enabled before stt.app
+    existed keeps running as Python — and that is the row macOS lists, buildable or not."""
+    import plistlib
+
+    monkeypatch.setattr("stt_cli.live.helper.can_build", lambda: True)
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    job = {"ProgramArguments": ["/opt/homebrew/bin/python3.14", "stt", "mic", "__serve"]}
+    (agents / "com.agenttools.stt.mic.plist").write_bytes(plistlib.dumps(job))
+
+    assert cli.main(["config", "list"]) == 0
+
+    (line,) = _autostart_lines(capsys.readouterr().err)
+    assert "turn on 'python3.14' in System Settings" in line
 
 
 def test_a_closed_standard_error_does_not_turn_the_commands_exit_code_into_a_traceback(
