@@ -26,6 +26,13 @@ HOW OFTEN
     has not set the classifier up is told how to, once. `dict_suggest` off (`stt config set
     dict_suggest false`) stops all of it: no process is started and nothing is read.
 
+WHAT IT YIELDS TO
+    The check loads laya's checkpoints beside whatever else this machine is decoding, so it
+    takes a `model_gate` slot like any model does (#143, `_slot`) — only if one is free that
+    instant. With none free, or too little memory (`resources.check_memory`), the check is
+    skipped, says so as its outcome, and the next daily check tries again: a background job
+    never queues behind a transcription somebody is waiting for.
+
 WHY A CHILD PROCESS
     Classifying a month of transcripts takes minutes on a CPU. It must never delay the command
     that triggered it or affect its transcript, so the command only stamps the state and
@@ -54,6 +61,7 @@ from ._errors import EXIT_OK, UsageError
 if TYPE_CHECKING:
     from .archive import Archive, RunRecord
     from .catalog import Distributable
+    from .model_gate import Slot
 
 DAY = 86_400.0
 # Eligibility: the spec's "month of use", on the archive's own `created_at`.
@@ -90,7 +98,14 @@ LAYA = "laya>=0.3.20,<0.4"
 # torch, transformers and laya in a uv environment, plus two checkpoints (843 MB and 644 MB).
 SETUP_GIB = 3.0
 PROBE_TIMEOUT = 300.0
-SCORE_TIMEOUT = 1800.0
+# Under `model_gate.WAIT_SECONDS` (30 minutes), with room to spare: a decode that starts waiting
+# for the slot this check holds must outlast the check, not give up the moment before it ends.
+SCORE_TIMEOUT = 1500.0
+# What the classifier's two checkpoints weigh on disk (843 MB English, 644 MB multilingual): the
+# figure its `model_gate` slot is sized by. A Router swap holds both for a moment and torch's
+# runtime comes on top of the weights, so the larger one alone would understate it. About
+# what large-v3-turbo weighs, which is the point: laya is admitted only where a decode would be.
+LAYA_BYTES = (843 + 644) * 1_000_000
 
 TITLE = "stt"
 OPT_OUT = "Turn off: stt config set dict_suggest false"
@@ -210,13 +225,21 @@ class Suggestion:
         )
 
 
+class Deferred(Exception):
+    """The classifier cannot run now, and nothing is wrong: `check` skips and the next daily
+    check tries again. Raised, never waited out, because this is a background job and the
+    machine's owner is using the memory it would load into."""
+
+
 class Scorer(Protocol):
     def ready(self) -> bool:
         """Can the classifier answer right now, without downloading anything?"""
         ...
 
     def score(self, pieces: list[str], groups: list[dict[str, str]]) -> list[dict[str, float]]:
-        """Each piece's probability per option, every group being one `choice` question."""
+        """Each piece's probability per option, every group being one `choice` question.
+
+        Raises `Deferred` when the machine has no room for the classifier right now."""
         ...
 
 
@@ -347,7 +370,10 @@ def check(state: State, *, now: float, scorer: Scorer, notifier: Notifier) -> St
             for record in records
             if (text := _text_of(store, record.run_id))
         ]
-    found = decide(dictated, topics, scorer)
+    try:
+        found = decide(dictated, topics, scorer)
+    except Deferred as why:
+        return replace(state, outcome=f"skipped, the next daily check will try again: {why}")
     if found is None:
         return replace(state, outcome=f"no topic qualified in {len(dictated)} transcripts")
     if not notifier(TITLE, found.message()):
@@ -571,7 +597,8 @@ class LayaScorer:
             for index, criteria in enumerate(groups)
         }
         request = json.dumps({"pieces": pieces, "questions": questions}, ensure_ascii=False)
-        answered = self._ask([], stdin=request, timeout=SCORE_TIMEOUT)
+        with _slot() as held:
+            answered = self._ask([], stdin=request, timeout=SCORE_TIMEOUT, hold=held)
         if "answers" not in answered:
             raise RuntimeError(f"laya failed: {answered.get('error', answered)!r:.300}")
         # One dict per piece, the topics of every question together. Each question is its own
@@ -587,7 +614,9 @@ class LayaScorer:
             merged.append(probabilities)
         return merged
 
-    def _ask(self, flags: list[str], *, stdin: str | None, timeout: float) -> dict[str, Any]:
+    def _ask(
+        self, flags: list[str], *, stdin: str | None, timeout: float, hold: Slot | None = None
+    ) -> dict[str, Any]:
         import asyncio
 
         from . import proc
@@ -598,9 +627,38 @@ class LayaScorer:
             return {"error": "neither laya nor uv is installed"}
         env = {"PYTHONSAFEPATH": "1", **self._env}
         result = asyncio.run(
-            proc.run([*route, worker_path(), *flags], timeout=timeout, env=env, stdin_text=stdin)
+            proc.run(
+                [*route, worker_path(), *flags],
+                timeout=timeout,
+                env=env,
+                stdin_text=stdin,
+                hold=hold,
+            )
         )
         return last_object(result.stdout) or {"error": result.stderr.strip()[-300:]}
+
+
+@contextmanager
+def _slot() -> Iterator[Slot]:
+    """The speech-model slot (`model_gate`) laya's checkpoints load under, for the block.
+
+    Asked for once and only if one is free right now (`model_gate.attempt`), never waited
+    for: this runs detached after a transcription, on the same machine as the decodes it
+    would otherwise stack on (#106). `resources.check_memory` is asked first, as before any
+    other model; its warning is a reason to skip here, since nobody is watching to read one.
+    The probe needs neither: it imports laya and looks at files, and loads no checkpoint.
+    """
+    from . import model_gate, resources
+
+    if warnings := resources.check_memory(LAYA_BYTES, model="the laya classifier"):
+        raise Deferred(warnings[0])
+    held = model_gate.attempt(LAYA_BYTES)
+    if held is None:
+        raise Deferred("every speech-model slot on this machine is in use")
+    try:
+        yield held
+    finally:
+        model_gate.release(held)
 
 
 def runner(*, offline: bool) -> list[str] | None:

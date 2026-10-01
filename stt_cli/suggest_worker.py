@@ -83,7 +83,8 @@ def score(pieces: list[str], questions: dict[str, Any]) -> list[dict[str, dict[s
         warnings.filterwarnings("ignore", message=_TEMPERATURE_WARNING, category=RuntimeWarning)
         # The CPU, not Metal: a model on Metal is wired memory macOS neither swaps nor counts
         # (#106), and this runs in the background while speech models may be loaded. One
-        # checkpoint resident at a time, for the same reason.
+        # checkpoint resident at a time, for the same reason. The caller holds a `model_gate`
+        # slot for this whole process (`suggest._slot`): CPU memory stacks on decodes too.
         router = laya.Router(models=models, device="cpu", max_loaded=1)
         results = router.predict_batch(
             [{"state": piece, "questions": questions} for piece in pieces], batch_size=BATCH

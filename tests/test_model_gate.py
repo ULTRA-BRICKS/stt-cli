@@ -310,6 +310,26 @@ def test_two_slots_admit_two_models_at_once_and_not_a_third(monkeypatch) -> None
     asyncio.run(three_at_once())
 
 
+def test_a_small_model_settles_in_the_high_slots_and_leaves_the_low_ones_to_big_models(
+    monkeypatch,
+) -> None:
+    """Each model probes its slots from the top down: the 0.9 MB VAD, allowed eight slots,
+    takes slot 7, so two large-v3-turbo still fit on the 24 GB Mac beside it."""
+    monkeypatch.setattr(resources, "total_ram", lambda: 25_769_803_776)
+    turbo = 1_624_555_275
+    held = [model_gate.attempt(885_098), model_gate.attempt(turbo), model_gate.attempt(turbo)]
+    try:
+        vad, first, second = held
+        assert vad is not None and vad.path.name == f"slot-{model_gate.MAX_SLOTS - 1}.lock"
+        assert first is not None and first.path.name == "slot-1.lock"
+        assert second is not None and second.path.name == "slot-0.lock"
+        assert model_gate.attempt(turbo) is None
+    finally:
+        for slot in held:
+            if slot is not None:
+                model_gate.release(slot)
+
+
 def test_a_run_that_finds_every_slot_taken_says_so_waits_then_fails(monkeypatch, capsys) -> None:
     monkeypatch.setenv("RIG_GPU_SLOTS", "1")
     monkeypatch.setattr(model_gate, "WAIT_SECONDS", 0.6)

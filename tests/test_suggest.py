@@ -8,25 +8,46 @@ package driven through the real worker script. Nothing loads a model or reaches 
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from stt_cli import installed, notify, suggest
+from stt_cli import installed, model_gate, notify, resources, suggest
+from stt_cli._errors import ProcessTimeout
 from stt_cli.archive import Archive
 from stt_cli.config import Settings
 from stt_cli.models import EngineInfo, MediaInfo, Segment, Transcript
 
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC).timestamp()
 DAY = suggest.DAY
+# Read at import: the autouse fixture below shortens the real wait for every test.
+REAL_WAIT_SECONDS = model_gate.WAIT_SECONDS
+REAL_SCORE_TIMEOUT = suggest.SCORE_TIMEOUT
 
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STT_HOME", str(tmp_path / "home"))
+
+
+@pytest.fixture(autouse=True)
+def a_24_gb_mac(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The machine that crashed (#106): hw.memsize 25,769,803,776. Not this machine's RAM, so
+    what the memory guard and the slot count say does not depend on where the suite runs."""
+    monkeypatch.setattr(resources, "total_ram", lambda: 25_769_803_776)
+
+
+@pytest.fixture(autouse=True)
+def a_short_slot_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check never waits for a slot (`model_gate.attempt`). If someone swaps that for the
+    waiting `acquire`, a test fails after a second instead of hanging the suite for the half
+    hour a transcription waits."""
+    monkeypatch.setattr(model_gate, "WAIT_SECONDS", 1.0)
 
 
 class Notifier:
@@ -265,12 +286,51 @@ def test_a_long_transcript_is_sampled_from_its_start_middle_and_end() -> None:
 
 # ── laya: the real worker script, over a fake laya package ────────────────────
 _FAKE_LAYA = """
+import glob
+import fcntl
+import json
+import os
+import time
+
+
+def _slots():
+    \"\"\"Which of the pool's slots this process inherited, and which anybody holds.\"\"\"
+    files = sorted(glob.glob(os.environ["RIG_GPU_SLOT_DIR"] + "/slot-*.lock"))
+    names = {}
+    for name in files:
+        here = os.stat(name)
+        names[(here.st_dev, here.st_ino)] = os.path.basename(name)
+    inherited = []
+    for fd in range(3, 64):
+        try:
+            here = os.fstat(fd)
+        except OSError:
+            continue
+        if (here.st_dev, here.st_ino) in names:
+            inherited.append(names[(here.st_dev, here.st_ino)])
+    locked = []
+    for name in files:
+        fd = os.open(name, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            locked.append(os.path.basename(name))
+        finally:
+            os.close(fd)
+    return {"inherited": sorted(inherited), "locked": locked}
+
+
 class Router:
     def __init__(self, models, device, max_loaded):
         assert device == "cpu", device
         self.models = models
+        if os.environ.get("FAKE_SLOT_REPORT"):  # the moment a checkpoint would be loaded
+            with open(os.environ["FAKE_SLOT_REPORT"], "w") as report:
+                json.dump(_slots(), report)
 
     def predict_batch(self, requests, batch_size=None):
+        if os.environ.get("FAKE_HANG"):
+            time.sleep(60)
         out = []
         for request in requests:
             answers = {}
@@ -341,6 +401,140 @@ def test_without_laya_nothing_raises_and_the_setup_is_offered_once(tmp_path: Pat
     assert shown.shown == [("stt", suggest.SETUP_OFFER)]
     assert first.offered_setup and not first.suggested
     assert second.outcome == "the classifier is not set up"
+
+
+# ── laya beside the decodes: a model slot, or no check today (#143) ──────────
+def _laya_reporting_its_slots(
+    tmp_path: Path, fake_laya: dict[str, str]
+) -> tuple[Path, suggest.LayaScorer]:
+    """A scorer over the fake laya, and the file the fake writes when it "loads a checkpoint":
+    which pool slots it inherited from the check, and which anybody holds at that moment."""
+    report = tmp_path / "slots.json"
+    env = {**fake_laya, "FAKE_SLOT_REPORT": str(report)}
+    return report, suggest.LayaScorer([sys.executable], env=env)
+
+
+def _score_once(scorer: suggest.LayaScorer) -> list[dict[str, float]]:
+    return scorer.score(
+        ["the doctor said"], [{"medical-general": "General medicine", "other": "else"}]
+    )
+
+
+def _a_slot_is_free_within(seconds: float) -> bool:
+    """The kernel lets go of a killed process's lock a moment after it is reaped."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        free = model_gate.attempt(suggest.LAYA_BYTES)
+        if free is not None:
+            model_gate.release(free)
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_laya_loads_under_a_slot_its_own_process_holds_and_gives_it_back(
+    fake_laya, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("RIG_GPU_SLOTS", "1")
+    report, scorer = _laya_reporting_its_slots(tmp_path, fake_laya)
+    _score_once(scorer)
+    # The model process inherited the slot's lock itself (`hold=`): the premise of the slot
+    # still counting when the check that started it is killed, which test_model_gate runs.
+    assert json.loads(report.read_text()) == {
+        "inherited": ["slot-0.lock"],
+        "locked": ["slot-0.lock"],
+    }
+    assert _a_slot_is_free_within(5), "the check kept the slot after laya was done"
+
+
+def test_a_laya_that_hangs_is_killed_and_its_slot_is_free_again(fake_laya, monkeypatch) -> None:
+    monkeypatch.setenv("RIG_GPU_SLOTS", "1")
+    monkeypatch.setattr(suggest, "SCORE_TIMEOUT", 1.5)
+    scorer = suggest.LayaScorer([sys.executable], env={**fake_laya, "FAKE_HANG": "1"})
+    with pytest.raises(ProcessTimeout):
+        _score_once(scorer)
+    assert _a_slot_is_free_within(5)
+
+
+def test_a_decode_waiting_behind_the_check_outlasts_it_by_minutes() -> None:
+    """The scorer's process is killed after `SCORE_TIMEOUT` and the slot goes back; a
+    transcription that began waiting for that slot the moment the check took it gives up after
+    `model_gate.WAIT_SECONDS`. The margin between the two is what the transcription's wait
+    survives the teardown with: with none, a decode fails behind a background job."""
+    assert REAL_WAIT_SECONDS - REAL_SCORE_TIMEOUT >= 5 * 60
+
+
+def test_a_16_gb_mac_has_one_slot_for_laya_so_one_decode_turns_it_away(monkeypatch) -> None:
+    monkeypatch.setattr(resources, "total_ram", lambda: 16 * 1024**3)
+    assert model_gate.count(suggest.LAYA_BYTES) == 1
+    decode = model_gate.attempt(1_624_555_275)
+    assert decode is not None
+    try:
+        assert model_gate.attempt(suggest.LAYA_BYTES) is None
+    finally:
+        model_gate.release(decode)
+
+
+def test_laya_is_admitted_beside_one_large_v3_turbo_decode_and_not_beside_two(
+    fake_laya, tmp_path
+) -> None:
+    """The machine that crashed holds two large-v3-turbo at once; a third model, laya's, is
+    what a check stacked on them before it took a slot."""
+    turbo = 1_624_555_275  # the file a decode holds its slot for
+    first, second = model_gate.attempt(turbo), model_gate.attempt(turbo)
+    assert first is not None and second is not None
+    report, scorer = _laya_reporting_its_slots(tmp_path, fake_laya)
+    try:
+        with pytest.raises(suggest.Deferred):
+            _score_once(scorer)
+        assert not report.exists(), "laya was started with both decodes running"
+        model_gate.release(second)
+        _score_once(scorer)
+        assert report.exists()
+    finally:
+        model_gate.release(first)
+
+
+def test_with_every_slot_taken_the_check_is_skipped_unwaited_and_tomorrows_runs(
+    fake_laya, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("RIG_GPU_SLOTS", "1")
+    report, scorer = _laya_reporting_its_slots(tmp_path, fake_laya)
+    shown = Notifier()
+    monkeypatch.setattr(suggest, "LayaScorer", lambda: scorer)
+    monkeypatch.setattr(suggest, "_post", shown)
+    monkeypatch.setattr(suggest, "_lower_priority", lambda: None)
+    _a_month_of(matching=12, total=12)
+    suggest.State(requested=NOW).write()
+    somebody_else = model_gate.attempt(1024)
+    assert somebody_else is not None
+    try:
+        suggest.worker(clock=lambda: NOW + 60)
+    finally:
+        model_gate.release(somebody_else)
+    skipped = suggest.State.read()
+    assert "every speech-model slot on this machine is in use" in skipped.outcome
+    assert "next daily check" in skipped.outcome
+    assert not report.exists(), "laya was started without a slot"
+    assert shown.shown == [] and skipped.notified == 0 and not skipped.suggested
+    tomorrow = NOW + DAY
+    suggest.after_transcription(
+        Settings(), now=tomorrow, spawn=lambda: suggest.worker(clock=lambda: tomorrow + 60)
+    )
+    assert suggest.State.read().suggested == ("medical-general",), suggest.State.read().outcome
+    assert report.exists()
+
+
+def test_a_machine_too_small_for_laya_skips_the_check_before_starting_anything(
+    fake_laya, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(resources, "total_ram", lambda: 1024**3)
+    report, scorer = _laya_reporting_its_slots(tmp_path, fake_laya)
+    _a_month_of(matching=12, total=12)
+    shown = Notifier()
+    state = suggest.check(suggest.State(), now=NOW, scorer=scorer, notifier=shown)
+    assert "the laya classifier needs roughly 1.4 GiB but this machine has 1 GiB" in state.outcome
+    assert not report.exists() and shown.shown == [] and not state.suggested
 
 
 # ── the detached worker ───────────────────────────────────────────────────────

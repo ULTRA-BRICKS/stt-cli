@@ -591,6 +591,12 @@ dies — however it dies — frees its slot, and nothing is ever left to clean u
 draft model only if one is free right then. Otherwise it dictates without the draft and
 says so, rather than wait for a slot its own main model may be the one holding.
 
+The dictionary suggestions (`stt dict suggest`) load a small text classifier, laya, on the
+CPU from a background check that runs at most once a day, and it takes a slot too — but never
+waits for one, since the transcription it would wait behind is the one somebody is waiting
+for. With every slot taken, or too little memory for it, that day's check is skipped quietly
+(`stt dict suggest` says why) and the next day's tries again.
+
 A model process never outlives the `stt` that started it. It runs in a process group of its
 own that `stt` takes down on every way out — an error, Ctrl-C, `SIGTERM`, `SIGHUP`, a
 cancelled task — and a small watcher beside it kills the group if `stt` disappears without

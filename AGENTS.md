@@ -146,7 +146,7 @@ invariants of its own on top of the ones below.
   `stt dict __suggest` check `suggest.after_transcription` starts and never waits for, the
   notification command `notify.post` runs with a ten-second limit, and the fetch `stt dict
   suggest --setup` streams to the user's terminal. The laya worker itself does go through
-  `proc.run`, with no `model_gate` slot: it runs on the CPU, never on Metal.
+  `proc.run`, under a `model_gate` slot like a speech model (#143).
 - **Every process that loads a speech model holds a `model_gate` slot and passes it to
   `proc.run`/`proc.start` as `hold=`.** A model on Metal is wired memory that macOS neither
   swaps nor counts as pressure, and on 2026-09-29 thirteen concurrent runs of it hard-reset
@@ -154,7 +154,15 @@ invariants of its own on top of the ones below.
   group of its own, so a slot-less model is both uncounted and able to outlive its stt; every
   other child stays in stt's own group, where a group kill of stt still reaches it. Its time
   limit is `proc.budget` over its audio, never the flat `DEFAULT_TIMEOUT` — except mlx,
-  whose worker downloads on first use.
+  whose worker downloads on first use. "Speech model" is read by what it costs, not by what
+  it hears: the dictionary-suggestion classifier (`suggest.LayaScorer`, laya's two
+  checkpoints, 1.5 GB on the CPU) is held to the same rule, because CPU memory stacks on
+  concurrent decodes too. Its limit is the flat `SCORE_TIMEOUT` (it scores text, not audio),
+  kept under `model_gate.WAIT_SECONDS` so a decode waiting behind it outlasts it. A detached
+  background job never waits for its slot, which a transcription somebody is waiting for may
+  need: it takes one with `model_gate.attempt` (and asks `resources.check_memory` first), and
+  with none free it skips that day's check and records why — see `suggest._slot`. Interactive
+  loads wait (`slot`/`acquire`); background ones skip.
 - **Every failure is an `SttError` subclass** with what/why/how and a stable exit code
   (see `_errors.py`). Never `sys.exit(1)` with a bare message.
 - **Nothing durable in `/tmp`.** Audio and transcripts live in the archive under

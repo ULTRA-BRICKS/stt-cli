@@ -519,6 +519,32 @@ and runs on the CPU with one checkpoint resident, because a model on Metal is wi
 runs beside speech models. Everything is local: the candidates come from the bundled catalog, not the
 website, and the transcripts never leave the machine.
 
+**Beside the speech models (#143, `stt_cli/suggest.py::_slot`).** Running on the CPU spares Metal's wired
+memory, not the machine's memory, and the check starts right after a transcription: it can load laya's
+checkpoints beside any number of concurrent whisper decodes, the shape of the 2026-09-29 hard reset
+(#106). Scoring therefore holds a `model_gate` slot, passed to `proc.run` as `hold=` so the model process
+itself carries the lock and is tethered to the check. It is sized `LAYA_BYTES` = 1,487,000,000, both
+checkpoints (843 MB + 644 MB: one is resident at a time, but a swap holds both for a moment and torch comes on
+top of the weights), which is about what large-v3-turbo weighs, so laya and a large-v3-turbo decode count
+against the same slots. Only scoring takes one; the readiness probe imports laya and looks at files and loads no
+checkpoint. The slot is taken once, with `model_gate.attempt`, and **never waited for**: a decode that
+arrives while the check holds the last slot already waits for it (for as long as it runs, at most
+`SCORE_TIMEOUT`, 25 minutes, which stays under the 30 a decode waits), and a background job must not
+also queue behind the transcriptions somebody is waiting for. `resources.check_memory` is asked first,
+and its warning (the checkpoints over 70% of
+physical memory) is a reason to skip, since nobody is there to read a warning. When either refuses,
+`suggest.Deferred` ends the check without reading anything into a model: no notification, the stored outcome
+(shown by `stt dict suggest`) says `skipped, the next daily check will try again: <reason>`, and the check
+counts as served, so the next one starts after `CHECK_INTERVAL` like any other. The slot count follows the
+model's size (`model_gate.count`: a sixth of memory over the file size; each model probes its slots from
+the top down), so laya is turned away when the slots within its own range are full: two large-v3-turbo
+decodes on a 24 GB Mac, or one on a 16 GB Mac, which has a single slot for laya and so checks only while no
+such decode is running. Where `stt mic` keeps one loaded all day
+([#134](https://git.hyperide.ai/ultrabricks/stt-cli/issues/134)) the check is skipped until that changes.
+The gate caps each model size separately, not their sum (unless `RIG_GPU_SLOTS` fixes one count for every
+size, when laya and all other models share it), so models of other sizes can run beside laya whenever their
+own slots are free ([#144](https://git.hyperide.ai/ultrabricks/stt-cli/issues/144)).
+
 **Rate limits.** A check starts at most once a day (`CHECK_INTERVAL`), a notification reaches the user at
 most once a week (`NOTIFY_INTERVAL`), a dictionary is named at most once ever, and the setup notification
 is shown once; after it, nothing more runs until the setup is done. A stamp in the future (the clock set
