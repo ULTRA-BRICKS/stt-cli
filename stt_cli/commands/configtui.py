@@ -31,7 +31,7 @@ from __future__ import annotations
 import contextlib
 import curses
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from .. import config
 
@@ -411,18 +411,49 @@ _ROW_TOP = 3  # first row a setting can be drawn/hit-tested on, below the header
 _DETAIL_ROWS = 5  # separator + description + examples + command line + footer
 
 
-def _tab_spans(width: int) -> list[tuple[int, int, int, str]]:
-    """``(start_x, end_x, group_index, name)`` for every tab that fits in ``width`` columns
-    — the ONE place the tab bar's layout is computed, so `_draw` (what's painted) and
-    `_handle_mouse` (what a click hits) can never quietly disagree about where a tab is or
-    how wide it is."""
+class TabSpan(NamedTuple):
+    """One rendered tab: its horizontal span, the `GROUPS` index it stands for, and its
+    label — the shape `_draw` (what's painted) and `_handle_mouse` (what a click hits)
+    share, so they can never quietly disagree about where a tab is or how wide it is."""
+
+    x: int
+    end: int
+    group: int
+    name: str
+
+
+def _tab_spans(width: int, selected: int) -> list[TabSpan]:
+    """Every tab that fits in ``width`` columns, the ONE place the tab bar's layout is
+    computed — scrolled rightward, one dropped-off-screen tab at a time, until
+    ``selected`` is on screen. Without this, a category past whatever fit in the first
+    screenful was impossible to tell you were even in: no tab anywhere was ever
+    highlighted. ``selected`` is clamped to a real `GROUPS` index first, so a stale or
+    out-of-range caller gets the nearest real tab bar rather than a silently blank one.
+
+    Terminates in at most ``len(GROUPS)`` iterations: every ``spans[-1].group`` is >=
+    ``start`` (the window always begins at ``start``), so ``start = spans[-1].group + 1``
+    strictly increases each pass, and ``start <= selected`` bounds it from above."""
+    selected = max(0, min(selected, len(GROUPS) - 1))
+    start = 0
+    while start <= selected:
+        spans = _tab_spans_from(width, start)
+        if not spans or spans[-1].group >= selected:
+            return spans
+        start = spans[-1].group + 1  # skip straight past the tabs that just scrolled off
+    return []
+
+
+def _tab_spans_from(width: int, start: int) -> list[TabSpan]:
+    """Spans for ``GROUPS[start:]`` anchored at `_TAB_X0`, stopping before the first tab
+    whose start would land past ``width - 1``; ``[]`` if none fit at all (including when
+    ``start >= len(GROUPS)``)."""
     spans = []
     x = _TAB_X0
-    for index, (name, _names) in enumerate(GROUPS):
+    for index, (name, _names) in enumerate(GROUPS[start:], start):
         end = x + len(name) + 4
         if x >= width - 1:
             break
-        spans.append((x, end, index, name))
+        spans.append(TabSpan(x, end, index, name))
         x = end
     return spans
 
@@ -436,7 +467,7 @@ def _handle_mouse(
     _id, mouse_x, mouse_y, _z, _bstate = curses.getmouse()
     if mouse_y == 1 and state.search is None:  # the tab bar
         _height, width = stdscr.getmaxyx()
-        for x, end, index, _name in _tab_spans(width):
+        for x, end, index, _name in _tab_spans(width, state.group):
             if x <= mouse_x < end:
                 state.group, state.row = index, 0
                 return settings, stored
@@ -521,7 +552,7 @@ def _draw(
     if state.search is not None:
         _safe_addstr(stdscr, 1, 0, f" / {state.search}", curses.color_pair(1) | curses.A_BOLD)
     else:
-        for x, _end, index, name in _tab_spans(width):
+        for x, _end, index, name in _tab_spans(width, state.group):
             attr = curses.color_pair(1) | curses.A_BOLD if index == state.group else curses.A_DIM
             _safe_addstr(stdscr, 1, x, f" {name} ", attr)
 

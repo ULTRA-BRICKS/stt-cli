@@ -208,3 +208,66 @@ def test_every_choice_offered_is_itself_a_value_apply_edit_accepts(
     for choice in configtui._choices()[key]:
         ok, _message = configtui.apply_edit(key, choice)
         assert ok, f"{key}={choice!r} from its own choice list was refused"
+
+
+# ── `_tab_spans` scrolling ────────────────────────────────────────────────────
+
+
+def test_tab_spans_scrolls_the_selected_group_into_view() -> None:
+    """The bug this fix targets: a width too narrow for every tab used to always start
+    the window at group 0, so navigating far enough right left the active category
+    off-screen with nothing anywhere highlighted."""
+    last = len(configtui.GROUPS) - 1
+    spans = configtui._tab_spans(40, last)
+    assert last in {span.group for span in spans}
+
+
+def test_tab_spans_starts_at_the_first_group_when_selection_is_early() -> None:
+    spans = configtui._tab_spans(200, 0)
+    assert spans[0].group == 0
+
+
+def test_tab_spans_clamps_an_out_of_range_selection_instead_of_going_blank() -> None:
+    """A `selected` past the real `GROUPS` list (stale state, a shrunk `GROUPS`) must
+    not blank the whole tab bar — clamp to the last real group instead."""
+    last = len(configtui.GROUPS) - 1
+    assert configtui._tab_spans(40, last + 5) == configtui._tab_spans(40, last)
+
+
+def test_tab_spans_is_empty_when_nothing_fits() -> None:
+    assert configtui._tab_spans(configtui._TAB_X0, 0) == []
+
+
+# ── launch()'s degrade-to-plain-list fallback ────────────────────────────────────
+
+
+def test_launch_falls_back_to_the_plain_list_on_a_curses_error(monkeypatch) -> None:
+    """A terminal too small or lacking TUI support raises `curses.error` out of
+    `curses.wrapper` — `launch` must catch it and hand off to the same plain listing
+    `stt config list` prints, never propagate the crash."""
+    import curses
+
+    from stt_cli.commands import config_cmd
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        # matches curses.wrapper(func, *args)'s real call signature, so a genuine
+        # curses.wrapper(_loop) call hits this too, not just a bare no-arg stub
+        raise curses.error("terminal too small")
+
+    monkeypatch.setattr(curses, "wrapper", _boom)
+    fallback_calls = 0
+
+    def _fake_list_settings() -> int:
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return 0
+
+    # patched on config_cmd, not configtui: `launch` imports `list_settings` lazily
+    # (`from .config_cmd import list_settings`) inside its except block, so the lookup
+    # at call time resolves whatever config_cmd.list_settings currently is.
+    monkeypatch.setattr(config_cmd, "list_settings", _fake_list_settings)
+
+    exit_code = configtui.launch()
+
+    assert fallback_calls == 1, "the plain-list fallback was never invoked"
+    assert exit_code == 0
