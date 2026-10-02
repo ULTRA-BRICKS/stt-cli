@@ -1375,6 +1375,55 @@ def test_config_set_still_works_on_an_ordinary_file() -> None:
     assert config.config_path().is_file()
 
 
+def test_unset_setting_removes_a_stored_key_back_to_its_default() -> None:
+    """The reset half of `save_setting`: a key that was stored disappears from the file and
+    `load_settings` answers with the built-in default again, not the value just removed."""
+    from stt_cli import config
+
+    config.ensure_dirs()
+    config.save_setting("language", "ru")
+    assert config.load_settings().language == "ru"
+
+    config.unset_setting("language")
+    assert config.load_settings().language is None
+    assert "language" not in config.stored()
+
+
+def test_unset_setting_on_a_key_never_stored_is_not_an_error_and_writes_nothing() -> None:
+    """`config.py`'s own rationale: making sure a setting is not overridden is sensible to
+    ask for whether or not anybody had overridden it — and asking must not touch the file
+    at all when there was nothing to remove."""
+    from stt_cli import config
+
+    config.ensure_dirs()
+    config.save_setting("language", "ru")
+    before = config.config_path().read_text("utf-8")
+
+    config.unset_setting("model")  # never stored
+
+    assert config.config_path().read_text("utf-8") == before
+    assert config.load_settings().language == "ru"
+
+
+def test_unset_setting_refuses_an_unknown_key_before_touching_the_file() -> None:
+    """`config_cmd._unset`'s docstring leans on this: 'No pre-check for an unknown key
+    here: config.unset_setting raises the same unknown_item itself, as the first thing it
+    does, before touching the file.' The refusal has to actually come first, or a typo'd
+    key would silently no-op (indistinguishable from 'never stored') instead of being
+    refused the same way `config set`/`config get` refuse one."""
+    from stt_cli import config
+    from stt_cli._errors import UnknownItemError
+
+    config.ensure_dirs()
+    config.save_setting("language", "ru")
+    before = config.config_path().read_text("utf-8")
+
+    with pytest.raises(UnknownItemError):
+        config.unset_setting("definitely-not-a-real-setting")
+
+    assert config.config_path().read_text("utf-8") == before
+
+
 def test_a_config_symlinked_into_a_dotfiles_checkout_stays_a_symlink(tmp_path) -> None:
     """Keeping `config.json` as a link into a dotfiles repository is an ordinary thing to do.
     The reader always followed the link; the writer has to as well, and it has to write

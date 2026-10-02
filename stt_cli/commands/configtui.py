@@ -218,15 +218,15 @@ class TuiState:
 def apply_edit(key: str, raw: str) -> tuple[bool, str]:
     """Coerce and store one typed value, the same way `stt config set` does — the TUI's
     edit prompt and the CLI command share this exact path (including the extra hotkey/mode
-    check `config_cmd._validate_extra` does — a bad chord is refused here too, with a clean
+    check `config_cmd.validate_extra` does — a bad chord is refused here too, with a clean
     message, instead of only failing later when a daemon tries to start), so an edit here
     can never accept something `stt config set` would refuse, or vice versa."""
     from .._errors import SttError
-    from .config_cmd import _validate_extra
+    from .config_cmd import validate_extra
 
     try:
         value = config.coerce(key, raw)
-        _validate_extra(key, value)
+        validate_extra(key, value)
         config.save_setting(key, value)
     except SttError as failed:
         return False, failed.what
@@ -278,6 +278,14 @@ _HELP_BAR = (
     "\u2191/\u2193 move  \u2190/\u2192 tab  Enter edit  Space toggle  r reset  / search  q quit"
 )
 
+# Key codes curses hands `_handle`/`_handle_search`/`_prompt` for the same handful of
+# physical keys — named once so a call site reads "escape"/"tab"/"enter"/"backspace"
+# instead of a reader having to recognize `27`/`9`/`(10, 13, ...)`/`(127, 8, ...)` again.
+_ESCAPE = 27
+_TAB_KEY = 9
+_ENTER_CODES = (10, 13, curses.KEY_ENTER)
+_BACKSPACE_CODES = (curses.KEY_BACKSPACE, 127, 8)
+
 
 def launch() -> int:
     """Entry point `commands/config_cmd.py` calls for a bare, interactive `stt config`."""
@@ -327,13 +335,13 @@ def _handle(
 ) -> tuple[config.Settings, dict[str, Any], bool]:
     if state.search is not None:
         return _handle_search(state, key, settings, stored)
-    if key in (ord("q"), 27):  # q or plain Escape
+    if key in (ord("q"), _ESCAPE):  # q or plain Escape
         return settings, stored, False
     if key in (curses.KEY_UP, ord("k")):
         state.move(-1)
     elif key in (curses.KEY_DOWN, ord("j")):
         state.move(1)
-    elif key in (curses.KEY_LEFT, ord("h"), 9):  # Tab also cycles groups
+    elif key in (curses.KEY_LEFT, ord("h"), _TAB_KEY):  # Tab also cycles groups
         state.prev_group()
     elif key in (curses.KEY_RIGHT, ord("l")):
         state.next_group()
@@ -346,7 +354,7 @@ def _handle(
             state.message_ok = ok
             if ok:
                 settings, stored = _reload()
-    elif key in (10, 13, curses.KEY_ENTER, ord(" ")):
+    elif key in (*_ENTER_CODES, ord(" ")):
         settings, stored = _activate(stdscr, state, settings, stored, toggle_only=key == ord(" "))
     elif key == curses.KEY_MOUSE:
         settings, stored = _handle_mouse(stdscr, state, settings, stored)
@@ -359,13 +367,13 @@ def _handle_search(
     settings: config.Settings,
     stored: dict[str, Any],
 ) -> tuple[config.Settings, dict[str, Any], bool]:
-    if key in (27, 10, 13, curses.KEY_ENTER):  # Escape or Enter both leave search mode
+    if key in (_ESCAPE, *_ENTER_CODES):  # Escape or Enter both leave search mode
         state.end_search()
     elif key == curses.KEY_UP:
         state.move(-1)
     elif key == curses.KEY_DOWN:
         state.move(1)
-    elif key in (curses.KEY_BACKSPACE, 127, 8):
+    elif key in _BACKSPACE_CODES:
         state.type_search((state.search or "")[:-1])
     elif 32 <= key < 127:
         state.type_search((state.search or "") + chr(key))
@@ -472,17 +480,17 @@ def _prompt(stdscr: curses.window, key: str, current: object) -> str | None:
         with contextlib.suppress(curses.error):
             stdscr.move(height - 1, min(len(line) + cursor, max(0, width - 2)))
         code = stdscr.getch()
-        if code in (27,):
+        if code == _ESCAPE:
             curses.curs_set(0)
             return None
-        if code in (10, 13, curses.KEY_ENTER):
+        if code in _ENTER_CODES:
             curses.curs_set(0)
             return buf
-        if code == 9 and choices:  # Tab: cycle to the next fixed choice
+        if code == _TAB_KEY and choices:  # Tab: cycle to the next fixed choice
             here = choices.index(buf) if buf in choices else -1
             buf = choices[(here + 1) % len(choices)]
             cursor = len(buf)
-        elif code in (curses.KEY_BACKSPACE, 127, 8):
+        elif code in _BACKSPACE_CODES:
             buf, cursor = buf[: max(0, cursor - 1)] + buf[cursor:], max(0, cursor - 1)
         elif code == curses.KEY_LEFT:
             cursor = max(0, cursor - 1)

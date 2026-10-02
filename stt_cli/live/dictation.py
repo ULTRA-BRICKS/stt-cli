@@ -459,10 +459,32 @@ class _Toggle:
 
 @dataclass
 class _Active:
-    """The one burst currently open, if any — so a signal or the tap can reach it."""
+    """The one burst currently open, if any — so a signal or the tap can reach it.
 
-    stopper: _Stopper | None = None
-    session: Session | None = None
+    `session` and `stopper` open and close together, never independently. The fields are
+    private and exposed only as read-only properties, so `open`/`close` are not just the
+    ADVISED way to change either — they are the only way; nothing outside this class can
+    set one without the other (or set either at all).
+    """
+
+    _stopper: _Stopper | None = None
+    _session: Session | None = None
+
+    @property
+    def stopper(self) -> _Stopper | None:
+        return self._stopper
+
+    @property
+    def session(self) -> Session | None:
+        return self._session
+
+    def open(self, dictating: Session) -> None:
+        self._session = dictating
+        self._stopper = _Stopper(dictating)
+
+    def close(self) -> None:
+        self._session = None
+        self._stopper = None
 
 
 async def _idle_loop(
@@ -475,15 +497,22 @@ async def _idle_loop(
 ) -> None:
     """Idle with the microphone closed until the hotkey fires, dictate, and repeat."""
     loop = asyncio.get_running_loop()
-    marker = tap.new_marker()
     shutdown = asyncio.Event()
-    toggle = _Toggle(loop)
-    active = _Active()
+    ctx = _BurstArgs(
+        args=args,
+        device=device,
+        models=models,
+        settings=settings,
+        marker=tap.new_marker(),
+        active=_Active(),
+        toggle=_Toggle(loop),
+        mode=mode,
+    )
 
     def _stop_everything() -> None:
         shutdown.set()
-        if active.session is not None:
-            active.session.stop()
+        if ctx.active.session is not None:
+            ctx.active.session.stop()
 
     # ONE handler for the daemon's whole lifetime, not per burst — see the `interruptible`
     # note on `_through_the_microphone`. `stt mic stop` sends SIGTERM; Ctrl-C (SIGINT) is the
@@ -491,14 +520,14 @@ async def _idle_loop(
     handled = [
         sig for sig in (signal.SIGTERM, signal.SIGINT) if _try_handle(loop, sig, _stop_everything)
     ]
-    watcher = _watch_daemon(marker, combo, toggle, active)
+    watcher = _watch_daemon(ctx.marker, combo, ctx.toggle, ctx.active)
     try:
         status.note(
             f"stt mic daemon ready — {mode} {combo.spec} to dictate; `stt mic stop` to quit",
             quiet=args.quiet,
         )
         while not shutdown.is_set():
-            pressed = await _next_hotkey_edge(toggle, shutdown)
+            pressed = await _next_hotkey_edge(ctx.toggle, shutdown)
             if not pressed or shutdown.is_set():
                 # The second check is belt-and-braces over `_next_hotkey_edge`'s own
                 # shutdown-wins-the-race guard: a burst must never start once stop has been
@@ -513,7 +542,7 @@ async def _idle_loop(
             # typed the words where they were meant to go; the log only needs to know it
             # ran, which `status.opened`/`status.closed` (inside `_burst`) already say.
             try:
-                await _burst(args, device, models, settings, marker, active, toggle, mode)
+                await _burst(ctx)
             except Exception as failed:
                 # A burst failing (the mic unplugged mid-recording, a decode error) must not
                 # take the whole daemon down with it — this docstring promises only SIGTERM/
@@ -565,37 +594,47 @@ async def _next_hotkey_edge(toggle: _Toggle, shutdown: asyncio.Event) -> bool:
                 task.cancel()
 
 
-async def _burst(
-    args: argparse.Namespace,
-    device: capture.Device,
-    models: Models,
-    settings: config.Settings,
-    marker: int,
-    active: _Active,
-    toggle: _Toggle,
-    mode: str,
-) -> str:
+@dataclass(slots=True, frozen=True)
+class _BurstArgs:
+    """One burst's whole environment, built once in `_idle_loop` and reused for every
+    activation — bundled so `_burst` takes one argument instead of the eight positional
+    parameters it used to take separately. Frozen: the REFERENCES are fixed for the whole
+    daemon lifetime, `_idle_loop` never rebinds any of them — `active`'s open/closed state
+    and `toggle`'s queue still change from one burst to the next, through their own methods."""
+
+    args: argparse.Namespace
+    device: capture.Device
+    models: Models
+    settings: config.Settings
+    marker: int
+    active: _Active
+    toggle: _Toggle
+    mode: str
+
+
+async def _burst(ctx: _BurstArgs) -> str:
     """One activation: open the microphone, dictate, close it, and hand control back to idle."""
-    line = status.Line(enabled=not args.quiet)
+    line = status.Line(enabled=not ctx.args.quiet)
     dictating = Session(
-        typist=Typist(keys=_Keys(marker=marker)),
-        settled=models.settled,
-        draft=models.draft,
-        terms=dictionary.load() if settings.dictionary else dictionary.Dictionary(),
-        bias=bool(settings.dictionary and settings.dict_bias),
+        typist=Typist(keys=_Keys(marker=ctx.marker)),
+        settled=ctx.models.settled,
+        draft=ctx.models.draft,
+        terms=dictionary.load() if ctx.settings.dictionary else dictionary.Dictionary(),
+        bias=bool(ctx.settings.dictionary and ctx.settings.dict_bias),
         refuse=phrases.compile_all(phrases.load_user_patterns(config.app_home()))[0],
-        idle_after=_idle_seconds(args),
+        idle_after=_idle_seconds(ctx.args),
         report=lambda progress: line.show(_paint(progress)),
-        gate=gate_for(settings),
+        gate=gate_for(ctx.settings),
     )
-    active.session = dictating
-    active.stopper = _Stopper(dictating)
+    ctx.active.open(dictating)
     try:
-        status.note(f"listening on {device.name} — {_off_hint(mode)}", quiet=args.quiet)
+        status.note(f"listening on {ctx.device.name} — {_off_hint(ctx.mode)}", quiet=ctx.args.quiet)
         burst = asyncio.create_task(
-            _through_the_microphone(device, dictating, line, quiet=args.quiet, interruptible=False)
+            _through_the_microphone(
+                ctx.device, dictating, line, quiet=ctx.args.quiet, interruptible=False
+            )
         )
-        off = asyncio.create_task(_await_release(toggle, mode))
+        off = asyncio.create_task(_await_release(ctx.toggle, ctx.mode))
         done, _pending = await asyncio.wait({burst, off}, return_when=asyncio.FIRST_COMPLETED)
         if off in done and not burst.done():
             dictating.stop()
@@ -603,10 +642,9 @@ async def _burst(
             off.cancel()
         return await burst
     finally:
-        active.session = None
-        active.stopper = None
+        ctx.active.close()
         line.clear()
-        await status.closed(said=dictating.transcript, quiet=args.quiet)
+        await status.closed(said=dictating.transcript, quiet=ctx.args.quiet)
 
 
 async def _await_release(toggle: _Toggle, mode: str) -> None:
