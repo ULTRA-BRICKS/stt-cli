@@ -1081,7 +1081,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
-    { name = "setuptools" },
 ]
 diarize = [
     { name = "pyannote-audio" },
@@ -1096,7 +1095,6 @@ suggest = [
 test = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "setuptools" },
 ]
 
 [package.metadata]
@@ -1110,8 +1108,6 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'test'" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "setuptools", marker = "extra == 'dev'", specifier = ">=70.1" },
-    { name = "setuptools", marker = "extra == 'test'", specifier = ">=70.1" },
     { name = "torch", marker = "extra == 'diarize'", specifier = ">=2.2" },
 ]
 provides-extras = ["mlx", "diarize", "service", "suggest", "test", "dev"]

@@ -1,27 +1,4 @@
-# CodeQL SELF-GATE — for a PRIVATE repo WITHOUT GitHub Advanced Security, run via the
-# OPEN-SOURCE CodeQL CLI directly (NOT github/codeql-action).
-#
-# WHY NOT github/codeql-action (stt-cli#55): it is not just an orchestration wrapper
-# around the CLI — its FIRST network call (`getGitHubVersionFromApi` in codeql-action's
-# api-client.ts) is `apiClient.rest.meta.get()` against `${GITHUB_API_URL}/meta`, GitHub's
-# REST "meta" endpoint used to tell GHES apart from dotcom. Forgejo's Gitea-compatible API
-# has no such route, so on this host every codeql-action invocation 404s before any
-# analysis starts — every run, unconditionally, regardless of what changed. Reproduced
-# byte-for-byte: `curl https://<forgejo-host>/api/v1/meta` returns the exact literal
-# "404 page not found" body the Action logged (`::error::404 page not found`). This is not
-# an environment gap (no missing CLI, no cache dir to create) — codeql-action is
-# architecturally coupled to GitHub's REST API surface and cannot be pointed at a Forgejo
-# instance. So this workflow drives the real, open-source CodeQL CLI directly: each matrix
-# job downloads ONE per-language "slim" bundle straight from a codeql-action GitHub
-# *release asset* — a plain public HTTPS download, not a GitHub API call, so it works from
-# any git host because it never asks the git host anything — then runs
-# `codeql database create` / `codeql database analyze` itself. Everything downstream (SARIF
-# shape, the in-job gate below, the suppression syntax already used elsewhere in this repo's
-# workflows) is unchanged: codeql-action was only ever a thin wrapper around these same two
-# CLI commands. Verified end-to-end against this repo's actual source (Docker, linux/amd64):
-# python and javascript-typescript both come back clean; the `actions` language finds the 4
-# real, pre-existing, already-`codeql[...]`-suppressed findings in dependency-review.yml /
-# leftover-grep.yml and correctly suppresses them, landing on a genuine gated=0 pass.
+# CodeQL SELF-GATE — for a PRIVATE repo WITHOUT GitHub Advanced Security.
 #
 # Without GHAS, the Code Scanning dashboard is unavailable: uploading SARIF 403s
 # ("Advanced Security must be enabled"), so the normal `codeql/workflow.yml` can't gate.
@@ -42,22 +19,11 @@
 # contiguous comment block directly above it carries `// codeql[<exact-rule-id>]` (a
 # multi-line justification works; the walk stops at the first blank/non-comment line so a
 # marker can't leak across statements). Keeps suppressions greppable, reviewable, and
-# reasoned — not a silent baseline. This gate always implements suppression itself; it
-# never runs codeql-action's own alert-suppression queries, since it never runs
-# codeql-action at all.
+# reasoned — not a silent baseline. (When `upload:false`, codeql-action does NOT run its
+# own alert-suppression queries, so this gate implements suppression itself.)
 #
-# BUNDLE PINNING: CODEQL_BUNDLE_VERSION below (env) pins the exact codeql-action release
-# tag the per-language bundle is downloaded from. Unlike the SHA-pinned actions elsewhere in
-# this repo, a release TAG (and its assets) is technically mutable on GitHub, and
-# codeql-action does not publish per-asset checksums for the per-language bundles (only for
-# the full multi-language bundle) — so this workflow pins its own: the SHA-256 of each of the
-# three per-language assets, computed directly from this exact CODEQL_BUNDLE_VERSION and
-# hardcoded in the download step, verified BEFORE the downloaded tarball is extracted or any
-# part of it executed. (A `codeql version` string match runs as a secondary sanity check
-# AFTER that — it catches a stale/typo'd hash table, not a supply-chain attack; verifying a
-# binary's own self-reported version necessarily means already having executed it once.)
-# Bump CODEQL_BUNDLE_VERSION and all three SHA-256 hashes together; each matrix job downloads
-# only the ~100-140MB slim bundle for its own language.
+# LANGUAGES / PINNING: same as ci/codeql/workflow.yml — edit the matrix; codeql-action is
+# pinned by major tag per GitHub convention.
 #
 # LANGUAGE NOT PRESENT IN THE REPO (resilience): the matrix ships with a broad default set
 # (javascript-typescript + actions). If a repo has NO source for a matrix language (e.g. a
@@ -84,17 +50,14 @@ concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
 
-# No `security-events: write` — this gate does NOT upload to Code Scanning (no GHAS). No
-# `actions: read` either — that was only ever needed by codeql-action's own API calls.
+# No `security-events: write` — this gate does NOT upload to Code Scanning (no GHAS).
 permissions:
+  actions: read
   contents: read
 
 env:
   # Severity floor — which SARIF levels fail the job. See header.
   GATE_LEVELS: 'error warning'
-  # Exact codeql-action release tag the per-language CLI bundle is downloaded from. See
-  # "BUNDLE PINNING" in the header for why this pins a tag instead of a SHA/checksum.
-  CODEQL_BUNDLE_VERSION: 'codeql-bundle-v2.27.1'
 
 jobs:
   analyze:
@@ -108,8 +71,8 @@ jobs:
             build-mode: none
           - language: actions
             build-mode: none
-          - language: python
-            build-mode: none
+          # - language: python
+          #   build-mode: none
 
     steps:
       - name: Checkout
@@ -168,147 +131,27 @@ jobs:
             echo "::notice title=CodeQL ${LANGUAGE} skipped::No ${LANGUAGE} source found in this repo — skipping CodeQL for this language (nothing to scan). This is a clean skip, not a failure. Remove '${LANGUAGE}' from the matrix to drop this notice, or add source to enable the gate."
           fi
 
-      - name: Resolve bundle language + CLI dir
-        # Maps the matrix's codeql-action-style language name to the codeql-action release
-        # asset name (`javascript-typescript` -> `javascript`; python/actions match as-is)
-        # and to the qlpack prefix the security-extended suite path uses below.
+      - name: Initialize CodeQL
         if: steps.detect.outputs.has_source == 'true'
-        id: cli
-        shell: bash
-        env:
-          LANGUAGE: ${{ matrix.language }}
-        run: |
-          set -euo pipefail
-          case "$LANGUAGE" in
-            javascript-typescript) BUNDLE_LANG=javascript ;;
-            *) BUNDLE_LANG="$LANGUAGE" ;;
-          esac
-          echo "bundle-lang=${BUNDLE_LANG}" >> "$GITHUB_OUTPUT"
-          echo "dir=${RUNNER_TEMP:-/tmp}/codeql-cli-${BUNDLE_LANG}" >> "$GITHUB_OUTPUT"
-
-      - name: Download CodeQL CLI (per-language bundle, direct GitHub release asset)
-        if: steps.detect.outputs.has_source == 'true'
-        shell: bash
-        env:
-          BUNDLE_LANG: ${{ steps.cli.outputs.bundle-lang }}
-          CLI_DIR: ${{ steps.cli.outputs.dir }}
-        run: |
-          set -euo pipefail
-          # zstd (the CLI, not just libzstd) is required to unpack the bundle; not every
-          # runner image ships it, so install it once if missing.
-          command -v zstd >/dev/null 2>&1 || {
-            if command -v sudo >/dev/null 2>&1; then
-              sudo apt-get update -qq && sudo apt-get install -y -qq zstd
-            else
-              apt-get update -qq && apt-get install -y -qq zstd
-            fi
-          }
-          asset="codeql-bundle-${BUNDLE_LANG}-linux64.tar.zst"
-          url="https://github.com/github/codeql-action/releases/download/${CODEQL_BUNDLE_VERSION}/${asset}"
-          echo "Downloading ${url}"
-          dest="${RUNNER_TEMP:-/tmp}/${asset}"
-          curl -fsSL --max-time 300 --retry 3 -o "$dest" "$url"
-          # Verify the downloaded tarball's SHA-256 BEFORE extracting or executing ANYTHING
-          # from it: github/codeql-action publishes no checksum for these per-language slim
-          # assets (only for the full multi-language bundle), so the three hashes below were
-          # computed directly from this exact CODEQL_BUNDLE_VERSION's release assets and are
-          # pinned here the same way a SHA-pinned action pins a commit — re-verify and update
-          # both together on every CODEQL_BUNDLE_VERSION bump. This is a REAL pre-execution
-          # integrity gate, unlike the post-extraction `codeql version` string check below: a
-          # moved/re-pushed tag or a replaced release asset now fails closed here, before the
-          # `tar` archive is even opened, rather than after the CLI binary has already run.
-          case "$BUNDLE_LANG" in
-            python)     expected_sha256="ea86393c6c812542ae5a3a7122bcc760873707a50b25cc47d2fd7cfd514b0cb0" ;;
-            javascript) expected_sha256="8d30281899f150633913b08cf4eae755be607f282d643ad418ad638f4210e833" ;;
-            actions)    expected_sha256="71247327cf3afe4115acc546fe3ac77f2865928205d7688d6a0b7153e055603f" ;;
-            *)
-              echo "::error::CodeQL CLI download: no pinned SHA-256 for bundle language '${BUNDLE_LANG}' — add one (see this step's comment) before adding a new matrix language. Refusing to run an unverified download." >&2
-              exit 1
-              ;;
-          esac
-          actual_sha256="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}')"
-          if [ -z "$actual_sha256" ]; then
-            actual_sha256="$(shasum -a 256 "$dest" | awk '{print $1}')"
-          fi
-          if [ "$actual_sha256" != "$expected_sha256" ]; then
-            echo "::error::CodeQL CLI download: SHA-256 mismatch for ${asset} — expected ${expected_sha256}, got ${actual_sha256}. The release tag/asset may have moved out from under this pin, or the download was tampered with in transit. Refusing to extract or run it." >&2
-            exit 1
-          fi
-          mkdir -p "$CLI_DIR"
-          tar -xf "$dest" -C "$CLI_DIR"
-          rm -f "$dest"
-          # Secondary sanity check, AFTER the real (pre-extraction) SHA-256 integrity gate
-          # above: confirms the extracted CLI's own self-reported version agrees with
-          # CODEQL_BUNDLE_VERSION, catching a copy/paste error in the hash table itself rather
-          # than a supply-chain attack (that's the SHA-256 check's job). One call, captured and
-          # echoed, rather than running the binary twice.
-          version_output="$("$CLI_DIR/codeql/codeql" version)"
-          echo "$version_output"
-          expected_version="${CODEQL_BUNDLE_VERSION#codeql-bundle-v}"
-          # Match the CLI's own stable, long-documented plain-text format ("CodeQL
-          # command-line toolchain release X.Y.Z.") rather than a specific --format value,
-          # since that text has been consistent across CLI releases for years.
-          case "$version_output" in
-            *"release ${expected_version}."*) ;;
-            *)
-              echo "::error::CodeQL CLI version mismatch: expected release ${expected_version} (from CODEQL_BUNDLE_VERSION=${CODEQL_BUNDLE_VERSION}) but the downloaded bundle reports: ${version_output} — the pinned SHA-256 table above may be stale for this CODEQL_BUNDLE_VERSION. Refusing to run a CLI build that does not match." >&2
-              exit 1
-              ;;
-          esac
-
-      - name: Set up Python (the python extractor needs python3 on PATH even with build-mode=none)
-        if: steps.detect.outputs.has_source == 'true' && matrix.language == 'python'
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        uses: github/codeql-action/init@v4
         with:
-          python-version: "3.12"
-
-      - name: Create CodeQL database
-        if: steps.detect.outputs.has_source == 'true'
-        shell: bash
-        env:
-          BUILD_MODE: ${{ matrix.build-mode }}
-          BUNDLE_LANG: ${{ steps.cli.outputs.bundle-lang }}
-          CLI_DIR: ${{ steps.cli.outputs.dir }}
-        run: |
-          set -euo pipefail
-          # Use BUNDLE_LANG (the codeql-CLI-native id), not the raw matrix language: the CLI
-          # has no `javascript-typescript` alias (that's a codeql-action-only name) — create
-          # must match the language the downloaded bundle/extractor actually is, same as the
-          # analyze step below already does.
-          "$CLI_DIR/codeql/codeql" database create "${RUNNER_TEMP:-/tmp}/codeql-db" \
-            --language="$BUNDLE_LANG" --source-root="$GITHUB_WORKSPACE" \
-            --build-mode="${BUILD_MODE:-none}"
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
 
       - name: Perform CodeQL Analysis
         if: steps.detect.outputs.has_source == 'true'
-        shell: bash
-        env:
-          BUNDLE_LANG: ${{ steps.cli.outputs.bundle-lang }}
-          CLI_DIR: ${{ steps.cli.outputs.dir }}
-        run: |
-          set -euo pipefail
-          mkdir -p sarif-results
-          "$CLI_DIR/codeql/codeql" database analyze "${RUNNER_TEMP:-/tmp}/codeql-db" \
-            --format=sarif-latest \
-            --output="sarif-results/${BUNDLE_LANG}.sarif" \
-            --sarif-add-baseline-file-info \
-            "codeql/${BUNDLE_LANG}-queries:codeql-suites/${BUNDLE_LANG}-security-extended.qls"
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:${{ matrix.language }}'
+          # No GHAS → the dashboard upload 403s. Keep the SARIF, gate on it below.
+          upload: false
+          output: sarif-results
 
       - name: Upload SARIF artifact
         # Publish the raw SARIF even on a gate failure, so it's downloadable
         # (`gh run download`) for triage. Skipped when the language wasn't analyzed.
-        # continue-on-error (stt-cli#55): this Forgejo instance's Actions runner rejects
-        # the actions/artifact v2.0.0+ protocol upload-artifact@v4 speaks ("GHESNotSupportedError:
-        # ...v2.0.0+...are not currently supported on GHES"), unconditionally, on every run,
-        # regardless of the SARIF content -- reproduced live on stt-cli#73: the CodeQL
-        # analysis and the real gate below it both genuinely ran and passed (0 gated
-        # findings for python/javascript-typescript, 4 correctly in-source-suppressed
-        # findings for actions) but the job still reported failed solely because this
-        # best-effort archival step errored. The actual security gate is the next step,
-        # not this one -- a triage convenience that can't work on this host must not fail
-        # the gate it has nothing to do with.
         if: always() && steps.detect.outputs.has_source == 'true'
-        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: codeql-sarif-${{ matrix.language }}

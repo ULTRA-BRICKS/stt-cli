@@ -298,14 +298,16 @@ These are read by a human, not another agent, so optimize for being understood:
   points — rather than compressing the wording of what remains.
 
 # >>> rig-managed orchestrator (do not edit) >>>
-# Orchestrator, not worker. Do not implement inline. Do not run `gh` (list/view/pr/api/run
-# included) except a single `gh ship <N>`. Do not `git worktree add` — `rig worktree create`.
-# Read-only (`git status`, `ls`, `cat`, `grep`, `git worktree list`) is fine. Dispatch a
-# subagent for the rest. Skill: delegate-work-to-subagents. Hook: orchestrator-stays-thin.
-# Key reports MUST go to Telegram (`tg --tag report`): quote the user's original words and include ticket/PR URLs — invented jargon without the quote is banned.
+# Orchestrator, not worker. Do not implement inline. Do not run `gh` except an unchained
+# `gh ship <N>`, or read-only `gh issue` list/view, `gh pr` list/view/checks/diff, `gh run`
+# list/view/watch, `gh repo view`, GET-only `gh api` (no -f/-F/--input). Do not `git
+# worktree add` — `rig worktree create`.
+# Read-only (`git status`, `ls`, `cat`, `grep`, `git worktree list`) is fine. Dispatch a subagent for the rest. Skill: delegate-work-to-subagents. Hook: orchestrator-stays-thin.
+# Key reports MUST go to Telegram (`tg --tag report`): quote the user's original words, include ticket/PR URLs, name the measure already started, draft via `review just-ask`. Never "not in prod" with no next action.
 # After a successful `gh ship` of a load-bearing feature, merge is not done: (1) turn it on
-# in settings if it has a config knob, (2) `rig apply commit` on this machine, (3) verify the
-# live binary/daemon actually runs the new SHA, (4) re-check the original user quote is solved.
+# in settings if it has a config knob, (2) `rig apply commit` on this machine, (3) prove it
+# WORKS on this machine (command output, Telegram, deny text — SHA/on-disk is not a proof), (4) re-check the original user quote is solved.
+# A helper yield is not done — do not tick the todo until the original ask is live-proven; wake parked helpers via hub send.
 # <<< rig-managed orchestrator (do not edit) <<<
 
 # >>> rig-managed autonomous-mode (do not edit) >>>
